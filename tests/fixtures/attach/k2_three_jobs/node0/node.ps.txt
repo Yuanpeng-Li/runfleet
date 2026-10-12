@@ -1,0 +1,18 @@
+2102377
+2102376 2102363 2102363       0  0.0  0.0  6288 S    sshd: alice0001@notty
+2102377 2102376 2102377       0  0.0  0.0  5872 Ss   bash -c  echo "-- self cgroup: $(cat /proc/self/cgroup)" echo "-- ps (user procs, forest)"; timeout 10 ps -u $USER -o pid,ppid,etimes,pcpu,rss,stat,args --f
+2102438 2102377 2102377       0  0.0  0.0  1008 S    timeout 10 ps -u alice0001 -o pid,ppid,etimes,pcpu,rss,stat,args --forest
+2102440 2102438 2102377       0  0.0  0.0  3784 R    ps -u alice0001 -o pid,ppid,etimes,pcpu,rss,stat,args --forest
+2102439 2102377 2102377       0  0.0  0.0   944 S    cut -c1-200
+2023571 2022777 2023571   56893  0.0  0.0  3476 S    /bin/bash /var/spool/slurm/d/job2332863/slurm_script --config configs/exp_a.yaml data=cifar chunk=2 seeds=43
+2023669 2023571 2023571   56892  0.0  0.0  3212 S    bash scripts/run_chunk.sh configs/exp_a.yaml 2 --seeds 43
+2023727 2023669 2023571   56890  0.0  0.0 21236 S    python -m orb.launch --manifest manifests/cif_s43__2.txt --per-gpu 1
+2023741 2023727 2023571   56889  106  2.1 10778856 Sl   /shared/pilab/pilab/orb/.venv/bin/python -m orb.train --config configs/exp_a.yaml data=cifar sched=cosinewarm seed=43 run_dir=runs/cifar/baselin
+2023572 2022607 2023572   56893  0.0  0.0  3360 S    /bin/bash /var/spool/slurm/d/job2332861/slurm_script --config configs/exp_a.yaml data=cifar chunk=0 seeds=43
+2023671 2023572 2023572   56892  0.0  0.0  3088 S    bash scripts/run_chunk.sh configs/exp_a.yaml 0 --seeds 43
+2023728 2023671 2023572   56890  0.0  0.0 21304 S    python -m orb.launch --manifest manifests/cif_s43__0.txt --per-gpu 1
+2023738 2023728 2023572   56889  106  2.0 10669748 Sl   /shared/pilab/pilab/orb/.venv/bin/python -m orb.train --config configs/exp_a.yaml data=cifar sched=warmup seed=43 run_dir=runs/cifar/baseline-wa
+2023570 2022524 2023570   56893  0.0  0.0  3428 S    /bin/bash /var/spool/slurm/d/job2332862/slurm_script --config configs/exp_a.yaml data=cifar chunk=1 seeds=43
+2023693 2023570 2023570   56892  0.0  0.0  3184 S    bash scripts/run_chunk.sh configs/exp_a.yaml 1 --seeds 43
+2023735 2023693 2023570   56890  0.0  0.0 21276 S    python -m orb.launch --manifest manifests/cif_s43__1.txt --per-gpu 1
+2023739 2023735 2023570   56889  106  2.0 10683816 Sl   /shared/pilab/pilab/orb/.venv/bin/python -m orb.train --config configs/exp_a.yaml data=cifar sched=const seed=43 run_dir=runs/cifar/baseline-con

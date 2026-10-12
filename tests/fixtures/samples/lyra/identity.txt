@@ -1,0 +1,12 @@
+login-a02
+alice07
+SHELL=/bin/bash
+/home/alice07:/bin/bash
+HOME=/home/alice07
+10.200.10.77:/export/home/alice07 nfs4    52428800 36700160  15728640      70% /home/alice07
+fstype=nfs
+VERSION_ID="9.7"
+PRETTY_NAME="Rocky Linux 9.7 (Blue Onyx)"
+5.14.0-611.55.1.el9_7.x86_64
+48
+3.42 2.37 1.95 4/1017 2241870

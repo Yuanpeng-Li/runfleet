@@ -1,0 +1,2 @@
+    PID    PPID USER     ELAPSED %CPU %MEM COMMAND
+ 363948  363942 alice07    68044  100  0.8 /home/alice07/projects/orb/.venv/bin/python -m orb.train --config configs/exp_a.yaml data=voc sched=cosinewarm seed=44 run_dir=runs/voc/baseline-cosinewarm/s44

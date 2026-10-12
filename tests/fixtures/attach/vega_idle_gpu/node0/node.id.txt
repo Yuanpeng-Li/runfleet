@@ -1,0 +1,3 @@
+n-37-08
+0::/system.slice/n-37-08_slurmstepd.scope/job_724655/step_extern/user/task_0
+J=724655 G=

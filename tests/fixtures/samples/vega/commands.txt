@@ -1,0 +1,17 @@
+squeue /usr/bin/squeue
+sacct /usr/bin/sacct
+sinfo /usr/bin/sinfo
+scontrol /usr/bin/scontrol
+sshare /usr/bin/sshare
+sprio /usr/bin/sprio
+sstat /usr/bin/sstat
+sacctmgr /usr/bin/sacctmgr
+sbank MISSING
+srun /usr/bin/srun
+nvidia-smi MISSING
+python3 /usr/bin/python3
+jq /usr/bin/jq
+timeout /usr/bin/timeout
+tmux /usr/bin/tmux
+Python 3.9.25
+jq-1.6

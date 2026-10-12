@@ -1,0 +1,7 @@
+## slurm.attach.node0
+rc=255 ms=295
+stderr:
+alice07@lyra-gpu-s71-02: Permission denied (publickey,gssapi-keyex,gssapi-with-mic,password,hostbased).
+
+## slurm.attach.audit
+rc=0 ms=58

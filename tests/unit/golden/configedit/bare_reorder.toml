@@ -1,0 +1,10 @@
+[[host]]
+name = "lyra"
+
+[[host]]
+name = "k2"
+
+# vega: slow logins
+[[host]]
+name = "vega"
+connect_timeout = "120s"

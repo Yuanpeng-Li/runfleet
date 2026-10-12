@@ -1,0 +1,63 @@
+## identity
+cmd: hostname; whoami; echo "SHELL=$SHELL"; getent passwd "$USER" | cut -d: -f6,7; echo "HOME=$HOME"; df -PT "$HOME" | tail -1; grep -E "^(PRETTY_NAME|VERSION_ID)=" /etc/os-release; uname -r
+rc=0 ms=17
+
+## commands
+cmd: for c in nvidia-smi python3 jq timeout tmux squeue nvitop gpustat; do printf "%s " "$c"; command -v "$c" || echo MISSING; done; python3 --version 2>&1
+rc=0 ms=6
+
+## os_release
+cmd: cat /etc/os-release
+rc=0 ms=4
+
+## nvidia_smi_version
+cmd: nvidia-smi --version
+rc=0 ms=78
+
+## gpu_query
+cmd: nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits
+rc=0 ms=107
+
+## gpu_query_header
+cmd: nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,fan.speed,pstate,clocks.sm,utilization.memory --format=csv
+rc=0 ms=107
+
+## gpu_query_timing
+cmd: for i in 1 2 3; do s=$(date +%s%N); nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits >/dev/null; e=$(date +%s%N); echo "run$i $(( (e-s)/1000000 ))ms"; done
+rc=0 ms=305
+
+## compute_apps
+cmd: nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits
+rc=0 ms=83
+
+## compute_apps_header
+cmd: nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv
+rc=0 ms=82
+
+## gpu_pids_ps
+cmd: p=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader | tr -d " " | sort -u | paste -sd, -); [ -n "$p" ] && ps -ww -o pid,ppid,user,etimes,pcpu,pmem,args -p "$p"
+rc=0 ms=146
+
+## nvidia_smi_full
+cmd: nvidia-smi
+rc=0 ms=958
+
+## resources
+cmd: nproc; free -b; cat /proc/loadavg; uptime
+rc=0 ms=11
+
+## proc_stat
+cmd: head -1 /proc/stat; sleep 1; head -1 /proc/stat
+rc=0 ms=1011
+
+## meminfo
+cmd: grep -E "^(MemTotal|MemAvailable|SwapTotal|SwapFree):" /proc/meminfo
+rc=0 ms=7
+
+## top_procs
+cmd: ps -eo pid,user,etimes,pcpu,pmem,rss,comm --sort=-pcpu | head -20
+rc=0 ms=39
+
+## my_procs
+cmd: ps -u "$USER" -o pid,ppid,etimes,pcpu,pmem,stat,args -ww | head -30
+rc=0 ms=37

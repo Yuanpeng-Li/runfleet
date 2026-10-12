@@ -1,0 +1,8 @@
+#!/bin/sh
+# mock sstat: sstat_running; when TRESUsageInTot is requested the fixture (which predates it) gets Tot = Ave
+. "$RF_MOCK_BIN/_lib.sh"
+mock_log sstat "$@"; mock_env sstat; mock_fail SSTAT
+case "$*" in
+  *TRESUsageInTot*) awk -F'|' '{print $0 "|" $6}' "$(fixture SSTAT sstat_running)" ;;
+  *) cat "$(fixture SSTAT sstat_running)" ;;
+esac

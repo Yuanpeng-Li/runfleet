@@ -1,0 +1,28 @@
+723087|orb-swp--train--warmup--s45--a01|COMPLETED|0:0|10:32:18|2026-09-04T20:50:09|2026-09-05T07:22:27|n-37-06|billing=8,cpu=8,gres/gpu:nvidia_h200_nvl=1,gres/gpu=1,mem=48G,node=1|h200|/shared/pilab/pilab/orb
+723088|orb-swp--train--const--s45--a01|COMPLETED|0:0|10:52:36|2026-09-04T21:48:45|2026-09-05T08:41:21|n-37-12|billing=8,cpu=8,gres/gpu:nvidia_h200_nvl=1,gres/gpu=1,mem=48G,node=1|h200|/shared/pilab/pilab/orb
+723089|orb-swp--train--warmup--s46--a01|COMPLETED|0:0|10:35:42|2026-09-04T22:21:20|2026-09-05T08:57:02|n-37-02|billing=8,cpu=8,gres/gpu:nvidia_h200_nvl=1,gres/gpu=1,mem=48G,node=1|h200|/shared/pilab/pilab/orb
+723090|orb-swp--train--const--s46--a01|COMPLETED|0:0|10:52:15|2026-09-04T22:34:52|2026-09-05T09:27:07|n-37-02|billing=8,cpu=8,gres/gpu:nvidia_h200_nvl=1,gres/gpu=1,mem=48G,node=1|h200|/shared/pilab/pilab/orb
+723091|orb-swp--train--warmup--s47--a01|COMPLETED|0:0|10:34:49|2026-09-05T07:22:52|2026-09-05T17:57:41|n-37-06|billing=8,cpu=8,gres/gpu:nvidia_h200_nvl=1,gres/gpu=1,mem=48G,node=1|h200|/shared/pilab/pilab/orb
+723092|orb-swp--train--const--s47--a01|COMPLETED|0:0|10:52:16|2026-09-05T08:41:22|2026-09-05T19:33:38|n-37-12|billing=8,cpu=8,gres/gpu:nvidia_h200_nvl=1,gres/gpu=1,mem=48G,node=1|h200|/shared/pilab/pilab/orb
+723093|orb-swp--train--warmup--s48--a01|COMPLETED|0:0|10:34:30|2026-09-05T08:57:02|2026-09-05T19:31:32|n-37-02|billing=8,cpu=8,gres/gpu:nvidia_h200_nvl=1,gres/gpu=1,mem=48G,node=1|h200|/shared/pilab/pilab/orb
+723094|orb-swp--train--const--s48--a01|COMPLETED|0:0|10:52:42|2026-09-05T09:27:08|2026-09-05T20:19:50|n-37-02|billing=8,cpu=8,gres/gpu:nvidia_h200_nvl=1,gres/gpu=1,mem=48G,node=1|h200|/shared/pilab/pilab/orb
+723350|lmft-x07-lr1e-6|CANCELLED by 610001|0:0|00:00:00|None|2026-09-05T10:29:32|None assigned||h200|/shared/pilab/alix/lmft
+723351|lmft-x07-lr3e-6|CANCELLED by 610001|0:0|00:00:00|None|2026-09-05T22:05:33|None assigned||h200|/shared/pilab/alix/lmft
+723352|lmft-x07-lr1e-5|CANCELLED by 610001|0:0|00:00:00|None|2026-09-05T10:29:32|None assigned||h200|/shared/pilab/alix/lmft
+723607|sim_b_1|CANCELLED by 610001|0:0|00:00:00|None|2026-09-05T13:33:32|None assigned||h100|/shared/pilab/bob/rlsim/sim
+723608|sim_b_2|CANCELLED by 610001|0:0|00:00:00|None|2026-09-05T13:33:32|None assigned||h100|/shared/pilab/bob/rlsim/sim
+723609|sim_a_1|CANCELLED by 610001|0:0|00:00:00|None|2026-09-05T13:33:32|None assigned||h100|/shared/pilab/bob/rlsim/sim
+723610|sim_a_2|CANCELLED by 610001|0:0|00:00:00|None|2026-09-05T13:33:32|None assigned||h100|/shared/pilab/bob/rlsim/sim
+723611|sim_c_1|CANCELLED by 610001|0:0|00:00:00|None|2026-09-05T13:33:32|None assigned||h100|/shared/pilab/bob/rlsim/sim
+723612|sim_c_2|CANCELLED by 610001|0:0|00:00:00|None|2026-09-05T13:33:32|None assigned||h100|/shared/pilab/bob/rlsim/sim
+723916|orb-swp--report--s42-51|COMPLETED|0:0|00:01:17|2026-09-05T20:31:45|2026-09-05T20:33:02|m-31-01|billing=4,cpu=4,mem=16G,node=1|dev|/shared/pilab/pilab/orb
+723951|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|08:30:14|2026-09-06T13:01:58|2026-09-06T21:32:12|n-38-12|billing=16,cpu=16,gres/gpu:nvidia_h200_nvl=2,gres/gpu=2,mem=256G,node=1|h200|/shared/pilab/alix/lmft
+723952|lmft-x07-trainer-s1|RUNNING|0:0|08:26:12|2026-09-06T21:32:15|Unknown|n-38-12|billing=16,cpu=16,gres/gpu:nvidia_h200_nvl=2,gres/gpu=2,mem=256G,node=1|h200|/shared/pilab/alix/lmft
+723953|lmft-x07-sampler-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T21:00:35|None assigned||h200|/shared/pilab/alix/lmft
+723954|lmft-x07-sampler-s1|RUNNING|0:0|05:54:15|2026-09-07T00:04:12|Unknown|n-38-01|billing=16,cpu=16,gres/gpu:nvidia_h200_nvl=2,gres/gpu=2,mem=256G,node=1|h200|/shared/pilab/alix/lmft
+724242|orb-swp--train--voc-cosinewarm--s42--a01|COMPLETED|0:0|10:59:48|2026-09-06T12:52:43|2026-09-06T23:52:31|n-37-12|billing=8,cpu=8,gres/gpu:nvidia_h200_nvl=1,gres/gpu=1,mem=48G,node=1|h200|/shared/pilab/pilab/orb
+724243|orb-swp--train--voc-cosinewarm--s45--a01|COMPLETED|0:0|10:55:24|2026-09-06T13:02:14|2026-09-06T23:57:38|n-38-06|billing=8,cpu=8,gres/gpu:nvidia_h200_nvl=1,gres/gpu=1,mem=48G,node=1|h200|/shared/pilab/pilab/orb
+724244|orb-swp--train--voc-cosinewarm--s46--a01|COMPLETED|0:0|10:51:24|2026-09-06T13:02:14|2026-09-06T23:53:38|n-38-06|billing=8,cpu=8,gres/gpu:nvidia_h200_nvl=1,gres/gpu=1,mem=48G,node=1|h200|/shared/pilab/pilab/orb
+724245|orb-swp--train--voc-cosinewarm--s47--a01|RUNNING|0:0|06:05:32|2026-09-06T23:52:55|Unknown|n-37-12|billing=8,cpu=8,gres/gpu:nvidia_h200_nvl=1,gres/gpu=1,mem=48G,node=1|h200|/shared/pilab/pilab/orb
+724246|orb-swp--train--voc-cosinewarm--s48--a01|RUNNING|0:0|06:04:32|2026-09-06T23:53:55|Unknown|n-38-06|billing=8,cpu=8,gres/gpu:nvidia_h200_nvl=1,gres/gpu=1,mem=48G,node=1|h200|/shared/pilab/pilab/orb
+724479|lmft-x07-trainer-s0|PENDING|0:0|00:00:00|Unknown|Unknown|None assigned||h200|/shared/pilab/alix/lmft

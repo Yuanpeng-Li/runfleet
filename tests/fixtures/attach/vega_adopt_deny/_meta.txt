@@ -1,0 +1,8 @@
+## slurm.attach.node0
+rc=255 ms=162
+stderr:
+Access denied by pam_slurm_adopt: you have no active jobs on this node
+Connection closed by 10.200.133.201 port 22
+
+## slurm.attach.audit
+rc=0 ms=40

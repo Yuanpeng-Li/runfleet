@@ -1,0 +1,26 @@
+#!/bin/sh
+# mock sacct: --helpformat, the detect gputres pair, the history window and `-j ids` (rows of sacct_ext)
+. "$RF_MOCK_BIN/_lib.sh"
+mock_log sacct "$@"; mock_env sacct; mock_fail SACCT
+sep='|'; fmt=; ids=; prev=
+for a in "$@"; do
+  case $a in
+    --helpformat) printf '%s\n' 'Account AdminComment AllocCPUS AllocTRES DerivedExitCode Elapsed End ExitCode' \
+                                'JobID JobIDRaw JobName NNodes NodeList Partition QOS Reason ReqMem ReqTRES' \
+                                'Start State Submit Timelimit TRESUsageInMax TRESUsageInTot User WorkDir'; exit 0 ;;
+    --delimiter=*) sep=${a#--delimiter=} ;;
+    --format=*) fmt=${a#--format=} ;;
+  esac
+  [ "$prev" = "-j" ] && ids=$a
+  prev=$a
+done
+data=$(fixture SACCT sacct_ext)
+case $fmt in
+  JobIDRaw,AllocTRES,State) awk -F'|' -v OFS='|' '{print $2, $20, $8}' "$data"; exit 0 ;;
+  JobID,TRESUsageInMax*) awk -F'|' -v OFS='|' '{print $1, $NF}' "$S/sacct_completed_gpu_tres.txt"; exit 0 ;;
+esac
+if [ -n "$ids" ]; then
+  awk -F'|' -v ids=",$ids," 'index(ids, "," $2 ",") > 0' "$data" | { if [ "$sep" = "|" ]; then cat; else tr '|' "$sep"; fi; }
+else
+  emit "$data" "$sep"
+fi

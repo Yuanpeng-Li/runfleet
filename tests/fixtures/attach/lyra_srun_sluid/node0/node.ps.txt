@@ -1,0 +1,19 @@
+1763482
+1763477 1763467 1763467       0  0.0  0.0  2152 S    /usr/bin/timeout 15 bash -c echo ZWNobyAiIyNob3N0ICQoaG9zdG5hbWUpICQoZGF0ZSAtSXMpIjsgZWNobyAiIyNjZ3JvdXAiOyBjYXQgL3Byb2Mvc2VsZi9jZ3JvdXAKZWNobyAiIyNlbnYiOyBlbnYgfCBncmVwIC1FICdeKFN
+1763479 1763477 1763467       0  0.0  0.0  3740 S    bash -c echo ZWNobyAiIyNob3N0ICQoaG9zdG5hbWUpICQoZGF0ZSAtSXMpIjsgZWNobyAiIyNjZ3JvdXAiOyBjYXQgL3Byb2Mvc2VsZi9jZ3JvdXAKZWNobyAiIyNlbnYiOyBlbnYgfCBncmVwIC1FICdeKFNMVVJNXyhKT0JfSUR
+1763482 1763479 1763467       0  0.0  0.0  3720 S    bash
+1763509 1763482 1763467       0  0.0  0.0  3836 R    ps -u alice07 -o pid,ppid,etimes,pcpu,rss,stat,args --forest -ww
+1763510 1763482 1763467       0  0.0  0.0  2160 S    cut -c1-220
+1077008 1076999 1077008   40981  0.0  0.0  3968 S    /bin/bash /var/spool/slurmd/job31367626/slurm_script --seeds 1 2 3
+1077027 1077008 1077008   40981  0.0  0.0  3784 S    bash scripts/run_seeds.sh --seeds 1 2 3
+1077036 1077027 1077008   40981 93.6  0.0 25849724 Rl   python -u train.py --config configs/exp_c.yaml seed=1 trainer.max_steps=200000 eval.interval=10000 wandb.mode=offline
+1077811 1077036 1077008   40955  0.1  0.0 67112 Ssl  /home/alice07/.venvs/exp-c/lib/python3.12/site-packages/wandb/bin/wandb-core --port-filename /tmp/alice07/31367626/tmpq3n0zk2v/port-107
+1077997 1077811 1077008   40955  0.0  0.0 29600 Sl   /home/alice07/.venvs/exp-c/lib/python3.12/site-packages/wandb/bin/wandb-xpu --portfile /tmp/alice07/31367626/wandb-xpu-portfile-412
+1077687 1077027 1077008   40961 93.3  0.0 26168392 Rl   python -u train.py --config configs/exp_c.yaml seed=1 trainer.max_steps=200000 eval.interval=10000 wandb.mode=offline
+1078550 1077687 1077008   40936  0.0  0.0 58344 Ssl  /home/alice07/.venvs/exp-c/lib/python3.12/site-packages/wandb/bin/wandb-core --port-filename /tmp/alice07/31367626/tmpw91xhe5c/port-107
+1078566 1078550 1077008   40936  0.0  0.0 29756 Sl   /home/alice07/.venvs/exp-c/lib/python3.12/site-packages/wandb/bin/wandb-xpu --portfile /tmp/alice07/31367626/wandb-xpu-portfile-638
+1078432 1077027 1077008   40941 94.0  0.0 25533168 Rl   python -u train.py --config configs/exp_c.yaml seed=1 trainer.max_steps=200000 eval.interval=10000 wandb.mode=offline
+1079226 1078432 1077008   40909  0.1  0.0 67504 Ssl  /home/alice07/.venvs/exp-c/lib/python3.12/site-packages/wandb/bin/wandb-core --port-filename /tmp/alice07/31367626/tmpk4m8tyb0/port-107
+1079242 1079226 1077008   40908  0.0  0.0 29668 Sl   /home/alice07/.venvs/exp-c/lib/python3.12/site-packages/wandb/bin/wandb-xpu --portfile /tmp/alice07/31367626/wandb-xpu-portfile-157
+1079111 1077027 1077008   40921  0.0  0.0  2240 S    bash scripts/run_seeds.sh --seeds 1 2 3
+1762426 1079111 1077008     229  0.0  0.0  2144 S    sleep 300

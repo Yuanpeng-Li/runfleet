@@ -1,0 +1,16 @@
+PID      JOBID    STEPID   LOCALID GLOBALID
+129234   724655   batch    0       0        
+129225   724655   batch    -       -        
+129302   724655   batch    -       -        
+129330   724655   batch    -       -        
+129361   724655   batch    -       -        
+129362   724655   batch    -       -        
+129392   724655   batch    -       -        
+129676   724655   batch    -       -        
+-1       724655   extern   0       0        
+129106   724655   extern   -       -        
+161453   724655   extern   -       -        
+161459   724655   extern   -       -        
+161460   724655   extern   -       -        
+161572   724655   extern   -       -        
+161573   724655   extern   -       -        

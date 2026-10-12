@@ -1,0 +1,6 @@
+             JOBID PARTITION     NAME     USER ST       TIME  NODES NODELIST(REASON)
+           2334564 gpu-preem smoke-te alice000 PD       0:00      1 (Priority)
+           2332861 gpu-preem orb-swp- alice000  R    4:07:00      1 n-40-01
+           2332862 gpu-preem orb-swp- alice000  R    4:07:00      1 n-40-01
+           2332863 gpu-preem orb-swp- alice000  R    4:07:00      1 n-40-01
+           2333760 gpu-preem lmft-x07 alice000  R    9:02:14      1 n-38-01

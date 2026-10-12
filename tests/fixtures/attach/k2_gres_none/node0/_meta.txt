@@ -1,0 +1,25 @@
+## node.id
+rc=0 ms=4
+
+## node.cg
+rc=0 ms=7
+
+## node.ps
+rc=0 ms=9
+
+## node.pids
+rc=0 ms=12
+
+## node.map
+rc=0 ms=2
+
+## node.gpu
+rc=6 ms=30
+
+## node.apps
+rc=6 ms=25
+stderr:
+No devices were found
+
+## node.self
+rc=0 ms=4

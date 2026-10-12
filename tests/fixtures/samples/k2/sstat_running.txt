@@ -1,0 +1,2 @@
+2332861.extern|1|213503982334-14:25:51|||energy=0|energy=0
+2332861.batch|1|04:20:02|10398988K|11506244K|cpu=04:20:02,energy=0,fs/disk=9430412075,gres/gpumem=24870M,gres/gpuutil=98,mem=10398988K,pages=3652,vmem=0|cpu=04:20:02,energy=0,fs/disk=9430412075,gres/gpumem=24870M,gres/gpuutil=99,mem=11506244K,pages=3652,vmem=0

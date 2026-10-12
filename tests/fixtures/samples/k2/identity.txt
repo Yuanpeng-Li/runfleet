@@ -1,0 +1,12 @@
+login02
+alice0001
+SHELL=/bin/bash
+/home/alice0001:/bin/bash
+HOME=/home/alice0001
+nfs1.example.edu:/export/home/alice0001 nfs4 51200000 30612480  20587520      60% /home/alice0001
+fstype=nfs
+VERSION_ID="8.10"
+PRETTY_NAME="Rocky Linux 8.10 (Green Obsidian)"
+4.18.0-553.148.1.el8_10.x86_64
+32
+4.12 3.06 3.71 9/15388 171206

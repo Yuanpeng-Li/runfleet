@@ -1,0 +1,13 @@
+# lyra (Slurm 26.05): ssh to compute nodes is refused, srun --overlap reads job 31367626 on lyra-gpu-s71-03. The job's
+# cgroup directory is its SLUID (sQ4HR26FE80M00), not job_<id>; the step sees one GPU (index 0) = Slurm IDX 1
+# (SLURM_STEP_GPUS=1); the board is an RTX PRO 6000 Blackwell 97887 MiB although Slurm calls it rtx6000.
+# source (raw capture, not published): lyra/05_srun_overlap_default.txt (step 0, 15:40:22: env, nvidia-smi, listpids,
+#         ps), lyra/06_srun_cgroup_and_minimal.txt (job cgroup values, read by step 1 at 15:40:52),
+#         lyra/07_final_audit.txt (squeue -s; the field query added %T); ps pgid inferred from the tree, pmem not
+#         captured (0.0); /proc/driver/nvidia not read on lyra (node.map empty).
+host=lyra
+mode=srun
+job=31367626
+nodes=lyra-gpu-s71-03
+jobs.lyra-gpu-s71-03=31367626
+sluids.lyra-gpu-s71-03=sQ4HR26FE80M00

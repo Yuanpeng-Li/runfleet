@@ -1,0 +1,163 @@
+## identity
+cmd: hostname; whoami; echo "SHELL=$SHELL"; getent passwd "$USER" | cut -d: -f6,7; echo "HOME=$HOME"; df -PT "$HOME" | tail -1; stat -f -c "fstype=%T" "$HOME"; grep -E "^(PRETTY_NAME|VERSION_ID)=" /etc/os-release; uname -r; nproc; cat /proc/loadavg
+rc=0 ms=20
+
+## sinfo_version
+cmd: sinfo --version
+rc=0 ms=11
+
+## commands
+cmd: for c in squeue sacct sinfo scontrol sshare sprio sstat sacctmgr sbank srun nvidia-smi python3 jq timeout tmux; do printf "%s " "$c"; command -v "$c" || echo MISSING; done; python3 --version 2>&1; jq --version 2>&1
+rc=0 ms=4
+
+## scontrol_listpids
+cmd: scontrol help 2>&1 | grep -iE "listpids|listjobs|liststeps" ; echo ---; scontrol listpids 2>&1 | head -5
+rc=0 ms=20
+
+## slurm_config
+cmd: scontrol show config | grep -E "^(ClusterName|SLURM_VERSION|AccountingStorageType|AccountingStorageEnforce|JobAcctGatherType|JobAcctGatherFrequency|MinJobAge|MessageTimeout|PrologFlags|ProctrackType|TaskPlugin|SelectType |SelectTypeParameters|PreemptType|PreemptMode|LaunchParameters|UsePAM|GresTypes|DataParserParameters|SlurmctldParameters|PrivateData|MaxJobCount|SchedulerType) "
+rc=0 ms=12
+
+## pam_adopt_login
+cmd: grep -l pam_slurm /etc/pam.d/* 2>/dev/null; echo "(login-node pam.d only; compute-node pam not visible)"
+rc=0 ms=5
+
+## squeue_me_default
+cmd: squeue --me
+rc=0 ms=16
+
+## squeue_me_o
+cmd: squeue --me -h -o '%i|%j|%T|%M|%l|%D|%R|%b|%C|%m|%P|%V|%S|%Z|%o'
+rc=0 ms=16
+
+## squeue_me_O
+cmd: squeue --me -h -O 'JobID:|,ArrayJobID:|,ArrayTaskID:|,Name:|,UserName:|,State:|,StateCompact:|,Reason:|,TimeUsed:|,TimeLimit:|,TimeLeft:|,NumNodes:|,NumCPUs:|,MinMemory:|,Partition:|,QOS:|,Account:|,SubmitTime:|,StartTime:|,EndTime:|,NodeList:|,BatchHost:|,tres-alloc:|,tres-per-node:|,tres-per-job:|,RestartCnt:|,STDOUT:|,STDERR:|,WorkDir:|,Command:|'
+rc=0 ms=15
+
+## squeue_me_json_size
+cmd: squeue --me --json | wc -c
+rc=0 ms=14
+stderr:
+squeue: fatal: serializer_required: could not find plugin for application/json
+
+## squeue_me_json
+cmd: squeue --me --json | head -c 400000
+rc=0 ms=11
+stderr:
+squeue: fatal: serializer_required: could not find plugin for application/json
+
+## squeue_parts_O
+cmd: squeue -p 'free-gpu,free-gpuxl' -h -O 'JobID:|,ArrayJobID:|,ArrayTaskID:|,Name:|,UserName:|,State:|,StateCompact:|,Reason:|,TimeUsed:|,TimeLimit:|,TimeLeft:|,NumNodes:|,NumCPUs:|,MinMemory:|,Partition:|,QOS:|,Account:|,SubmitTime:|,StartTime:|,EndTime:|,NodeList:|,BatchHost:|,tres-alloc:|,tres-per-node:|,tres-per-job:|,RestartCnt:|,STDOUT:|,STDERR:|,WorkDir:|,Command:|' | head -25
+rc=0 ms=46
+
+## squeue_parts_o
+cmd: squeue -p 'free-gpu,free-gpuxl' -h -o '%i|%j|%T|%M|%l|%D|%R|%b|%C|%m|%P|%V|%S|%Z|%o' | head -25
+rc=0 ms=52
+
+## squeue_parts_states
+cmd: squeue -p 'free-gpu,free-gpuxl' -h -o '%T' | sort | uniq -c
+rc=0 ms=45
+
+## sacct_basic
+cmd: sacct -u $USER -S now-2days -X -P -n --format=JobID,JobName,State,ExitCode,Elapsed,Start,End,NodeList,AllocTRES,Partition,WorkDir
+rc=0 ms=15
+
+## sacct_ext
+cmd: sacct -u $USER -S now-14days -X -P -n --format=JobID,JobIDRaw,JobName,User,Account,QOS,Partition,State,ExitCode,DerivedExitCode,Reason,Submit,Start,End,Elapsed,Timelimit,AllocCPUS,ReqMem,ReqTRES,AllocTRES,NNodes,NodeList,WorkDir | tail -40
+rc=0 ms=18
+
+## sacct_steps
+cmd: j=$(sacct -u $USER -S now-14days -X -P -n --format=JobID | tail -1); [ -n "$j" ] && sacct -j "$j" -P -n --format=JobID,JobName,State,ExitCode,Elapsed,MaxRSS,AveCPU,TRESUsageInMax%200
+rc=0 ms=26
+
+## sacct_json_size
+cmd: sacct -u $USER -S now-2days -X --json | wc -c
+rc=0 ms=11
+stderr:
+sacct: fatal: serializer_required: could not find plugin for application/json
+
+## scontrol_job_source
+rc=0
+
+## scontrol_show_job
+cmd: scontrol show job 31367493 -o
+rc=0 ms=16
+
+## scontrol_show_job_d
+cmd: scontrol show job 31367493 -d -o
+rc=0 ms=17
+
+## scontrol_show_job_multiline
+cmd: scontrol show job 31367493 -d
+rc=0 ms=18
+
+## sinfo_parts
+cmd: sinfo -h -p 'free-gpu,free-gpuxl' -o '%P|%a|%l|%D|%T|%G|%N'
+rc=0 ms=16
+
+## sinfo_nodes_O
+cmd: sinfo -h -N -p 'free-gpu,free-gpuxl' -O 'NodeList:|,Partition:|,StateLong:|,CPUsState:|,Memory:|,AllocMem:|,FreeMem:|,Gres:|,GresUsed:|,Reason:|'
+rc=0 ms=20
+
+## sinfo_summary
+cmd: sinfo -s
+rc=0 ms=25
+
+## scontrol_show_node
+cmd: scontrol show node $(scontrol show hostnames 'lyra-gpu-q71-01' 2>/dev/null | head -1) -o
+rc=0 ms=27
+
+## sacctmgr_assoc
+cmd: sacctmgr -n -P show assoc where user=$USER format=Cluster,Account,Partition,QOS,GrpTRES,MaxJobs,MaxSubmit
+rc=0 ms=15
+
+## running_job_source
+rc=0
+
+## scontrol_show_job_running_d
+cmd: scontrol show job 31367493 -d -o
+rc=0 ms=19
+
+## scontrol_show_job_running_multiline
+cmd: scontrol show job 31367493 -d
+rc=0 ms=16
+
+## sstat_running
+cmd: sstat -a -j 31367493 -P -n --format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,TRESUsageInAve%300,TRESUsageInMax%300
+rc=0 ms=17
+stderr:
+sstat: error: slurm_job_step_stat: there was an error with the request to lyra-gpu-q71-01 rc = Invalid user id
+sstat: error: problem getting step_layout for StepId=31367493.extern: Invalid user id
+sstat: error: slurm_job_step_stat: there was an error with the request to lyra-gpu-q71-01 rc = Invalid user id
+sstat: error: problem getting step_layout for StepId=31367493.batch: Invalid user id
+
+## sacct_running_steps
+cmd: sacct -j 31367493 -P -n --format=JobID,JobName,State,ExitCode,Elapsed,NodeList,AllocTRES,TRESUsageInMax%300
+rc=0 ms=13
+
+## sacct_completed_gpu_tres
+cmd: sacct -j NONE -P -n --format=JobID,JobName,State,ExitCode,Elapsed,MaxRSS,TRESUsageInAve%400,TRESUsageInMax%400
+rc=1 ms=11
+stderr:
+sacct: fatal: Bad job/step specified: NONE
+
+## sacct_failed_states
+cmd: sacct -u $USER -S now-30days -X -P -n -s F,TO,OOM,NF,PR,CA,BF,DL --format=JobID,JobName,State,ExitCode,DerivedExitCode,Reason,Elapsed,End,NodeList | tail -25
+rc=0 ms=12
+
+## stdout_path_stat
+cmd: p=$(scontrol show job 31367493 -o | grep -o 'StdOut=[^ ]*' | cut -d= -f2-); echo "$p"; stat -c '%s bytes mtime=%Y' "$p"
+rc=1 ms=19
+stderr:
+stat: cannot statx '/home/victor/vision/logs/train_a01_31367493.out': Permission denied
+
+## scontrol_listpids_job
+cmd: scontrol listpids 31367493
+rc=1 ms=11
+stderr:
+scontrol: error: Domain socket directory /var/spool/slurmd: No such file or directory
+JobId=31367493 does not exist on node (null).
+
+## squeue_array_expand
+cmd: squeue --me -h -r -o '%i|%A|%a|%F|%K|%T' | head -10
+rc=0 ms=16

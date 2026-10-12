@@ -1,0 +1,12 @@
+/proc/driver/nvidia/gpus/0000:01:00.0/information:GPU UUID: 	 GPU-51717dbe-15ea-4f78-d8e1-09b2b1da92eb
+/proc/driver/nvidia/gpus/0000:01:00.0/information:Bus Location: 	 0000:01:00.0
+/proc/driver/nvidia/gpus/0000:01:00.0/information:Device Minor: 	 0
+/proc/driver/nvidia/gpus/0000:41:00.0/information:GPU UUID: 	 GPU-741b3ce9-5226-576c-3c99-916aca612697
+/proc/driver/nvidia/gpus/0000:41:00.0/information:Bus Location: 	 0000:41:00.0
+/proc/driver/nvidia/gpus/0000:41:00.0/information:Device Minor: 	 1
+/proc/driver/nvidia/gpus/0000:81:00.0/information:GPU UUID: 	 GPU-66dd3aae-4bd3-743b-5994-8ac8bfea1854
+/proc/driver/nvidia/gpus/0000:81:00.0/information:Bus Location: 	 0000:81:00.0
+/proc/driver/nvidia/gpus/0000:81:00.0/information:Device Minor: 	 2
+/proc/driver/nvidia/gpus/0000:c1:00.0/information:GPU UUID: 	 GPU-d4fe0bdf-2969-58a4-cb31-1f8659ae8116
+/proc/driver/nvidia/gpus/0000:c1:00.0/information:Bus Location: 	 0000:c1:00.0
+/proc/driver/nvidia/gpus/0000:c1:00.0/information:Device Minor: 	 3

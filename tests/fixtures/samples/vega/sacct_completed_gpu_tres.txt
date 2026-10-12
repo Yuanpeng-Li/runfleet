@@ -1,0 +1,3 @@
+724244|orb-swp--train--voc-cosinewarm--s46--a01|COMPLETED|0:0|10:51:24|||
+724244.batch|batch|COMPLETED|0:0|10:51:24|4713932K|cpu=10:47:24,energy=0,fs/disk=412836304,gres/gpumem=4756M,gres/gpuutil=92,mem=4713932K,pages=4886,vmem=0|cpu=10:47:24,energy=0,fs/disk=412836304,gres/gpumem=4756M,gres/gpuutil=92,mem=4713932K,pages=4886,vmem=0
+724244.extern|extern|COMPLETED|0:0|10:51:24||energy=0|energy=0

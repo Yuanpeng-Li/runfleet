@@ -1,0 +1,3 @@
+723954|lmft-x07-sampler-s1|RUNNING|0:0|05:54:16|n-38-01|billing=16,cpu=16,gres/gpu:nvidia_h200_nvl=2,gres/gpu=2,mem=256G,node=1|
+723954.batch|batch|RUNNING|0:0|05:54:16|n-38-01|cpu=16,gres/gpu:nvidia_h200_nvl=2,gres/gpu=2,mem=256G,node=1|
+723954.extern|extern|RUNNING|0:0|05:54:16|n-38-01|billing=16,cpu=16,gres/gpu:nvidia_h200_nvl=2,gres/gpu=2,mem=256G,node=1|

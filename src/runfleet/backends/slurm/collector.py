@@ -1,0 +1,968 @@
+"""[WP2] SlurmCollector: sections, cadences, live/history merge (§5.2).
+
+State kept across ticks (sans-IO; time comes from `HostContext.now`):
+
+- `_live`: the last complete squeue answer; `_history`: sacct rows of the window;
+- `_jobinfo`: `scontrol show job -d -o` facts per display id (fetched once per job: first sight and PD→R);
+- `_meta`: "jobmeta" — log paths / GPU type / per-node indices seen while a job was live, so history rows keep them
+  after scontrol forgets the job (MinJobAge);
+- `_vanished_at`: ids that left squeue but are not terminal in history yet (looked up with backoff: `_vanished_tries`);
+- `_jobinfo_fail`: scontrol answered for an id without a usable record: re-asked only after a backoff;
+- `_usage`, `_stats`, `_nodes`: latest sstat / logstat / sinfo results;
+- `_smi_model`: the GPU model nvidia-smi reported for a job during Attach (§7.16.5): it overrides the job's gres type
+  (`gpu_type_source="nvidia-smi"`) while the job is known, and so reaches jobmeta.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import logging
+import re
+import shlex
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+from runfleet.backends.base import (ActionPlan, ActionSpec, AttachPlan, Cadence, CollectorOutput, HostContext,
+                                    MonitorView, SchedulerCollector)
+from runfleet.backends.common import (GpuIdleTracker, StatInfo, complete, log_idle_hint, parse_error,
+                                      parse_stat_lines, section_error, usable, with_stat)
+from runfleet.backends.slurm import actions as slurm_actions
+from runfleet.backends.slurm import attach
+from runfleet.backends.slurm import commands as cmds
+from runfleet.backends.slurm.logpaths import JobNames, refs_from_paths, refs_from_templates
+from runfleet.backends.slurm.parse_sacct import gputres_seed, parse_sacct, parse_steps
+from runfleet.backends.slurm.parse_scontrol import JobInfo, parse_scontrol
+from runfleet.backends.slurm.parse_sinfo import gpu_types, parse_sinfo, summarize
+from runfleet.backends.slurm.parse_squeue import GpuSource, parse_squeue, parse_squeue_legacy, resolve_gpu
+from runfleet.backends.slurm.parse_sstat import SstatRow, StepUsage, job_usage, parse_sstat
+from runfleet.backends.slurm.states import (explain, humanize_reason, min_job_age_s, reason_advice,
+                                           short_summary)
+from runfleet.config import HostConfig
+from runfleet.errors import AttachBlocked
+from runfleet.models import (ActionResult, AttachMode, Capabilities, ErrorKind, HostError, Job, JobDetail, JobKey,
+                             JobKind, JobLive, JobState, JobStep, LogRef, Node, NodeAlloc, PartitionSummary,
+                             StateGroup)
+from runfleet.probe.section import Section, SectionOutcome, SectionResult
+from runfleet.util.efficiency import efficiency
+from runfleet.util.efficiency import lines as efficiency_lines
+from runfleet.util.slurmfmt import expand_array_tasks, parse_int, parse_tres, parse_tres_per, seconds_prefix
+
+log = logging.getLogger("runfleet.backends.slurm.collector")
+
+VANISHED_GRACE = timedelta(minutes=10)
+MAX_JOBINFO_IDS = 8
+MAX_SSTAT_IDS = 20
+MAX_LOGSTAT_PATHS = 30
+MAX_VANISHED_IDS = 50
+MAX_VANISHED_TRIES = 6                                  # sacct -j lookups per vanished job (30 s … 10 min apart)
+DETAIL_JOBINFO_MAX_AGE = timedelta(seconds=30)
+
+_CTLD_DOWN = re.compile(r"Unable to contact slurm controller|Socket timed out|slurm_load_jobs error|"
+                        r"Zero Bytes were transmitted", re.IGNORECASE)
+_DBD_DOWN = re.compile(r"Problem talking to the database|slurmdbd|Connection refused", re.IGNORECASE)
+# Only errors about the output format itself downgrade the format: "Invalid user: ghost", "Invalid partition", a dbd
+# "Unknown error" must not (a config typo would otherwise switch squeue to the lossy legacy -o for the session).
+_BAD_FORMAT = re.compile(r"format specification|invalid (?:\w+ )?(?:format|field)|field requested|unrecognized field|"
+                         r"unknown field|delimiter", re.IGNORECASE)
+_PROCS_NOTE = "processes of a running job: live readings on the Procs tab (Attach, §7.16)"
+
+
+@dataclass(frozen=True, slots=True)
+class JobMeta:
+    """Facts remembered from a job's live phase (the in-memory `jobmeta` of §5.2.4)."""
+    workdir: str | None
+    stdout: str | None
+    stderr: str | None                 # None = merged with stdout
+    gpu_type: str | None
+    per_node: tuple[NodeAlloc, ...]
+
+
+class SlurmCollector(SchedulerCollector):
+    name = "slurm"
+
+    def __init__(self, host: HostConfig) -> None:
+        super().__init__(host)
+        self._live: dict[str, Job] = {}
+        self._history: dict[str, Job] = {}
+        self._have_jobs = False
+        self._last_sacct_ok: datetime | None = None
+        self._jobinfo: dict[str, JobInfo] = {}
+        self._jobinfo_at: dict[str, datetime] = {}
+        self._jobinfo_gone: set[str] = set()
+        self._want_jobinfo: dict[str, None] = {}          # ordered set of display ids
+        self._meta: dict[str, JobMeta] = {}
+        self._vanished_at: dict[str, datetime] = {}
+        self._vanished_last: dict[str, Job] = {}
+        self._vanished_tries: dict[str, tuple[int, datetime]] = {}   # display id -> (lookups so far, next due)
+        self._jobinfo_fail: dict[str, tuple[int, datetime]] = {}     # display id -> (failures so far, next due)
+        self._usage: dict[str, StepUsage] = {}             # by job_id_raw
+        self._sstat_rows: dict[str, list[SstatRow]] = {}   # every step row of the last sstat, by job_id_raw
+        self._gpu_idle = GpuIdleTracker()
+        self._stats: dict[str, StatInfo] = {}
+        self._nodes: tuple[Node, ...] | None = None
+        self._node_types: dict[str, frozenset[str]] = {}
+        self._gpu_tres: bool | None = None                 # learned at runtime (None: use caps)
+        self._gpu_tres_misses: set[str] = set()
+        self._sep: dict[str, str] = {"squeue": cmds.SEP, "sacct": cmds.SEP, "sinfo": cmds.SEP}
+        self._squeue_legacy = False
+        self._sacct_fields: list[str] = []
+        self._sinfo_parts: tuple[str, ...] = ()            # partitions of the last planned sinfo
+        self._sstat_last: dict[str, datetime] = {}         # job id -> when its usage was last planned
+        self._last_usage_at: datetime | None = None         # when the last background sstat was planned
+        self._smi_model: dict[str, tuple[str, float | None]] = {}   # display id -> (gres-style type, MiB per GPU)
+
+    # ------------------------------------------------------------ detection
+    @classmethod
+    def applicable(cls, caps: Capabilities, host: HostConfig) -> bool:
+        return host.backend == "slurm" or (host.backend == "auto" and {"squeue", "sinfo"} <= caps.tools)
+
+    @classmethod
+    def capability_sections(cls, host: HostConfig) -> list[Section]:
+        return [
+            Section("slurm.version", cmds.VERSION_CMD, timeout=10, requires=("sinfo",)),
+            Section("slurm.config", cmds.CONFIG_CMD, timeout=10, requires=("scontrol",)),
+            Section("slurm.assoc", cmds.ASSOC_CMD, timeout=15, requires=("sacctmgr",)),
+            Section("slurm.sacctfmt", cmds.SACCTFMT_CMD, timeout=10, requires=("sacct",)),
+            Section("slurm.gputres", cmds.GPUTRES_CMD, timeout=30, requires=("sacct",)),
+        ]
+
+    @classmethod
+    def ingest_capabilities(cls, results: Mapping[str, SectionResult]) -> Mapping[str, object]:
+        return parse_capabilities(results)
+
+    # ------------------------------------------------------------ planning
+    def cadences(self, ctx: HostContext) -> list[Cadence]:
+        s = ctx.host.slurm
+        usage_floor = float(max(30, ctx.caps.acct_gather_freq_s or 0))
+        return [
+            Cadence("slurm.jobs", max(s.poll_jobs, 10.0), floor=10.0, max_backoff=300.0),
+            Cadence("slurm.jobinfo", 0.0, mode="event"),
+            Cadence("slurm.usage", max(s.poll_usage, usage_floor), floor=usage_floor, focused_factor=0.5),
+            Cadence("slurm.history", max(s.poll_history, 60.0), floor=60.0),
+            Cadence("slurm.vanished", 0.0, mode="event"),
+            Cadence("slurm.logstat", max(s.poll_logstat, 60.0), floor=60.0, focused_factor=0.5),
+            Cadence("slurm.nodes", max(s.poll_nodes, 60.0), floor=60.0, hidden_factor=5.0),
+        ]
+
+    def sections(self, due: frozenset[str], ctx: HostContext) -> list[Section]:
+        out: list[Section] = []
+        if "slurm.jobs" in due:
+            out.append(self._squeue_section(ctx))
+        if "slurm.jobinfo" in due and (sec := self._scontrol_section(ctx.now)) is not None:
+            out.append(sec)
+        if "slurm.usage" in due and (sec := self._sstat_section(ctx)) is not None:
+            out.append(sec)
+        if "slurm.history" in due:
+            out.append(self._sacct_section(ctx))
+        if "slurm.vanished" in due and (sec := self._vanished_section(ctx)) is not None:
+            out.append(sec)
+        if "slurm.logstat" in due and (sec := self._logstat_section()) is not None:
+            out.append(sec)
+        if "slurm.nodes" in due and (sec := self._sinfo_section(ctx)) is not None:
+            out.append(sec)
+        return out
+
+    def _squeue_section(self, ctx: HostContext) -> Section:
+        s = ctx.host.slurm
+        users = list(s.users) or None
+        if self._squeue_legacy:
+            cmd = cmds.squeue_legacy_cmd(users, s.squeue_args)
+            meta: dict[str, object] = {"users": list(s.users), "extra": list(s.squeue_args), "sep": "|",
+                                       "format": "legacy"}
+        else:
+            sep = self._sep["squeue"]
+            cmd = cmds.squeue_cmd(users, s.squeue_args, sep)
+            meta = {"users": list(s.users), "extra": list(s.squeue_args), "sep": sep, "format": "O"}
+        return Section("slurm.squeue", cmd, timeout=20, requires=("squeue",), meta=meta)
+
+    def _jobinfo_due(self, d: str, now: datetime) -> bool:
+        fail = self._jobinfo_fail.get(d)
+        return fail is None or fail[1] <= now
+
+    def _scontrol_section(self, now: datetime) -> Section | None:
+        ids = [d for d in self._want_jobinfo if d in self._live and self._jobinfo_due(d, now)][:MAX_JOBINFO_IDS]
+        raws = list(dict.fromkeys(self._live[d].job_id_raw for d in ids))
+        if not raws:
+            return None
+        return Section("slurm.scontrol", cmds.scontrol_cmd(raws), timeout=15, requires=("scontrol",),
+                       meta={"ids_raw": raws})
+
+    def _own_running(self, ctx: HostContext) -> list[Job]:
+        me = ctx.caps.remote_user
+        jobs = [j for j in self._live.values() if j.state is JobState.RUNNING and (not me or j.user == me)]
+        return sorted(jobs, key=lambda j: j.start_time.timestamp() if j.start_time else 0.0, reverse=True)
+
+    def _sstat_ids(self, ctx: HostContext) -> list[str]:
+        """At most MAX_SSTAT_IDS own running jobs: never sampled ones first (newest first), then the least recently
+        sampled, so with more jobs than slots every job still gets a sample every few rounds."""
+        raws = list(dict.fromkeys(j.job_id_raw for j in self._own_running(ctx)))
+        if len(raws) <= MAX_SSTAT_IDS:
+            return raws
+        fresh = [r for r in raws if r not in self._sstat_last]
+        rest = sorted((r for r in raws if r in self._sstat_last), key=lambda r: self._sstat_last[r])
+        return (fresh + rest)[:MAX_SSTAT_IDS]
+
+    def _sstat_section(self, ctx: HostContext) -> Section | None:
+        if ctx.caps.tools and "sstat" not in ctx.caps.tools:
+            return None
+        raws = self._sstat_ids(ctx)
+        self._last_usage_at = ctx.now
+        self._sstat_last.update(dict.fromkeys(raws, ctx.now))
+        if not raws:
+            return None
+        total = len({j.job_id_raw for j in self._own_running(ctx)})
+        if total > len(raws):
+            log.debug("%s: usage sampled for %d of %d running jobs this round", self.host.name, len(raws), total)
+        return Section("slurm.sstat", cmds.sstat_cmd(raws), timeout=15, requires=("sstat",), meta={"ids_raw": raws})
+
+    def _since_s(self, ctx: HostContext) -> int:
+        window = ctx.host.slurm.sacct_window
+        start = ctx.now - timedelta(seconds=window)
+        if self._last_sacct_ok is not None:
+            start = max(start, self._last_sacct_ok - timedelta(seconds=300))
+        return max(60, int((ctx.now - start).total_seconds()))
+
+    def _sacct_section(self, ctx: HostContext) -> Section:
+        self._sacct_fields = cmds.sacct_fields(ctx.caps.sacct_fields)
+        sep = self._sep["sacct"]
+        since = self._since_s(ctx)
+        return Section("slurm.sacct", cmds.sacct_window_cmd(since, self._sacct_fields, sep), timeout=30,
+                       requires=("sacct",), meta={"since_s": since, "fields": list(self._sacct_fields), "sep": sep})
+
+    def _vanished_due(self, now: datetime) -> list[str]:
+        """Vanished ids whose next accounting lookup is due, oldest first (bounded tries with backoff)."""
+        out = []
+        for d in self._vanished_at:
+            tries, due_at = self._vanished_tries.get(d, (0, now))
+            if d in self._vanished_last and tries < MAX_VANISHED_TRIES and due_at <= now:
+                out.append(d)
+        return out
+
+    def _vanished_section(self, ctx: HostContext) -> Section | None:
+        raws: list[str] = []
+        for d in self._vanished_due(ctx.now):
+            raw = self._vanished_last[d].job_id_raw
+            if raw not in raws and len(raws) >= MAX_VANISHED_IDS:
+                continue                                   # the rest waits for the next round
+            if raw not in raws:
+                raws.append(raw)
+            tries = self._vanished_tries.get(d, (0, ctx.now))[0] + 1
+            self._vanished_tries[d] = (tries, ctx.now + _backoff(tries))
+        if not raws:
+            return None
+        fields = self._sacct_fields or cmds.sacct_fields(ctx.caps.sacct_fields)
+        sep = self._sep["sacct"]
+        return Section("slurm.sacct_ids", cmds.sacct_ids_cmd(raws, fields, sep), timeout=30, requires=("sacct",),
+                       meta={"ids_raw": raws, "fields": list(fields), "sep": sep})
+
+    def _logstat_section(self) -> Section | None:
+        paths: dict[str, None] = {}
+        for job in self._live.values():
+            if job.state is not JobState.RUNNING:
+                continue
+            for ref in self._logs_for(job):
+                if ref.path and ref.stream == "stdout":
+                    paths[ref.path] = None
+        valid = [p for p in paths if _valid_path(p)][:MAX_LOGSTAT_PATHS]
+        if not valid:
+            return None
+        return Section("slurm.logstat", cmds.logstat_cmd(valid), timeout=10, requires=("stat",),
+                       meta={"paths": valid})
+
+    def partitions(self, ctx: HostContext) -> list[str]:
+        """sinfo scope (§5.2.1): config `partitions`, else partitions of the user's jobs (live + history) ∪ non-empty
+        association partitions."""
+        if ctx.host.slurm.partitions:
+            return [p for p in ctx.host.slurm.partitions if cmds.NAME_RE.match(p)]
+        found: dict[str, None] = {}
+        for job in [*self._live.values(), *self._history.values()]:
+            if job.is_mine:
+                for p in (job.partition or "").split(","):
+                    found[p] = None
+        for _cluster, _account, part, _qos in ctx.caps.associations:
+            for p in part.split(","):
+                found[p] = None
+        return sorted(p for p in found if p and cmds.NAME_RE.match(p))
+
+    def _sinfo_section(self, ctx: HostContext) -> Section | None:
+        parts = self.partitions(ctx)
+        if not parts:
+            return None
+        sep = self._sep["sinfo"]
+        self._sinfo_parts = tuple(parts)
+        return Section("slurm.sinfo", cmds.sinfo_cmd(parts, sep), timeout=20, requires=("sinfo",),
+                       meta={"partitions": parts, "sep": sep})
+
+    # ------------------------------------------------------------ ingest
+    def ingest(self, results: Mapping[str, SectionResult], ctx: HostContext,
+               monitors: MonitorView) -> CollectorOutput:
+        now = ctx.now
+        errors: list[HostError] = []
+        followups: set[str] = set()
+        ran = {name for name in results if name.startswith("slurm.")}
+
+        if (r := results.get("slurm.scontrol")) is not None:
+            self._ingest_scontrol(r, now, errors)
+        if (r := results.get("slurm.squeue")) is not None:
+            self._ingest_squeue(r, ctx, errors, followups)
+        for name in ("slurm.sacct", "slurm.sacct_ids"):
+            if (r := results.get(name)) is not None:
+                self._ingest_sacct(r, ctx, errors, window=name == "slurm.sacct")
+        caps_patch = self._ingest_sstat(results.get("slurm.sstat"), ctx, errors)
+        if (r := results.get("slurm.logstat")) is not None:
+            if usable(r):
+                self._stats.update(parse_stat_lines(r.stdout))
+            if not r.ok:
+                errors.append(_err(r, now))
+        nodes: tuple[Node, ...] | None = None
+        partitions: tuple[PartitionSummary, ...] | None = None
+        if (r := results.get("slurm.sinfo")) is not None:
+            nodes, partitions = self._ingest_sinfo(r, ctx, errors)
+
+        if any(self._jobinfo_due(d, now) for d in self._want_jobinfo):
+            followups.add("slurm.jobinfo")
+        if self._vanished_due(now):
+            followups.add("slurm.vanished")                # first lookup, or a retry while accounting lags
+        if self._have_jobs and (parts := self.partitions(ctx)) and tuple(parts) != self._sinfo_parts:
+            followups.add("slurm.nodes")                   # partitions first known / changed: nodes now, not in 2 min
+        usage_floor = timedelta(seconds=max(30, ctx.caps.acct_gather_freq_s or 0))
+        if (self._have_jobs and not (ctx.caps.tools and "sstat" not in ctx.caps.tools)
+                and (self._last_usage_at is None or now - self._last_usage_at >= usage_floor)
+                and any(j.job_id_raw not in self._sstat_last for j in self._own_running(ctx))):
+            followups.add("slurm.usage")                   # a job started running: its usage now, not in 60 s
+        jobs = self._merge(ctx) if (ran and self._have_jobs) else None
+        return CollectorOutput(jobs=jobs, nodes=nodes, partitions=partitions,
+                               caps_patch=caps_patch or None, errors=tuple(errors), followups=frozenset(followups))
+
+    def _ingest_scontrol(self, r: SectionResult, now: datetime, errors: list[HostError]) -> None:
+        if not r.ok:
+            errors.append(_err(r, now))
+        if not usable(r):
+            return
+        failed: list[str] = []
+        for raw_id, block in parse_scontrol(r.stdout).items():
+            for job in [j for j in self._live.values() if raw_id in (j.job_id_raw, j.array_job_id)]:
+                d = job.key.id
+                rec = block.record_for(job.array_task)
+                if rec is not None:
+                    self._store_jobinfo(d, rec, now)
+                elif block.left_controller:
+                    self._jobinfo_gone.add(d)
+                else:                # an error (the loop folds it into stdout) or no matching record: back off
+                    tries = self._jobinfo_fail.get(d, (0, now))[0] + 1
+                    self._jobinfo_fail[d] = (tries, now + _backoff(tries))
+                    failed += block.errors[:1]
+                    continue         # still wanted: a PD→R refresh with cached facts is not re-requested by squeue
+                self._want_jobinfo.pop(d, None)
+        if failed and r.ok:
+            summary = "slurmctld unreachable" if _CTLD_DOWN.search(failed[0]) else f"slurm.scontrol: {failed[0]}"
+            errors.append(HostError(ErrorKind.REMOTE, summary[:80], "\n".join(dict.fromkeys(failed))[:4096],
+                                    "slurm.scontrol", now))
+
+    def _store_jobinfo(self, display: str, rec: JobInfo, now: datetime) -> None:
+        self._jobinfo[display] = rec
+        self._jobinfo_at[display] = now
+        self._jobinfo_gone.discard(display)
+        self._jobinfo_fail.pop(display, None)
+
+    def _forget_attempt(self, display: str, raw: str) -> None:
+        """A requeued job restarted (RestartCnt or its nodes changed): the previous attempt's nodes, GPU indices and
+        usage no longer apply."""
+        for d in (self._jobinfo, self._jobinfo_at, self._meta, self._jobinfo_fail):
+            d.pop(display, None)
+        self._jobinfo_gone.discard(display)
+        self._usage.pop(raw, None)
+        self._sstat_rows.pop(raw, None)
+
+    def _ingest_squeue(self, r: SectionResult, ctx: HostContext, errors: list[HostError],
+                       followups: set[str]) -> None:
+        now = ctx.now
+        if not r.ok:
+            errors.append(_err(r, now))
+            self._maybe_fallback("squeue", r)
+        if not usable(r):
+            return
+        me = ctx.caps.remote_user or None
+        if self._squeue_legacy:
+            pr = parse_squeue_legacy(r.stdout, cmds.SQUEUE_LEGACY, host=ctx.host.name, tz=ctx.caps.tz_offset,
+                                     observed_at=now, me=me)
+        else:
+            pr = parse_squeue(r.stdout, host=ctx.host.name, tz=ctx.caps.tz_offset, observed_at=now, me=me,
+                              sep=self._sep["squeue"])
+        if pr.mostly_bad:
+            errors.append(parse_error(r.name, pr, now, "squeue"))
+            return
+        if pr.bad_lines:
+            log.info("%s: %d bad squeue row(s), first: %s", ctx.host.name, len(pr.bad_lines), pr.bad_lines[0][2])
+        live = {j.key.id: j for j in pr.items}
+        for prev_id, kept in self._live.items():          # bad rows: keep the previous object, never "vanished"
+            if prev_id not in live and (kept.job_id_raw in pr.bad_ids or prev_id in pr.bad_ids):
+                live[prev_id] = kept
+        for d, job in live.items():
+            prev = self._live.get(d)
+            if prev is not None and (job.restarts != prev.restarts or (
+                    job.state is JobState.RUNNING and prev.state is JobState.RUNNING and job.nodes != prev.nodes)):
+                self._forget_attempt(d, job.job_id_raw)
+            if d not in self._jobinfo and d not in self._jobinfo_gone:
+                self._want_jobinfo.setdefault(d, None)
+            elif prev is not None and prev.state is not JobState.RUNNING and job.state is JobState.RUNNING:
+                self._jobinfo_gone.discard(d)
+                self._want_jobinfo.setdefault(d, None)
+            self._vanished_at.pop(d, None)
+            self._vanished_last.pop(d, None)
+        if complete(r):
+            live_arrays = {j.array_job_id for j in live.values() if j.array_job_id}
+            for gone_id in self._live.keys() - live.keys():
+                gone = self._live[gone_id]
+                if _is_array_summary(gone) and gone.array_job_id in live_arrays:
+                    continue        # the pending range shrank because a task started (`500_[1-20]` → `500_[2-20]`)
+                self._vanished_at[gone_id] = now
+                self._vanished_last[gone_id] = self._enrich(self._live[gone_id], ctx)
+                self._vanished_tries.pop(gone_id, None)
+            self._live = live
+        else:                                              # failed with partial output: update, never drop
+            self._live.update(live)
+        for d in [d for d in self._want_jobinfo if d not in self._live]:
+            del self._want_jobinfo[d]
+        self._have_jobs = True
+
+    def _ingest_sacct(self, r: SectionResult, ctx: HostContext, errors: list[HostError], *, window: bool) -> None:
+        now = ctx.now
+        if not r.ok:
+            errors.append(_err(r, now))
+            self._maybe_fallback("sacct", r)
+        if not usable(r):
+            return
+        fields = self._sacct_fields or cmds.sacct_fields(ctx.caps.sacct_fields)
+        pr = parse_sacct(r.stdout, fields, host=ctx.host.name, tz=ctx.caps.tz_offset, observed_at=now,
+                         me=ctx.caps.remote_user or None, sep=self._sep["sacct"])
+        if pr.mostly_bad:
+            errors.append(parse_error(r.name, pr, now, "sacct"))
+            return
+        for job in pr.items:
+            self._history[job.key.id] = job
+        if window and complete(r):
+            self._last_sacct_ok = now
+        self._have_jobs = True
+
+    def _ingest_sstat(self, r: SectionResult | None, ctx: HostContext,
+                      errors: list[HostError]) -> dict[str, object]:
+        if r is None:
+            return {}
+        now = ctx.now
+        if not r.ok:
+            errors.append(_err(r, now))
+        if not usable(r):
+            return {}
+        pr = parse_sstat(r.stdout)
+        if pr.mostly_bad:
+            errors.append(parse_error(r.name, pr, now, "sstat"))
+            return {}
+        by_raw: dict[str, list[SstatRow]] = {}
+        for row in pr.items:
+            by_raw.setdefault(row.job_id_raw, []).append(row)
+        live_by_raw = {j.job_id_raw: j for j in self._live.values()}
+        before = self._effective_gpu_tres(ctx)
+        for raw, rows in by_raw.items():
+            job = live_by_raw.get(raw)
+            if job is None:
+                continue
+            self._sstat_rows[raw] = rows
+            alloc = self._resolved_alloc(job)
+            usage = job_usage(rows, gpus=alloc[0], gpu_type=alloc[1], gpu_tres=self._effective_gpu_tres(ctx),
+                              sampled_at=now, interval_s=ctx.host.slurm.poll_usage)
+            if usage is None:
+                continue
+            smi = self._smi_model.get(job.key.id)
+            if usage.gpu is not None and usage.gpu.mem_total_mib is None and smi is not None and smi[1]:
+                usage = dataclasses.replace(usage, gpu=dataclasses.replace(usage.gpu,
+                                                                           mem_total_mib=smi[1] * alloc[0]))
+            self._usage[raw] = usage
+            if alloc[0] > 0:
+                self._learn_gpu_tres(raw, usage.row.has_gpu_keys(), self._effective_gpu_tres(ctx))
+            if usage.gpu is not None:
+                self._gpu_idle.add(job.key.id, now, usage.gpu.util_mean_pct)
+        after = self._effective_gpu_tres(ctx)
+        return {"gpu_tres": after} if after != before and after is not None else {}
+
+    def _effective_gpu_tres(self, ctx: HostContext) -> bool | None:
+        return self._gpu_tres if self._gpu_tres is not None else ctx.caps.gpu_tres
+
+    def _learn_gpu_tres(self, raw: str, has_key: bool, known: bool | None) -> None:
+        """Only GPU jobs count: key present → True; False only after two distinct GPU jobs lacked it (§5.1), and never
+        once the cluster has shown it records GPU usage (a job that just started has no sample yet)."""
+        if has_key:
+            self._gpu_tres = True
+            self._gpu_tres_misses.clear()
+            return
+        if known:
+            return
+        self._gpu_tres_misses.add(raw)
+        if len(self._gpu_tres_misses) >= 2:
+            self._gpu_tres = False
+
+    def _ingest_sinfo(self, r: SectionResult, ctx: HostContext, errors: list[HostError],
+                      ) -> tuple[tuple[Node, ...] | None, tuple[PartitionSummary, ...] | None]:
+        now = ctx.now
+        if not r.ok:
+            errors.append(_err(r, now))
+            self._maybe_fallback("sinfo", r)
+        if not usable(r):
+            return None, None
+        pr = parse_sinfo(r.stdout, sep=self._sep["sinfo"])
+        if pr.mostly_bad:
+            errors.append(parse_error(r.name, pr, now, "sinfo"))
+            return None, None
+        self._nodes = tuple(pr.items)
+        self._node_types = {n.name: gpu_types(n) for n in self._nodes}
+        return self._nodes, summarize(self._nodes, self.partitions(ctx))
+
+    def _maybe_fallback(self, kind: str, r: SectionResult) -> None:
+        """A cluster that rejects the unit separator falls back to `|` (then squeue to the legacy -o format)."""
+        if (r.outcome is not SectionOutcome.FAILED or r.stdout or not _BAD_FORMAT.search(r.stderr)
+                or _CTLD_DOWN.search(r.stderr) or _DBD_DOWN.search(r.stderr)):
+            return
+        if self._sep[kind] == cmds.SEP:
+            log.warning("%s: %s rejected the unit-separator format (%s); falling back to '|'", self.host.name, kind,
+                        r.stderr.strip()[:200])
+            self._sep[kind] = cmds.FALLBACK_SEP
+        elif kind == "squeue" and not self._squeue_legacy:
+            log.warning("%s: squeue -O failed (%s); falling back to -o", self.host.name, r.stderr.strip()[:200])
+            self._squeue_legacy = True
+
+    # ------------------------------------------------------------ merge + enrichment (§5.2.4)
+    def _merge(self, ctx: HostContext) -> dict[str, Job]:
+        now = ctx.now
+        window_start = now - timedelta(seconds=ctx.host.slurm.sacct_window)
+        for d in [d for d, j in self._history.items() if j.end_time is not None and j.end_time < window_start]:
+            del self._history[d]
+            self._meta.pop(d, None)
+        jobs: dict[str, Job] = {d: self._enrich(j, ctx) for d, j in self._history.items() if j.state.is_terminal}
+        for d, job in self._live.items():
+            jobs[d] = self._enrich(job, ctx)
+        horizon = timedelta(seconds=ctx.host.slurm.sacct_window)
+        for d, t in list(self._vanished_at.items()):
+            last = self._vanished_last.get(d)
+            hist = jobs.get(d)
+            summary = last is not None and _is_array_summary(last)
+            if (hist is not None and hist.state.is_terminal and d not in self._live) or last is None \
+                    or now - t > horizon or (summary and (now - t >= VANISHED_GRACE or _summary_resolved(last, jobs))):
+                # a summary (`500_[1-2]`) is no job: accounting answers with its tasks, never with its id
+                self._vanished_at.pop(d, None)
+                self._vanished_last.pop(d, None)
+                continue
+            if now - t < VANISHED_GRACE:
+                jobs[d] = dataclasses.replace(last, source="vanished", hints=("ended; waiting for accounting",))
+            else:
+                jobs[d] = dataclasses.replace(last, state=JobState.UNKNOWN, source="vanished",
+                                              hints=("ended; final state unknown (accounting has no record)",))
+        self._forget_unreferenced()
+        return jobs
+
+    def _forget_unreferenced(self) -> None:
+        """Bound the per-job state to jobs still known (live, history window, vanished)."""
+        live_ids = set(self._live)
+        known = live_ids | set(self._history) | set(self._vanished_at)
+        self._gpu_idle.forget(live_ids)
+        for d in [d for d in self._jobinfo if d not in live_ids and d not in self._history]:
+            self._jobinfo.pop(d, None)
+            self._jobinfo_at.pop(d, None)
+        for d in [d for d in self._meta if d not in known]:
+            del self._meta[d]
+        for d in [d for d in self._smi_model if d not in known]:
+            del self._smi_model[d]
+        self._jobinfo_gone &= live_ids
+        for d in [d for d in self._jobinfo_fail if d not in live_ids]:
+            del self._jobinfo_fail[d]
+        for d in [d for d in self._vanished_tries if d not in self._vanished_at]:
+            del self._vanished_tries[d]
+        live_raw = {j.job_id_raw for j in self._live.values()}
+        for raw in [r for r in self._usage if r not in live_raw]:
+            del self._usage[raw]
+        for raw in [r for r in self._sstat_rows if r not in live_raw]:
+            del self._sstat_rows[raw]
+        for raw in [r for r in self._sstat_last if r not in live_raw]:
+            del self._sstat_last[raw]
+        paths = {r.path for j in (*self._live.values(), *self._history.values()) for r in self._logs_for(j) if r.path}
+        for p in [p for p in self._stats if p not in paths]:
+            del self._stats[p]
+
+    def _resolved_alloc(self, job: Job) -> tuple[int, str | None, GpuSource | None]:
+        """GPU count/type/source (§5.2.3); the model nvidia-smi showed during Attach wins over every gres name (lyra's
+        `rtx6000` is an RTX PRO 6000 Blackwell, Attach field probes)."""
+        gpus, gtype, source = self._resolved_gres(job)
+        smi = self._smi_model.get(job.key.id)
+        if gpus and smi is not None:
+            return gpus, smi[0], "nvidia-smi"
+        return gpus, gtype, source
+
+    def _resolved_gres(self, job: Job) -> tuple[int, str | None, GpuSource | None]:
+        info = self._jobinfo.get(job.key.id)
+        meta = self._meta.get(job.key.id)
+        raw = job.raw
+        node_types = [self._node_types[n] for n in job.nodes if n in self._node_types]
+        if len(node_types) != len(job.nodes):
+            node_types = []
+        if job.source == "sacct" or "AllocTRES" in raw:
+            return resolve_gpu(parse_tres(raw.get("AllocTRES")), (None, None), (None, None), job.alloc.nodes,
+                               req_tres=parse_tres(raw.get("ReqTRES")),
+                               scontrol_type=info.gpu_type if info else None, node_types=node_types,
+                               cached_type=meta.gpu_type if meta else None)
+        return resolve_gpu(parse_tres(raw.get("tres-alloc")), parse_tres_per(raw.get("tres-per-node")),
+                           parse_tres_per(raw.get("tres-per-job")), parse_int(raw.get("NumNodes")),
+                           scontrol_type=info.gpu_type if info else None, node_types=node_types,
+                           cached_type=meta.gpu_type if meta else None)
+
+    @staticmethod
+    def _names(job: Job) -> JobNames:
+        return JobNames(job_id_raw=job.job_id_raw, array_job_id=job.array_job_id, array_task=job.array_task,
+                        user=job.user or None, name=job.name or None, first_node=job.nodes[0] if job.nodes else None,
+                        workdir=job.workdir, restarts=job.restarts if job.source == "squeue" else None)
+
+    def _logs_for(self, job: Job) -> tuple[LogRef, ...]:
+        """Best known log refs: scontrol (expanded) → squeue pattern (live) → jobmeta → sacct StdOut → templates."""
+        info = self._jobinfo.get(job.key.id)
+        if info is not None and info.stdout:
+            return refs_from_paths(info.stdout, info.stderr, "scontrol")
+        if job.source != "sacct" and any(r.path for r in job.logs):
+            return job.logs
+        meta = self._meta.get(job.key.id)
+        if meta is not None and meta.stdout:
+            return refs_from_paths(meta.stdout, meta.stderr, "cache")
+        if job.logs and any(r.path for r in job.logs):
+            return job.logs
+        if job.source == "sacct":
+            return refs_from_templates(self.host.slurm.log_templates, self._names(job))
+        return job.logs
+
+    def _enrich(self, job: Job, ctx: HostContext) -> Job:
+        d = job.key.id
+        info = self._jobinfo.get(d)
+        meta = self._meta.get(d)
+        gpus, gtype, source = self._resolved_alloc(job)
+        per_node = info.per_node if info and info.per_node else (meta.per_node if meta else job.alloc.per_node)
+        alloc = dataclasses.replace(job.alloc, gpus=gpus, gpu_type=gtype, per_node=per_node, gpu_type_source=source)
+        workdir = job.workdir or (info.workdir if info else None) or (meta.workdir if meta else None)
+        logs = tuple(with_stat(ref, self._stats) for ref in self._logs_for(job))
+        usage = self._usage.get(job.job_id_raw) if job.state is JobState.RUNNING else None
+        raw = dict(job.raw)
+        hints: list[str] = []
+        if job.state.group is StateGroup.QUEUED:
+            text = humanize_reason(job.reason)
+            if text:                                   # "will never run: dependency failed" included
+                raw["reason_text"] = text
+                hints.append(text)
+            advice = reason_advice(job.reason)
+            if advice:                                 # what to do about it (detail cause line, preview; §5.2.8)
+                raw["reason_advice"] = advice
+        elif job.state is JobState.RUNNING:
+            stdout = next((r for r in logs if r.stream == "stdout"), None)
+            idle = log_idle_hint(stdout.mtime if stdout else None, ctx.now, ctx.general.stall_after)
+            if idle:
+                hints.append(idle)
+            gpu_idle = self._gpu_idle.hint(d, ctx.now)
+            if gpu_idle:
+                hints.append(gpu_idle)
+        elif job.state.is_terminal:
+            summary = short_summary(job, uid=ctx.caps.uid, slurm_config=ctx.caps.slurm_config)
+            if summary:
+                raw["reason_text"] = summary
+                hints.append(summary)
+        cpu_pct, rss = job.cpu_pct, job.rss_bytes
+        if usage is not None:            # sstat AveCPU/MaxRSS are used regardless of gpu_tres (§5.1)
+            cpu_pct = _cpu_pct(usage, job.elapsed)
+            rss = usage.max_rss_bytes
+        enriched = dataclasses.replace(job, alloc=alloc, workdir=workdir, logs=logs,
+                                       gpu=usage.gpu if usage else (job.gpu if job.source == "vanished" else None),
+                                       hints=tuple(hints), raw=raw, cpu_pct=cpu_pct, rss_bytes=rss)
+        if job.source == "squeue":
+            self._remember(enriched)
+        return enriched
+
+    def _remember(self, job: Job) -> None:
+        stdout = next((r for r in job.logs if r.stream == "stdout" and r.path), None)
+        stderr = next((r for r in job.logs if r.stream == "stderr" and r.path), None)
+        if stdout is None and job.alloc.gpu_type is None and not job.alloc.per_node:
+            return
+        self._meta[job.key.id] = JobMeta(
+            workdir=job.workdir, stdout=stdout.path if stdout else None,
+            stderr=None if stdout is None or stderr is None or stderr.merged else stderr.path,
+            gpu_type=job.alloc.gpu_type, per_node=job.alloc.per_node)
+
+    # ------------------------------------------------------------ details
+    def detail_sections(self, job: Job, ctx: HostContext) -> list[Section]:
+        if job.kind is not JobKind.SLURM:
+            return []
+        out: list[Section] = []
+        d = job.key.id
+        at = self._jobinfo_at.get(d)
+        in_controller = not job.state.is_terminal or (
+            job.end_time is not None and (ctx.now - job.end_time).total_seconds() < min_job_age_s(
+                ctx.caps.slurm_config))
+        if in_controller and (at is None or ctx.now - at > DETAIL_JOBINFO_MAX_AGE):
+            out.append(Section("slurm.scontrol", cmds.scontrol_cmd([job.job_id_raw]), timeout=15,
+                               requires=("scontrol",), meta={"ids_raw": [job.job_id_raw]}))
+        sep = self._sep["sacct"]
+        fields = cmds.step_fields(ctx.caps.sacct_fields)     # + TotalCPU where known (efficiency card, on demand)
+        out.append(Section("slurm.steps", cmds.sacct_steps_cmd(job.job_id_raw, sep, fields), timeout=30,
+                           requires=("sacct",), meta={"job_id_raw": job.job_id_raw, "sep": sep,
+                                                      "fields": fields.split(",")}))
+        if job.state is JobState.RUNNING:
+            out.append(Section("slurm.sstat", cmds.sstat_cmd([job.job_id_raw]), timeout=15, requires=("sstat",),
+                               meta={"ids_raw": [job.job_id_raw]}))
+        paths = [p for p in dict.fromkeys(r.path for r in self._logs_for(job) if r.path) if p and _valid_path(p)]
+        if paths:
+            out.append(Section("slurm.logstat", cmds.logstat_cmd(paths), timeout=10, requires=("stat",),
+                               meta={"paths": paths}))
+        return out
+
+    def ingest_detail(self, job: Job, results: Mapping[str, SectionResult], ctx: HostContext) -> JobDetail:
+        now = ctx.now
+        errors: list[HostError] = []
+        d = job.key.id
+        if (r := results.get("slurm.scontrol")) is not None:
+            if not r.ok:
+                errors.append(_err(r, now))
+            if usable(r):
+                for block in parse_scontrol(r.stdout).values():
+                    rec = block.record_for(job.array_task)
+                    if rec is not None:
+                        self._store_jobinfo(d, rec, now)
+                    elif block.left_controller:
+                        self._jobinfo_gone.add(d)
+        steps: tuple[JobStep, ...] = ()
+        if (r := results.get("slurm.steps")) is not None:
+            if not r.ok:
+                errors.append(_err(r, now))
+            if usable(r):
+                parsed = parse_steps(r.stdout, cmds.step_fields(ctx.caps.sacct_fields).split(","),
+                                     tz=ctx.caps.tz_offset, sep=self._sep["sacct"])
+                if parsed.mostly_bad:
+                    errors.append(parse_error(r.name, parsed, now, "sacct steps"))
+                steps = tuple(parsed.items)
+        if (r := results.get("slurm.sstat")) is not None:
+            self._ingest_sstat(r, ctx, errors)
+        steps = self._steps_with_sstat(job, steps)
+        if (r := results.get("slurm.logstat")) is not None:
+            if usable(r):
+                self._stats.update(parse_stat_lines(r.stdout))
+            if not r.ok:
+                errors.append(_err(r, now))
+        enriched = self._enrich(job, ctx)
+        if job.state is JobState.RUNNING and enriched.gpu is None and job.alloc.gpus:
+            enriched = dataclasses.replace(enriched, gpu=job.gpu)
+        info = self._jobinfo.get(d)
+        fields: Mapping[str, str] = dict(info.fields) if info else dict(job.raw)
+        explanation = explain(enriched, steps, uid=ctx.caps.uid, slurm_config=ctx.caps.slurm_config)
+        if job.state.group is StateGroup.QUEUED and enriched.hints:
+            explanation = (*enriched.hints, *explanation)
+        return JobDetail(job=enriched, fields=fields, per_node=enriched.alloc.per_node, steps=steps,
+                         logs=enriched.logs, gpu=enriched.gpu, procs=(), procs_note=_PROCS_NOTE, env={},
+                         explanation=tuple(explanation), fetched_at=now, errors=tuple(errors),
+                         efficiency=efficiency_lines(efficiency(enriched, steps)))
+
+    def _steps_with_sstat(self, job: Job, steps: tuple[JobStep, ...]) -> tuple[JobStep, ...]:
+        """sacct leaves AveCPU/MaxRSS/TRESUsageIn* of running steps empty; fill them from the job's last sstat rows
+        (the Steps tab's MAXRSS and "GPU (max per task)" columns, the cores estimate)."""
+        rows = {r.step: r for r in self._sstat_rows.get(job.job_id_raw, [])}
+        if not rows or job.state is not JobState.RUNNING:
+            return steps
+        out = []
+        for st in steps:
+            row = rows.get(st.step_id.rpartition(".")[2]) if "." in st.step_id else None
+            if row is not None and not st.state.is_terminal:
+                st = dataclasses.replace(st, max_rss_bytes=st.max_rss_bytes if st.max_rss_bytes is not None
+                                         else row.max_rss_bytes, ave_cpu=st.ave_cpu or row.ave_cpu,
+                                         ntasks=st.ntasks if st.ntasks is not None else row.ntasks,
+                                         tres_usage_max=st.tres_usage_max or row.tres_max,     # GPU (max per task)
+                                         tres_usage_tot=st.tres_usage_tot or row.tres_tot)
+            out.append(st)
+        return tuple(out)
+
+    def shell_command(self, job: Job | None, ctx: HostContext, node: str | None = None) -> str | None:
+        """A running job: a login shell on its node, inside the job (`srun --overlap --pty`: the job's cgroup and
+        GPUs; works where sshd refuses compute-node logins, e.g. lyra). The step ends with the shell; it leaves a
+        sacct step row. Otherwise (or for a node-less row): its WorkDir on the login node."""
+        if job is None:
+            return None
+        target = _shell_node(job, node)
+        if target is None:
+            if not job.workdir or not _valid_path(job.workdir):
+                return None
+            return f'cd {shlex.quote(job.workdir)} && exec "$SHELL" -l'
+        cd = f"cd {shlex.quote(job.workdir)} 2>/dev/null; " if job.workdir and _valid_path(job.workdir) else ""
+        overlap = " --overlap" if _has_overlap(ctx.caps.slurm_version) else ""
+        hello = f"runfleet: shell on {target} inside job {job.key.id} (exit leaves the job running)"
+        script = (f"{cd}printf '%s\\n' {shlex.quote(hello)}; "
+                  f'srun --jobid={job.job_id_raw}{overlap} --pty -N1 -n1 -w {target} "${{SHELL:-sh}}" -l; rc=$?; '
+                  f'[ "$rc" -eq 0 ] || [ "$rc" -eq 130 ] || '
+                  f"{{ printf 'runfleet: srun exited with %s - press Enter ' \"$rc\"; read _rf; }}")
+        return f"exec sh -c {shlex.quote(script)}"      # the login shell may be csh/fish: run the script in sh
+
+    # ------------------------------------------------------------ attach (§7.16)
+    def attach_modes(self, job: Job, ctx: HostContext) -> tuple[AttachMode, ...]:
+        return attach.modes(job, ctx.caps, overlap=_has_overlap(ctx.caps.slurm_version))
+
+    def plan_attach(self, job: Job, mode: AttachMode, ctx: HostContext, *,
+                    node: str | None = None) -> AttachPlan:
+        nodes = attach.target_nodes(job, mode, node)
+        if mode == "srun" and not _has_overlap(ctx.caps.slurm_version):
+            raise AttachBlocked(f"srun --overlap needs Slurm 20.11 or newer ({ctx.host.name} runs "
+                                f"{ctx.caps.slurm_version})")
+        return attach.build_plan(job, mode, nodes, {n: self._attach_jobs(job, n, ctx) for n in nodes})
+
+    def _attach_jobs(self, job: Job, node: str, ctx: HostContext) -> list[tuple[str, str]]:
+        """(raw id, SLUID or "") of the jobs node.cg / node.pids read on `node`: the target, then the user's other
+        running jobs there (newest first; k2 lets a session read every own job's cgroup on the node)."""
+        out = [(job.job_id_raw, self._sluid(job))]
+        for other in self._own_running(ctx):
+            if node in other.nodes and other.job_id_raw.isdigit() and other.job_id_raw not in {j for j, _ in out}:
+                out.append((other.job_id_raw, self._sluid(other)))
+        return out[:attach.MAX_NODE_JOBS]
+
+    def _sluid(self, job: Job) -> str:
+        info = self._jobinfo.get(job.key.id)
+        return (info.fields.get("SLUID") or "") if info is not None else ""
+
+    def _key_of_raw(self, raw: str) -> JobKey | None:
+        for j in self._live.values():
+            if j.job_id_raw == raw:
+                return j.key
+        return JobKey(self.host.name, raw) if raw.isdigit() else None
+
+    def _known_idx(self, raw: str, node: str) -> tuple[int, ...]:
+        """scontrol -d GPU indices of job `raw` on `node` (() unknown): cross-checks the ssh minor → IDX mapping."""
+        job = next((j for j in self._live.values() if j.job_id_raw == raw), None)
+        if job is None:
+            return ()
+        info = self._jobinfo.get(job.key.id)
+        per_node = info.per_node if info is not None and info.per_node else job.alloc.per_node
+        return next((na.gpu_indices for na in per_node if na.node == node), ())
+
+    def ingest_attach(self, plan: AttachPlan, results: Mapping[str, SectionResult], ctx: HostContext, *,
+                      previous: JobLive | None = None) -> tuple[JobLive, Mapping[str, object]]:
+        job = self._live.get(plan.key.id)
+        ax = attach.IngestContext(host=ctx.host.name, user=ctx.caps.remote_user, now=ctx.now,
+                                  job_key=self._key_of_raw, known_idx=self._known_idx,
+                                  job_gpus=max(job.alloc.gpus, self._resolved_gres(job)[0]) if job else None)
+        res = attach.ingest(plan, results, ax, previous=previous)
+        if res.gpu_model is not None and res.gpu_model != self._smi_model.get(plan.key.id):
+            log.info("%s: job %s runs on %s (nvidia-smi)", self.host.name, plan.key.id, res.gpu_model[0])
+            self._smi_model[plan.key.id] = res.gpu_model
+        return res.live, res.caps_patch
+
+    # ------------------------------------------------------------ actions
+    def actions(self, jobs: Sequence[Job], ctx: HostContext) -> list[ActionSpec]:
+        return slurm_actions.specs(jobs, ctx)
+
+    def plan_action(self, action_id: str, jobs: Sequence[Job], params: Mapping[str, object],
+                    ctx: HostContext) -> ActionPlan:
+        return slurm_actions.plan(action_id, jobs, params, ctx)
+
+    def interpret_action(self, plan: ActionPlan, results: Mapping[str, SectionResult],
+                         ctx: HostContext) -> list[ActionResult]:
+        return slurm_actions.interpret(plan, results, ctx)
+
+
+# ---------------------------------------------------------------- helpers
+def _cpu_pct(usage: StepUsage, elapsed: timedelta | None) -> float | None:
+    """Lifetime CPU use of the job's main step in % of one core: AveCPU × NTasks / elapsed (sstat, §5.1)."""
+    if usage.ave_cpu is None or elapsed is None or elapsed.total_seconds() <= 0:
+        return None
+    return usage.ave_cpu.total_seconds() * max(1, usage.row.ntasks) / elapsed.total_seconds() * 100
+
+
+def _is_array_summary(job: Job) -> bool:
+    """A pending array summary row (`500_[2-20%1]`): its id is a range, not one job; no sacct row ever matches it."""
+    return job.array_task is not None and not job.array_task.isdigit()
+
+
+def _summary_resolved(summary: Job, jobs: Mapping[str, Job]) -> bool:
+    """A vanished summary is accounted for once a terminal row of one of its tasks shows up (any task of the array
+    when Slurm truncated the list)."""
+    tasks = expand_array_tasks(summary.array_task)
+    return any(j.array_job_id == summary.array_job_id and j.state.is_terminal and j.array_task is not None
+               and j.array_task.isdigit() and (tasks is None or int(j.array_task) in tasks) for j in jobs.values())
+
+
+def _backoff(tries: int) -> timedelta:
+    """30 s, 1 min, 2 min, … at most 10 min."""
+    return timedelta(seconds=min(600, 30 * 2 ** (min(tries, 6) - 1)))
+
+
+def _shell_node(job: Job, node: str | None) -> str | None:
+    """The node a job shell attaches to: `node` if it is one of the job's, else the batch host / first node; None when
+    the job is not running here (pending, finished, a multi-row summary) or its ids are not safe to put in a command."""
+    if job.state is not JobState.RUNNING or not job.job_id_raw.isdigit():
+        return None
+    nodes = job.nodes or ((job.batch_host,) if job.batch_host else ())
+    target = node if node is not None and node in nodes else (job.batch_host if job.batch_host in nodes else None)
+    target = target or (nodes[0] if nodes else None)
+    return target if target is not None and _NODE_RE.match(target) else None
+
+
+def _has_overlap(version: str | None) -> bool:
+    """`srun --overlap` exists since 20.11 (and is needed there to share the job's CPUs/GPUs); unknown = assume so."""
+    m = re.match(r"(\d+)\.(\d+)", version or "")
+    return m is None or (int(m[1]), int(m[2])) >= (20, 11)
+
+
+_NODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
+
+
+def _valid_path(p: str) -> bool:
+    return p.startswith("/") and "\x00" not in p and "\n" not in p
+
+
+def _err(r: SectionResult, at: datetime) -> HostError:
+    """Section failure with the Slurm-specific one-liners of §9 rows 10-11."""
+    summary: str | None = None
+    if r.outcome in (SectionOutcome.FAILED, SectionOutcome.STDERR_ONLY):
+        if r.name in ("slurm.squeue", "slurm.scontrol", "slurm.sinfo") and _CTLD_DOWN.search(r.stderr):
+            summary = "slurmctld unreachable"
+        elif r.name.startswith("slurm.sacct") and _DBD_DOWN.search(r.stderr):
+            summary = "slurmdbd unreachable"
+    err = section_error(r, at, summary=summary)
+    assert err is not None
+    return err
+
+
+def parse_capabilities(results: Mapping[str, SectionResult]) -> dict[str, object]:
+    """Capability sections (§5.1) → Capabilities fields."""
+    out: dict[str, object] = {}
+    r = results.get("slurm.version")
+    if r is not None and usable(r):
+        m = re.search(r"(\d+\.\d+(?:\.\d+)?)", r.stdout)
+        if m:
+            out["slurm_version"] = m.group(1)
+    r = results.get("slurm.config")
+    if r is not None and usable(r):
+        cfg: dict[str, str] = {}
+        for line in r.stdout.splitlines():
+            key, eq, value = line.partition("=")
+            if eq and key.strip():
+                cfg[key.strip()] = value.strip()
+        out["slurm_config"] = cfg
+        if cfg.get("ClusterName"):
+            out["cluster_name"] = cfg["ClusterName"]
+        freq = seconds_prefix(cfg.get("JobAcctGatherFrequency"))
+        if freq is not None:
+            out["acct_gather_freq_s"] = freq
+    r = results.get("slurm.assoc")
+    if r is not None and usable(r):
+        assoc: list[tuple[str, str, str, str]] = []
+        for line in r.stdout.splitlines():
+            parts = line.split("|")
+            if len(parts) >= 4 and parts[0]:
+                assoc.append((parts[0], parts[1], parts[2], parts[3]))
+        out["associations"] = tuple(assoc)
+    r = results.get("slurm.sacctfmt")
+    if r is not None and usable(r):
+        out["sacct_fields"] = frozenset(r.stdout.split())
+    r = results.get("slurm.gputres")
+    if r is not None and usable(r):
+        seed = gputres_seed(r.stdout)
+        if seed is not None:
+            out["gpu_tres"] = seed
+    return out

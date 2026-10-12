@@ -1,0 +1,9 @@
+# vega: ssh to a node without a job of the user (n-38-06): pam_slurm_adopt refuses the session after auth.
+# The field ssh ran without LogLevel=ERROR; with it, OpenSSH hides this banner and the "Connection closed" line
+# (rc 255, no message): tests cover that variant synthetically.
+# source (raw capture, not published): vega/08-node2-and-adopt-negative.txt (rc 255, 162 ms)
+host=vega
+mode=ssh
+job=724655
+nodes=n-38-06
+jobs.n-38-06=724655

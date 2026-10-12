@@ -1,0 +1,2 @@
+0, GPU-c6faebeb-cf00-3f1a-1182-49cec7f3d256, NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 97, 15246, 97887, 55, 195.87, 300.00
+1, GPU-35765204-ac46-81e4-b43b-71a7d77aedd9, NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 100, 15244, 97887, 57, 209.38, 300.00

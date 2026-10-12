@@ -1,0 +1,9 @@
+lynx.example.edu
+alice07
+SHELL=/usr/bin/zsh
+/data/home/alice07:/usr/bin/zsh
+HOME=/data/home/alice07
+/dev/md0       xfs   3906249984 2109375000 1796874984      55% /data
+VERSION_ID="9.8"
+PRETTY_NAME="AlmaLinux 9.8 (Olive Jaguar)"
+5.14.0-687.5.4.el9_8.x86_64

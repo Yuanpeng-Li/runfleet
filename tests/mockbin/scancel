@@ -1,0 +1,5 @@
+#!/bin/sh
+# mock scancel: records its argv; RF_MOCK_SCANCEL_ERR makes it fail like scancel does
+. "$RF_MOCK_BIN/_lib.sh"
+mock_log scancel "$@"; mock_env scancel; mock_fail SCANCEL
+exit 0

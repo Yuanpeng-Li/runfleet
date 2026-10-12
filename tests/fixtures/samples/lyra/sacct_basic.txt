@@ -1,0 +1,17 @@
+31327999|orb-swp--train--warmup--s49--a01|COMPLETED|0:0|14:46:13|2026-09-04T19:47:35|2026-09-05T10:33:48|lyra-gpu-r71-01|billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1|free-gpuxl|/vol/alice07/orb
+31328000|orb-swp--train--const--s49--a01|COMPLETED|0:0|15:53:00|2026-09-04T19:47:38|2026-09-05T11:40:38|lyra-gpu-s71-02|billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1|free-gpuxl|/vol/alice07/orb
+31328001|orb-swp--train--warmup--s50--a01|COMPLETED|0:0|13:25:16|2026-09-04T20:06:47|2026-09-05T09:32:03|lyra-gpu-s71-00|billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1|free-gpuxl|/vol/alice07/orb
+31328002|orb-swp--train--const--s50--a01|COMPLETED|0:0|16:13:19|2026-09-04T20:31:16|2026-09-05T12:44:35|lyra-gpu-r71-00|billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1|free-gpuxl|/vol/alice07/orb
+31328003|orb-swp--train--warmup--s51--a01|COMPLETED|0:0|13:42:17|2026-09-04T20:31:36|2026-09-05T10:13:53|lyra-gpu-r71-01|billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1|free-gpuxl|/vol/alice07/orb
+31328004|orb-swp--train--const--s51--a01|COMPLETED|0:0|16:02:14|2026-09-04T20:48:26|2026-09-05T12:50:40|lyra-gpu-r71-01|billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1|free-gpuxl|/vol/alice07/orb
+31354773|orb-swp--train--voc-cosinewarm--s43--a01|COMPLETED|0:0|11:48:35|2026-09-06T09:04:16|2026-09-06T20:52:51|lyra-gpu-r71-00|billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1|free-gpuxl|/vol/alice07/orb
+31354778|orb-swp--train--voc-cosinewarm--s49--a01|COMPLETED|0:0|12:25:24|2026-09-06T09:23:43|2026-09-06T21:49:07|lyra-gpu-s71-03|billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1|free-gpuxl|/vol/alice07/orb
+31354780|orb-swp--train--voc-cosinewarm--s50--a01|COMPLETED|0:0|12:11:58|2026-09-06T09:28:52|2026-09-06T21:40:50|lyra-gpu-r71-00|billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1|free-gpuxl|/vol/alice07/orb
+31354783|orb-swp--train--voc-cosinewarm--s51--a01|COMPLETED|0:0|11:28:19|2026-09-06T09:32:35|2026-09-06T21:00:54|lyra-gpu-s71-02|billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1|free-gpuxl|/vol/alice07/orb
+31354784|orb-swp--train--places-warmup--s42--a01|COMPLETED|0:0|06:51:38|2026-09-06T10:31:04|2026-09-06T17:22:42|lyra-gpu-p71-00|billing=8,cpu=8,gres/gpu=1,mem=60G,node=1|free-gpu|/vol/alice07/orb
+31354785|orb-swp--train--places-cosinewarm--s42--a01|COMPLETED|0:0|07:06:58|2026-09-06T11:18:15|2026-09-06T18:25:13|lyra-gpu-q71-08|billing=8,cpu=8,gres/gpu=1,mem=60G,node=1|free-gpu|/vol/alice07/orb
+31354786|orb-swp--train--places-warmup--s43--a01|COMPLETED|0:0|07:00:13|2026-09-06T11:20:51|2026-09-06T18:21:04|lyra-gpu-q71-09|billing=8,cpu=8,gres/gpu=1,mem=60G,node=1|free-gpu|/vol/alice07/orb
+31354787|orb-swp--train--places-cosinewarm--s43--a01|COMPLETED|0:0|07:00:57|2026-09-06T11:20:51|2026-09-06T18:21:48|lyra-gpu-q71-00|billing=8,cpu=8,gres/gpu=1,mem=60G,node=1|free-gpu|/vol/alice07/orb
+31354788|orb-swp--train--places-warmup--s44--a01|COMPLETED|0:0|06:59:48|2026-09-06T11:22:23|2026-09-06T18:22:11|lyra-gpu-q71-07|billing=8,cpu=8,gres/gpu=1,mem=60G,node=1|free-gpu|/vol/alice07/orb
+31354789|orb-swp--train--places-cosinewarm--s44--a01|PREEMPTED|0:0|00:01:04|2026-09-06T11:27:29|2026-09-06T11:28:33|lyra-gpu-q71-01|billing=8,cpu=8,gres/gpu=1,mem=60G,node=1|free-gpu|/vol/alice07/orb
+31358335|orb-swp--train--places-cosinewarm--s44--a01|COMPLETED|0:0|07:15:44|2026-09-06T11:45:32|2026-09-06T19:01:16|lyra-gpu-q71-02|billing=8,cpu=8,gres/gpu=1,mem=60G,node=1|free-gpu|/vol/alice07/orb

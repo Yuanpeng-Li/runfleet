@@ -1,0 +1,2 @@
+723954.extern|1|213503982334-14:25:51|||energy=0|energy=0
+723954.batch|1|05:56:07|159645032K|217216640K|cpu=05:56:07,energy=0,fs/disk=2239448041,gres/gpumem=224068M,gres/gpuutil=100,mem=159645032K,pages=8476,vmem=0|cpu=05:56:07,energy=0,fs/disk=2239448041,gres/gpumem=225896M,gres/gpuutil=169,mem=217216640K,pages=8476,vmem=0

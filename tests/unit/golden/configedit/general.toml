@@ -1,0 +1,30 @@
+# My fleet — hand-written, keep these notes.
+# (RunFleet must not lose any comment in here.)
+
+[general]
+readonly = true     # flip to true on the shared account
+default_view = "jobs"
+idle_pause_after = "8h"
+refresh_multiplier = 0.5
+
+[defaults.slurm]
+poll_jobs = "20s"    # be nice to the controller
+
+# k2: the main cluster
+[[host]]
+name = "k2"
+protected_qos = ["labpi"]   # never touch these
+
+# vega: slow cold logins (GSSAPI)
+# keep the long timeout
+[[host]]
+name = "vega"
+connect_timeout = "120s"
+
+[[host]]
+name = "lyra"
+group = "clusters"
+
+# [[host]]
+# name = "atlas"
+# ssh = "local"

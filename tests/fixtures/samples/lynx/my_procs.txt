@@ -1,0 +1,15 @@
+    PID    PPID ELAPSED %CPU %MEM STAT COMMAND
+ 639192       1   68453  0.0  0.0 Ss   /usr/lib/systemd/systemd --user
+ 639193  639192   68453  0.0  0.0 S    (sd-pam)
+ 639209  639186   68453  0.0  0.0 S    sshd-session: alice07@pts/0
+ 641936  639209   67580  0.0  0.0 Ss   -zsh
+ 641995  641936   67578  0.7  0.0 Sl+  /data/home/alice07/.local/share/uv/tools/nvitop/bin/python /data/home/alice07/.local/bin/nvitop
+ 642229       1   67514  0.0  0.0 SN   python -m orb.launch --manifest manifests/cif_s44.txt --per-gpu 1
+ 642234  642229   67514  121  1.9 RNl  /data/home/alice07/projects/orb/.venv/bin/python -m orb.train --config configs/exp_a.yaml data=cifar sched=const seed=44 run_dir=runs/cifar/baseline-const/s44
+ 786345  642229    3105  114  1.9 SNl  /data/home/alice07/projects/orb/.venv/bin/python -m orb.train --config configs/exp_a.yaml data=cifar sched=cosinewarm seed=44 run_dir=runs/cifar/baseline-cosinewarm/s44
+ 801325  639209       2  0.0  0.0 Ss   bash -s
+ 801453  801325       0  0.0  0.0 S    bash -s
+ 801454  801453       0  0.0  0.0 S    bash -s
+ 801455  801454       0  0.0  0.0 S    bash -s
+ 801456  801455       0  0.0  0.0 R    ps -u alice07 -o pid,ppid,etimes,pcpu,pmem,stat,args -ww
+ 801457  801455       0  0.0  0.0 S    head -30

@@ -1,0 +1,3 @@
+gpu_uuid, pid, process_name, used_gpu_memory [MiB]
+GPU-c6faebeb-cf00-3f1a-1182-49cec7f3d256, 786345, /data/home/alice07/projects/orb/.venv/bin/python, 15234 MiB
+GPU-35765204-ac46-81e4-b43b-71a7d77aedd9, 642234, /data/home/alice07/projects/orb/.venv/bin/python, 15234 MiB

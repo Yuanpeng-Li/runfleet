@@ -1,0 +1,13 @@
+@@cg 2332862 /sys/fs/cgroup/system.slice/n-40-01_slurmstepd.scope/job_2332862
+memory.current 10682085376
+memory.peak 13881962496
+memory.max 51539607552
+low 0
+high 0
+max 0
+oom 0
+oom_kill 0
+anon 10412097536
+file 234409984
+shmem 19664896
+usage_usec 60640091778

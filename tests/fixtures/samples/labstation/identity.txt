@@ -1,0 +1,9 @@
+labstation.example.edu
+alice07
+SHELL=/bin/zsh
+/home/alice07:/bin/zsh
+HOME=/home/alice07
+nfs.example.edu:/export/home/alice07 nfs  109951162777 52776558133 57174604644      49% /home/alice07
+PRETTY_NAME="Ubuntu 22.04.5 LTS"
+VERSION_ID="22.04"
+5.15.0-179-generic

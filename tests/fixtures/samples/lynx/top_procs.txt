@@ -1,0 +1,20 @@
+    PID USER     ELAPSED %CPU %MEM   RSS COMMAND
+ 642234 alice07    67513  121  1.9 11491076 python
+ 786345 alice07     3104  114  1.9 11425460 python
+   1702 root     11022490 1.8  0.0 21480 chronyd
+ 641995 alice07    67577  0.7  0.0 53612 nvitop
+2310457 xavier   2715506  0.4  0.0 288140 jupyter-lab
+2310611 xavier   2715499  0.3  0.0 74212 python
+     98 root     11022494 0.2  0.0     0 kswapd0
+2310902 xavier   2715470  0.2  0.2 902316 python
+   2214 root     11022488 0.1  0.0 15872 rsyslogd
+2311046 xavier   2715462  0.1  0.0 55904 tensorboard
+      1 root     11022499 0.0  0.0 18104 systemd
+      2 root     11022499 0.0  0.0     0 kthreadd
+      3 root     11022499 0.0  0.0     0 pool_workqueue_
+      4 root     11022499 0.0  0.0     0 kworker/R-rcu_gp
+      5 root     11022499 0.0  0.0     0 kworker/R-sync_wq
+      6 root     11022499 0.0  0.0     0 kworker/R-slub_flushwq
+      7 root     11022499 0.0  0.0     0 kworker/R-netns
+      9 root     11022499 0.0  0.0     0 kworker/0:0H-events_highpri
+     11 root     11022499 0.0  0.0     0 kworker/R-mm_percpu_wq

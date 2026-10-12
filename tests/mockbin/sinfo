@@ -1,0 +1,12 @@
+#!/bin/sh
+# mock sinfo: --version and the -N -O node listing (sinfo_nodes_O) in the requested separator
+. "$RF_MOCK_BIN/_lib.sh"
+mock_log sinfo "$@"; mock_env sinfo; mock_fail SINFO
+sep='|'
+for a in "$@"; do
+  case $a in
+    --version) cat "$S/sinfo_version.txt"; exit 0 ;;
+    NodeList:*) sep=$(first_char "${a#NodeList:}") ;;
+  esac
+done
+emit "$(fixture SINFO sinfo_nodes_O)" "$sep"

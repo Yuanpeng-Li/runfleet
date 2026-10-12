@@ -1,0 +1,19 @@
+#!/bin/sh
+# mock scontrol: show config, show job -d -o <id> (from the *_d fixtures), hold/release/requeue
+. "$RF_MOCK_BIN/_lib.sh"
+mock_log scontrol "$@"; mock_env scontrol; mock_fail SCONTROL
+case $1 in
+  show)
+    case $2 in
+      config) cat "$S/slurm_config.txt"; exit 0 ;;
+      job)
+        for id in "$@"; do :; done
+        for f in scontrol_show_job_running_d scontrol_show_job_d; do
+          if grep -q "^JobId=$id " "$S/$f.txt"; then cat "$S/$f.txt"; exit 0; fi
+        done
+        echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1 ;;
+    esac ;;
+  hold|release|requeue|requeuehold) exit 0 ;;
+esac
+echo "scontrol: mock does not support: $*" >&2
+exit 2

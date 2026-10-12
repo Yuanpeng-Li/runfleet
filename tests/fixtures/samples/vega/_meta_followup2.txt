@@ -1,0 +1,21 @@
+## slurm_env
+cmd: env | grep -E "^(SQUEUE|SACCT|SINFO|SLURM|SCONTROL)_" | sort; echo "(end)"
+rc=0 ms=8
+
+## sacct_state_filter_test
+cmd: echo "-s CD without -E:"; sacct -u $USER -S now-14days -X -P -n -s CD --format=JobID,State | head -3; echo "-s CD with -E now:"; sacct -u $USER -S now-14days -E now -X -P -n -s CD --format=JobID,State | head -3; echo "-s COMPLETED,FAILED with -E now:"; sacct -u $USER -S now-14days -E now -X -P -n -s COMPLETED,FAILED --format=JobID,State | head -3
+rc=0 ms=47
+
+## sacct_completed_gpu_tres
+cmd: sacct -j 724244 -P -n --format=JobID,JobName,State,ExitCode,Elapsed,MaxRSS,TRESUsageInAve%400,TRESUsageInMax%400
+rc=0 ms=16
+
+## sacct_failed_job_steps
+cmd: sacct -j 721670 -P -n --format=JobID,JobName,State,ExitCode,DerivedExitCode,Reason,Elapsed,Start,End,NodeList,MaxRSS
+rc=0 ms=17
+
+## scontrol_show_job_finished
+cmd: scontrol show job 721670 -o
+rc=1 ms=16
+stderr:
+slurm_load_jobs error: Invalid job id specified

@@ -1,0 +1,5 @@
+#!/bin/sh
+# mock sacctmgr: the user's associations (Cluster|Account|Partition|QOS)
+. "$RF_MOCK_BIN/_lib.sh"
+mock_log sacctmgr "$@"
+cut -d'|' -f1-4 "$S/sacctmgr_assoc.txt"

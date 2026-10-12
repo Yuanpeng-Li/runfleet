@@ -1,0 +1,8 @@
+# lyra: sshd on the compute nodes refuses the user before PAM (publickey and hostbased both rejected), so
+# node_ssh = "denied" and only srun can read the job.
+# source (raw capture, not published): lyra/02_ssh_node_s71-02.txt (rc 255, 295 ms), lyra/07_final_audit.txt
+host=lyra
+mode=ssh
+job=31367725
+nodes=lyra-gpu-s71-02
+jobs.lyra-gpu-s71-02=31367725 31367726

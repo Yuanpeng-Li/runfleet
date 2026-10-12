@@ -1,0 +1,5 @@
+724479|lmft-x07-trainer-s0|PENDING|0:00|2-00:00:00|1|(QOSMaxJobsPerUserLimit)|gres/gpu:nvidia_h200_nvl:2|16|256G|h200|2026-09-06T21:33:10|N/A|/shared/pilab/alix/lmft|/shared/pilab/alix/lmft/jobs/train.sbatch
+723954|lmft-x07-sampler-s1|RUNNING|5:54:15|2-00:00:00|1|n-38-01|gres/gpu:nvidia_h200_nvl:2|16|256G|h200|2026-09-05T22:06:27|2026-09-07T00:04:12|/shared/pilab/alix/lmft|/shared/pilab/alix/lmft/jobs/train.sbatch
+723952|lmft-x07-trainer-s1|RUNNING|8:26:12|2-00:00:00|1|n-38-12|gres/gpu:nvidia_h200_nvl:2|16|256G|h200|2026-09-05T22:06:26|2026-09-06T21:32:15|/shared/pilab/alix/lmft|/shared/pilab/alix/lmft/jobs/train.sbatch
+724246|orb-swp--train--voc-cosinewarm--s48--a01|RUNNING|6:04:32|2-00:00:00|1|n-38-06|gres/gpu:nvidia_h200_nvl:1|8|48G|h200|2026-09-06T11:04:08|2026-09-06T23:53:55|/shared/pilab/pilab/orb|/shared/pilab/pilab/orb/jobs/train.sbatch
+724245|orb-swp--train--voc-cosinewarm--s47--a01|RUNNING|6:05:32|2-00:00:00|1|n-37-12|gres/gpu:nvidia_h200_nvl:1|8|48G|h200|2026-09-06T11:04:07|2026-09-06T23:52:55|/shared/pilab/pilab/orb|/shared/pilab/pilab/orb/jobs/train.sbatch

@@ -1,0 +1,30 @@
+JobId=724479 JobName=lmft-x07-trainer-s0
+   SLUID=sB6TW9V7YW1N00
+   UserId=alice0001(610001) GroupId=rs(500) MCS_label=N/A
+   Priority=59928 Nice=0 Account=pilab QOS=normal
+   JobState=PENDING Reason=QOSMaxJobsPerUserLimit Dependency=(null)
+   Requeue=1 Restarts=0 BatchFlag=1 Reboot=0 ExitCode=0:0
+   DerivedExitCode=0:0
+   RunTime=00:00:00 TimeLimit=2-00:00:00 TimeMin=N/A
+   SubmitTime=2026-09-06T21:33:10 EligibleTime=2026-09-06T21:33:10
+   AccrueTime=2026-09-06T21:33:10
+   StartTime=Unknown EndTime=Unknown Deadline=N/A
+   SuspendTime=None SecsPreSuspend=0 LastSchedEval=2026-09-07T05:58:14 Scheduler=Backfill:*
+   Partition=h200 AllocNode:Sid=login-v01:824356
+   ReqNodeList=(null) ExcNodeList=n-38-06
+   NodeList=
+   NumNodes=1 NumCPUs=16 NumTasks=1 CPUs/Task=16 ReqB:S:C:T=0:0:*:*
+   ReqTRES=cpu=16,mem=256G,node=1,billing=16,gres/gpu=2,gres/gpu:nvidia_h200_nvl=2
+   AllocTRES=(null)
+   Socks/Node=* NtasksPerN:B:S:C=0:0:*:* CoreSpec=*
+   MinCPUsNode=16 MinMemoryNode=256G MinTmpDiskNode=0
+   Features=(null) DelayBoot=00:00:00
+   OverSubscribe=OK Contiguous=0 Licenses=(null) LicensesAlloc=(null) Network=(null)
+   Command=/shared/pilab/alix/lmft/jobs/train.sbatch
+   SubmitLine=sbatch --job-name=lmft-x07-trainer-s0 --chdir=/shared/pilab/alix/lmft --time=2-00:00:00 --account=pilab --exclude=n-38-06 --partition=h200 --gres=gpu:nvidia_h200_nvl:2 --cpus-per-task=16 --mem=256G --requeue jobs/train.sbatch --config configs/exp_b.yaml seed=0 lr=1e-5 steps=100
+   WorkDir=/shared/pilab/alix/lmft
+   StdErr=
+   StdIn=/dev/null
+   StdOut=/shared/pilab/alix/lmft/logs/lmft-x07-trainer-s0_724479.out
+   TresPerNode=gres/gpu:nvidia_h200_nvl:2
+   TresPerTask=cpu=16

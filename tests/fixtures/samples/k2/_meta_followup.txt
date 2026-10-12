@@ -1,0 +1,42 @@
+## running_job_source
+rc=0
+
+## scontrol_show_job_running_d
+cmd: scontrol show job 2332861 -d -o
+rc=0 ms=31
+
+## scontrol_show_job_running_multiline
+cmd: scontrol show job 2332861 -d
+rc=0 ms=30
+
+## sstat_running
+cmd: sstat -a -j 2332861 -P -n --format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,TRESUsageInAve%300,TRESUsageInMax%300
+rc=0 ms=51
+
+## sacct_running_steps
+cmd: sacct -j 2332861 -P -n --format=JobID,JobName,State,ExitCode,Elapsed,NodeList,AllocTRES,TRESUsageInMax%300
+rc=0 ms=30
+
+## sacct_completed_gpu_tres
+cmd: sacct -j NONE -P -n --format=JobID,JobName,State,ExitCode,Elapsed,MaxRSS,TRESUsageInAve%400,TRESUsageInMax%400
+rc=1 ms=25
+stderr:
+sacct: fatal: Bad job/step specified: NONE
+
+## sacct_failed_states
+cmd: sacct -u $USER -S now-30days -X -P -n -s F,TO,OOM,NF,PR,CA,BF,DL --format=JobID,JobName,State,ExitCode,DerivedExitCode,Reason,Elapsed,End,NodeList | tail -25
+rc=0 ms=26
+
+## stdout_path_stat
+cmd: p=$(scontrol show job 2332861 -o | grep -o 'StdOut=[^ ]*' | cut -d= -f2-); echo "$p"; stat -c '%s bytes mtime=%Y' "$p"
+rc=0 ms=38
+
+## scontrol_listpids_job
+cmd: scontrol listpids 2332861
+rc=1 ms=26
+stderr:
+JobId=2332861 does not exist on node (null).
+
+## squeue_array_expand
+cmd: squeue --me -h -r -o '%i|%A|%a|%F|%K|%T' | head -10
+rc=0 ms=36

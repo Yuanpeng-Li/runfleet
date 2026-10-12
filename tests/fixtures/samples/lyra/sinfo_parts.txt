@@ -1,0 +1,12 @@
+free-gpu|up|3-00:00:00|1|mixed-|gpu:V100:4|lyra-gpu-36-05
+free-gpu|up|3-00:00:00|7|mixed-|gpu:A30:4|lyra-gpu-44-[06-07],lyra-gpu-p71-00,lyra-gpu-q71-[00,02,07,09]
+free-gpu|up|3-00:00:00|3|mixed-|gpu:A100:2|lyra-gpu-q71-[04-06]
+free-gpu|up|3-00:00:00|4|mixed|gpu:V100:4|lyra-gpu-36-[01,07],lyra-gpu-37-04,lyra-gpu-38-02
+free-gpu|up|3-00:00:00|8|mixed|gpu:A30:4|lyra-gpu-38-03,lyra-gpu-44-08,lyra-gpu-p71-[01-05],lyra-gpu-q71-01
+free-gpu|up|3-00:00:00|1|mixed|gpu:A100:2|lyra-gpu-q71-03
+free-gpu|up|3-00:00:00|9|allocated|gpu:V100:4|lyra-gpu-36-[00,02-04,06],lyra-gpu-37-[02-03],lyra-gpu-38-[00-01]
+free-gpu|up|3-00:00:00|3|allocated|gpu:A30:4|lyra-gpu-38-04,lyra-gpu-44-05,lyra-gpu-q71-08
+free-gpuxl|up|3-00:00:00|2|mixed|gpu:L40S:4|lyra-gpu-p71-[06-07]
+free-gpuxl|up|3-00:00:00|6|mixed|gpu:RTX6000:4|lyra-gpu-r71-[00-02],lyra-gpu-s71-[00,02-03]
+free-gpuxl|up|3-00:00:00|1|allocated|gpu:RTX6000:4|lyra-gpu-s71-01
+free-gpuxl|up|3-00:00:00|1|idle|gpu:L40S:4|lyra-gpu-p71-08

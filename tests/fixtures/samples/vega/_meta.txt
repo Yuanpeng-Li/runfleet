@@ -1,0 +1,149 @@
+## identity
+cmd: hostname; whoami; echo "SHELL=$SHELL"; getent passwd "$USER" | cut -d: -f6,7; echo "HOME=$HOME"; df -PT "$HOME" | tail -1; stat -f -c "fstype=%T" "$HOME"; grep -E "^(PRETTY_NAME|VERSION_ID)=" /etc/os-release; uname -r; nproc; cat /proc/loadavg
+rc=0 ms=32
+
+## sinfo_version
+cmd: sinfo --version
+rc=0 ms=14
+
+## commands
+cmd: for c in squeue sacct sinfo scontrol sshare sprio sstat sacctmgr sbank srun nvidia-smi python3 jq timeout tmux; do printf "%s " "$c"; command -v "$c" || echo MISSING; done; python3 --version 2>&1; jq --version 2>&1
+rc=0 ms=43
+
+## scontrol_listpids
+cmd: scontrol help 2>&1 | grep -iE "listpids|listjobs|liststeps" ; echo ---; scontrol listpids 2>&1 | head -5
+rc=0 ms=26
+
+## slurm_config
+cmd: scontrol show config | grep -E "^(ClusterName|SLURM_VERSION|AccountingStorageType|AccountingStorageEnforce|JobAcctGatherType|JobAcctGatherFrequency|MinJobAge|MessageTimeout|PrologFlags|ProctrackType|TaskPlugin|SelectType |SelectTypeParameters|PreemptType|PreemptMode|LaunchParameters|UsePAM|GresTypes|DataParserParameters|SlurmctldParameters|PrivateData|MaxJobCount|SchedulerType) "
+rc=0 ms=17
+
+## pam_adopt_login
+cmd: grep -l pam_slurm /etc/pam.d/* 2>/dev/null; echo "(login-node pam.d only; compute-node pam not visible)"
+rc=0 ms=7
+
+## squeue_me_default
+cmd: squeue --me
+rc=0 ms=20
+
+## squeue_me_o
+cmd: squeue --me -h -o '%i|%j|%T|%M|%l|%D|%R|%b|%C|%m|%P|%V|%S|%Z|%o'
+rc=0 ms=19
+
+## squeue_me_O
+cmd: squeue --me -h -O 'JobID:|,ArrayJobID:|,ArrayTaskID:|,Name:|,UserName:|,State:|,StateCompact:|,Reason:|,TimeUsed:|,TimeLimit:|,TimeLeft:|,NumNodes:|,NumCPUs:|,MinMemory:|,Partition:|,QOS:|,Account:|,SubmitTime:|,StartTime:|,EndTime:|,NodeList:|,BatchHost:|,tres-alloc:|,tres-per-node:|,tres-per-job:|,RestartCnt:|,STDOUT:|,STDERR:|,WorkDir:|,Command:|'
+rc=0 ms=18
+
+## squeue_me_json_size
+cmd: squeue --me --json | wc -c
+rc=0 ms=23
+
+## squeue_me_json
+cmd: squeue --me --json | head -c 400000
+rc=0 ms=28
+
+## squeue_parts_O
+cmd: squeue -p 'h200,h100,a30' -h -O 'JobID:|,ArrayJobID:|,ArrayTaskID:|,Name:|,UserName:|,State:|,StateCompact:|,Reason:|,TimeUsed:|,TimeLimit:|,TimeLeft:|,NumNodes:|,NumCPUs:|,MinMemory:|,Partition:|,QOS:|,Account:|,SubmitTime:|,StartTime:|,EndTime:|,NodeList:|,BatchHost:|,tres-alloc:|,tres-per-node:|,tres-per-job:|,RestartCnt:|,STDOUT:|,STDERR:|,WorkDir:|,Command:|' | head -25
+rc=0 ms=45
+
+## squeue_parts_o
+cmd: squeue -p 'h200,h100,a30' -h -o '%i|%j|%T|%M|%l|%D|%R|%b|%C|%m|%P|%V|%S|%Z|%o' | head -25
+rc=0 ms=21
+
+## squeue_parts_states
+cmd: squeue -p 'h200,h100,a30' -h -o '%T' | sort | uniq -c
+rc=0 ms=21
+
+## sacct_basic
+cmd: sacct -u $USER -S now-2days -X -P -n --format=JobID,JobName,State,ExitCode,Elapsed,Start,End,NodeList,AllocTRES,Partition,WorkDir
+rc=0 ms=17
+
+## sacct_ext
+cmd: sacct -u $USER -S now-14days -X -P -n --format=JobID,JobIDRaw,JobName,User,Account,QOS,Partition,State,ExitCode,DerivedExitCode,Reason,Submit,Start,End,Elapsed,Timelimit,AllocCPUS,ReqMem,ReqTRES,AllocTRES,NNodes,NodeList,WorkDir | tail -40
+rc=0 ms=23
+
+## sacct_steps
+cmd: j=$(sacct -u $USER -S now-14days -X -P -n --format=JobID | tail -1); [ -n "$j" ] && sacct -j "$j" -P -n --format=JobID,JobName,State,ExitCode,Elapsed,MaxRSS,AveCPU,TRESUsageInMax%200
+rc=0 ms=34
+
+## sacct_json_size
+cmd: sacct -u $USER -S now-2days -X --json | wc -c
+rc=0 ms=33
+
+## scontrol_job_source
+rc=0
+
+## scontrol_show_job
+cmd: scontrol show job 724479 -o
+rc=0 ms=16
+
+## scontrol_show_job_d
+cmd: scontrol show job 724479 -d -o
+rc=0 ms=16
+
+## scontrol_show_job_multiline
+cmd: scontrol show job 724479 -d
+rc=0 ms=15
+
+## sinfo_parts
+cmd: sinfo -h -p 'h200,h100,a30' -o '%P|%a|%l|%D|%T|%G|%N'
+rc=0 ms=16
+
+## sinfo_nodes_O
+cmd: sinfo -h -N -p 'h200,h100,a30' -O 'NodeList:|,Partition:|,StateLong:|,CPUsState:|,Memory:|,AllocMem:|,FreeMem:|,Gres:|,GresUsed:|,Reason:|'
+rc=0 ms=17
+
+## sinfo_summary
+cmd: sinfo -s
+rc=0 ms=17
+
+## scontrol_show_node
+cmd: scontrol show node $(scontrol show hostnames 'n-31-01' 2>/dev/null | head -1) -o
+rc=0 ms=27
+
+## sacctmgr_assoc
+cmd: sacctmgr -n -P show assoc where user=$USER format=Cluster,Account,Partition,QOS,GrpTRES,MaxJobs,MaxSubmit
+rc=0 ms=19
+
+## running_job_source
+rc=0
+
+## scontrol_show_job_running_d
+cmd: scontrol show job 723954 -d -o
+rc=0 ms=17
+
+## scontrol_show_job_running_multiline
+cmd: scontrol show job 723954 -d
+rc=0 ms=20
+
+## sstat_running
+cmd: sstat -a -j 723954 -P -n --format=JobID,NTasks,AveCPU,AveRSS,MaxRSS,TRESUsageInAve%300,TRESUsageInMax%300
+rc=0 ms=69
+
+## sacct_running_steps
+cmd: sacct -j 723954 -P -n --format=JobID,JobName,State,ExitCode,Elapsed,NodeList,AllocTRES,TRESUsageInMax%300
+rc=0 ms=17
+
+## sacct_completed_gpu_tres
+cmd: sacct -j NONE -P -n --format=JobID,JobName,State,ExitCode,Elapsed,MaxRSS,TRESUsageInAve%400,TRESUsageInMax%400
+rc=1 ms=14
+stderr:
+sacct: fatal: Bad job/step specified: NONE
+
+## sacct_failed_states
+cmd: sacct -u $USER -S now-30days -X -P -n -s F,TO,OOM,NF,PR,CA,BF,DL --format=JobID,JobName,State,ExitCode,DerivedExitCode,Reason,Elapsed,End,NodeList | tail -25
+rc=0 ms=16
+
+## stdout_path_stat
+cmd: p=$(scontrol show job 723954 -o | grep -o 'StdOut=[^ ]*' | cut -d= -f2-); echo "$p"; stat -c '%s bytes mtime=%Y' "$p"
+rc=0 ms=23
+
+## scontrol_listpids_job
+cmd: scontrol listpids 723954
+rc=1 ms=15
+stderr:
+JobId=723954 does not exist on node (null).
+
+## squeue_array_expand
+cmd: squeue --me -h -r -o '%i|%A|%a|%F|%K|%T' | head -10
+rc=0 ms=23

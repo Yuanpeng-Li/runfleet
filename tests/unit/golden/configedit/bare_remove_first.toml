@@ -1,0 +1,7 @@
+# vega: slow logins
+[[host]]
+name = "vega"
+connect_timeout = "120s"
+
+[[host]]
+name = "lyra"

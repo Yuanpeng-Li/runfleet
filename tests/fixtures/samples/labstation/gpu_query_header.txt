@@ -1,0 +1,5 @@
+index, uuid, name, utilization.gpu [%], memory.used [MiB], memory.total [MiB], temperature.gpu, power.draw [W], power.limit [W], fan.speed [%], pstate, clocks.current.sm [MHz], utilization.memory [%]
+0, GPU-4e050371-ee67-0bb4-bab4-c813e9a744d2, NVIDIA RTX A6000, 0 %, 1 MiB, 49140 MiB, 30, 23.95 W, 300.00 W, 30 %, P8, 210 MHz, 0 %
+1, GPU-56d77d13-b29e-6b87-795d-377913f8ad57, NVIDIA RTX A6000, 0 %, 1 MiB, 49140 MiB, 31, 27.88 W, 300.00 W, 30 %, P8, 210 MHz, 0 %
+2, GPU-f38d7a35-ee30-7409-6ef0-7e2de081d943, NVIDIA RTX A6000, 0 %, 1 MiB, 49140 MiB, 29, 19.93 W, 300.00 W, 30 %, P8, 210 MHz, 0 %
+3, GPU-d5f3487b-34d5-9bc6-16d5-f3d609021850, NVIDIA RTX A6000, 70 %, 21464 MiB, 49140 MiB, 78, 286.58 W, 300.00 W, 52 %, P2, 1860 MHz, 59 %

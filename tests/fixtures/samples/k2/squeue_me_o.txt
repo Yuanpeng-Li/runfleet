@@ -1,0 +1,5 @@
+2334564|smoke-test|PENDING|0:00|1:00:00|1|(Priority)|gres/gpu:nvidia_geforce_rtx_3090:1|8|48G|gpu-preempt|2026-09-07T05:39:20|2026-09-07T06:31:41|/shared/pilab/pilab/rl-benchmarks|/shared/pilab/pilab/rl-benchmarks/jobs/train.sbatch
+2332861|orb-swp--train--cifar-warmup--s43--a02|RUNNING|4:07:00|3-00:00:00|1|n-40-01|gres/gpu:nvidia_a100-sxm4-40gb:1|8|48G|gpu-preempt|2026-09-06T11:14:06|2026-09-07T01:50:27|/shared/pilab/pilab/orb|/shared/pilab/pilab/orb/jobs/train.sbatch
+2332862|orb-swp--train--cifar-const--s43--a02|RUNNING|4:07:00|3-00:00:00|1|n-40-01|gres/gpu:nvidia_a100-sxm4-40gb:1|8|48G|gpu-preempt|2026-09-06T11:14:07|2026-09-07T01:50:27|/shared/pilab/pilab/orb|/shared/pilab/pilab/orb/jobs/train.sbatch
+2332863|orb-swp--train--cifar-cosinewarm--s43--a02|RUNNING|4:07:00|3-00:00:00|1|n-40-01|gres/gpu:nvidia_a100-sxm4-40gb:1|8|48G|gpu-preempt|2026-09-06T11:14:07|2026-09-07T01:50:27|/shared/pilab/pilab/orb|/shared/pilab/pilab/orb/jobs/train.sbatch
+2333760|lmft-x07-sampler-s0|RUNNING|9:02:14|2-00:00:00|1|n-38-01|gres/gpu:nvidia_h200_nvl:2|16|256G|gpu-preempt|2026-09-06T20:54:51|2026-09-06T20:55:13|/shared/pilab/alix/lmft|/shared/pilab/alix/lmft/jobs/train.sbatch

@@ -1,0 +1,3 @@
+2332861|orb-swp--train--cifar-warmup--s43--a02|RUNNING|0:0|04:07:40|n-40-01|billing=8,cpu=8,gres/gpu:nvidia_a100-sxm4-40gb=1,gres/gpu=1,mem=48G,node=1|
+2332861.batch|batch|RUNNING|0:0|04:07:40|n-40-01|cpu=8,gres/gpu:nvidia_a100-sxm4-40gb=1,gres/gpu=1,mem=48G,node=1|
+2332861.extern|extern|RUNNING|0:0|04:07:40|n-40-01|billing=8,cpu=8,gres/gpu:nvidia_a100-sxm4-40gb=1,gres/gpu=1,mem=48G,node=1|

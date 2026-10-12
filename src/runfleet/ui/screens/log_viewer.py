@@ -1,0 +1,251 @@
+"""[WP3] Log viewer screen: append + follow (mockup I).
+
+Full-screen log of one job: header with the path, stream tabs (``o``/``e``) with load and follow state, the log
+body (``RichLog``, 20 000 lines) and the live ``\\r`` line. ``/`` searches the buffer (``n``/``N`` next/previous);
+``]``/``[`` jump between error and warning lines (highlighted); ``p`` opens the whole file in ``$PAGER``.
+"""
+
+from __future__ import annotations
+
+import re
+
+from rich.text import Text
+from textual.app import ComposeResult
+from textual.widgets import Input, Static
+
+from runfleet.core.service import LogUpdate
+from runfleet.models import Job, JobKey, Visibility
+from runfleet.ui import keymap, theme
+from runfleet.ui.messages import FleetChanged
+from runfleet.ui.screens import FleetScreen
+from runfleet.ui.widgets.header import FleetHeader
+from runfleet.ui.widgets.hintbar import HintBar
+from runfleet.ui.widgets.log_view import RECONNECT_DELAYS, LogFollower, LogView
+from runfleet.ui.widgets.tabs import tab_strip
+from runfleet.util import humanize
+
+STREAM_TAIL_BYTES = 65536          # FleetAPI.stream_log(tail_bytes=...) default (§3.7)
+
+
+class LogScreen(FleetScreen):
+    BINDINGS = keymap.bindings("log")
+    HELP_CONTEXTS = ("log", "global")
+    HELP_TITLE = "Log viewer"
+
+    def __init__(self, key: JobKey, stream: str = "stdout") -> None:
+        super().__init__()
+        self.key = key
+        self.stream = stream
+        self.loaded = 0
+        self.ended = False
+        self.follower: LogFollower | None = None
+
+    def compose(self) -> ComposeResult:
+        job = self.rf.store.job(self.key)
+        label = job.key.label if job is not None else self.key.id
+        yield FleetHeader(crumbs=["Jobs", label, self.stream], host=self.key.host, id="header")
+        yield Static("", id="streams", classes="title-line")
+        yield LogView(id="log-view")
+        search = Input(placeholder="search the buffer (enter: find · esc: cancel)", id="log-search", compact=True)
+        search.display = False
+        yield search
+        yield HintBar(self.help_contexts(), id="hints")
+
+    def on_mount(self) -> None:
+        self.follower = LogFollower(self, [self.query_one(LogView)], on_update=self.on_log_update)
+        self._start()
+        if self.open_search:
+            self.action_search()
+
+    open_search = False                     # set by `/` in job detail: open with the search box
+    open_at: re.Pattern[str] | None = None  # set by `L` in job detail: land on the first line of the cause chip
+
+    @property
+    def job(self) -> Job | None:
+        return self.rf.store.job(self.key)
+
+    def _start(self, *, retry: bool = False) -> None:
+        job = self.job
+        if job is None or self.follower is None:
+            return
+        ref = self.rf.log_ref(job, self.stream)
+        self.loaded = 0
+        self.ended = False
+        view = self.query_one(LogView)
+        view.ended = job.state.is_terminal
+        header = self.query_one(FleetHeader)
+        header.crumbs = ("Jobs", job.key.label, self.stream)
+        header.refresh_content()
+        if ref is not None:
+            self.follower.start(job.key.host, ref, retry=retry)
+        else:                      # never leave the previous stream writing under the new label
+            self.follower.stop()
+            view.reset()
+            view.apply(LogUpdate(note="no log path known"))
+        self._render_streams()
+
+    def _keep_following(self) -> None:
+        """Start the stream once its path becomes known (or changes: requeue); reopen a dead stream with backoff
+        while this screen is on top, the host answers and the job may still be writing."""
+        job, follower = self.job, self.follower
+        if job is None or follower is None:
+            return
+        ref = self.rf.log_ref(job, self.stream)
+        if ref is not None and ref.path is not None and (follower.ref is None or follower.ref.path != ref.path):
+            self._start()
+            return
+        state = self.rf.store.hosts.get(self.key.host)
+        fresh = state is not None and not theme.is_problem(state.status.state) and not state.stale(self.rf.now())
+        if self.app.screen is self and fresh and not job.state.is_terminal and follower.reconnect_due():
+            self._start(retry=True)
+
+    def on_log_update(self, update: LogUpdate) -> None:
+        self.loaded += sum(len(line.encode("utf-8", "replace")) + 1 for line in update.lines)
+        if update.eof:
+            self.ended = True
+        if self.open_at is not None and update.lines:
+            self.call_after_refresh(self._land_on_cause)
+        self._render_streams()
+
+    def _land_on_cause(self) -> None:
+        """Opened from the cause chip: the first loaded line of the cause, once the buffer has it (then never again,
+        so following / jumping afterwards is the user's)."""
+        if self.open_at is not None and self.query_one(LogView).jump_error(pattern=self.open_at, first=True) \
+                is not None:
+            self.open_at = None
+            self._render_streams()
+
+    def _render_streams(self) -> None:
+        job = self.job
+        streams = self.query_one("#streams", Static)
+        width = streams.size.width or (self.size.width or 120) - 2
+        ref = self.rf.log_ref(job, self.stream) if job is not None else None
+        merged = ref is not None and ref.merged and self.stream == "stderr"
+        items = [("stdout", "stdout"), ("stderr", "stderr (merged)" if merged else "stderr")]
+        line = Text(" ")
+        line.append_text(tab_strip(items, self.stream, "screen.stream"))
+        view = self.query_one(LogView)
+        info = Text(f"   {humanize.size(self.loaded)} loaded", style=theme.muted())
+        if ref is not None and ref.size is not None:
+            # `loaded` counts lines after "\r" collapsing, so it undercounts tqdm logs; the stream starts with the
+            # last STREAM_TAIL_BYTES (FleetAPI.stream_log default), so a file at most that big was read whole
+            whole = self.loaded >= ref.size or ref.size <= STREAM_TAIL_BYTES
+            info.append(" (whole file)" if whole else f" of {humanize.size(ref.size)}", style=theme.muted())
+        info.append(" · tail -F via ssh · ", style=theme.dim())
+        state = self.rf.store.hosts[self.key.host].status.state if self.key.host in self.rf.store.hosts else None
+        auto = self.follower is not None and self.follower.attempts < len(RECONNECT_DELAYS)
+        if self.ended and state is not None and theme.is_problem(state):
+            again = f"reconnects when {self.key.host} is back" if auto else "stream closed"
+            info.append(f"connection lost ({theme.CONN_LABEL[state]}) — {again}", style=theme.error())
+        elif self.ended and job is not None and job.state.is_terminal:
+            info.append("ended · static", style=theme.muted())
+        elif self.ended:
+            info.append("stream ended — reconnecting shortly" if auto else "stream ended", style=theme.warn())
+        elif self.follower is not None and self.follower.state in ("waiting", "idle"):
+            info.append("waiting for the log path", style=theme.warn())
+        else:
+            info.append("following ●" if view.follow else "paused", style=theme.ok() if view.follow else theme.warn())
+        line.append_text(info)
+        path = (ref.path or ref.pattern or "") if ref is not None else "no log path known"
+        room = width - line.cell_len - 1
+        if room > 12:
+            p = Text(humanize.truncate_left(path, room), style=theme.muted())
+            line.append(" " * max(1, room - p.cell_len))
+            line.append_text(p)
+        streams.update(line)
+
+    def refresh_data(self, changes: FleetChanged | None) -> None:
+        if self.is_mounted:
+            self.query_one(FleetHeader).refresh_content()
+            self._keep_following()
+            self._render_streams()
+
+    def refresh_time(self) -> None:
+        if self.is_mounted and self.follower is not None and self.follower.dead:
+            self._keep_following()
+
+    def current_host(self) -> str | None:
+        return self.key.host
+
+    def current_job(self) -> Job | None:
+        return self.job
+
+    def visibility(self) -> dict[str, Visibility]:
+        return {self.key.host: Visibility.FOCUSED}
+
+    # ------------------------------------------------------------------ actions (keymap "log")
+    def action_stream(self, stream: str) -> None:
+        if stream != self.stream:
+            self.stream = stream
+            self._start()
+
+    def action_reconnect(self) -> None:
+        """Reopen the stream now (also resets the automatic reconnect budget)."""
+        self._start()
+
+    def action_toggle_follow(self) -> None:
+        view = self.query_one(LogView)
+        view.set_follow(not view.follow)
+        self._render_streams()
+
+    def action_bottom(self) -> None:
+        self.query_one(LogView).bottom()
+        self._render_streams()
+
+    def action_top(self) -> None:
+        self.query_one(LogView).top()
+        self._render_streams()
+
+    # ------------------------------------------------------------------ search
+    def action_search(self) -> None:
+        box = self.query_one("#log-search", Input)
+        box.display = True
+        box.focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "log-search":
+            return
+        self._close_search()
+        if event.value.strip():
+            self.query_one(LogView).search(event.value.strip())
+        self._render_streams()
+
+    def _close_search(self) -> None:
+        box = self.query_one("#log-search", Input)
+        box.display = False
+        self.query_one(LogView).richlog.focus()
+
+    def action_search_next(self) -> None:
+        self.query_one(LogView).search("", again=True)
+
+    def action_search_prev(self) -> None:
+        self.query_one(LogView).search("", forward=False, again=True)
+
+    def action_next_error(self) -> None:
+        self.query_one(LogView).jump_error()
+        self._render_streams()
+
+    def action_prev_error(self) -> None:
+        self.query_one(LogView).jump_error(forward=False)
+        self._render_streams()
+
+    def escape(self) -> bool:
+        box = self.query_one("#log-search", Input)
+        if box.display:
+            box.value = ""
+            self._close_search()
+            return True
+        view = self.query_one(LogView)
+        if view.search_note:
+            view.clear_search()
+            return True
+        return False
+
+    def action_copy_path(self) -> None:
+        job = self.job
+        ref = self.rf.log_ref(job, self.stream) if job is not None else None
+        if ref is None or ref.path is None:
+            self.rf.toast("no log path known", severity="warning")
+            return
+        self.app.copy_to_clipboard(ref.path)
+        self.rf.toast(f"sent to clipboard (OSC 52): {ref.path}", timeout=8)   # no acknowledgement, like app's y/Y

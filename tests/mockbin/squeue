@@ -1,0 +1,9 @@
+#!/bin/sh
+# mock squeue: prints squeue_me_O of $RF_MOCK_HOST in the separator the -O format asked for
+. "$RF_MOCK_BIN/_lib.sh"
+mock_log squeue "$@"; mock_env squeue; mock_fail SQUEUE
+sep='|'
+for a in "$@"; do
+  case $a in JobID:*) sep=$(first_char "${a#JobID:}") ;; esac
+done
+emit "$(fixture SQUEUE squeue_me_O)" "$sep"

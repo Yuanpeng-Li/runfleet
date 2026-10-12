@@ -1,0 +1,3757 @@
+{
+  "jobs": [
+    {
+      "account": "pilab",
+      "accrue_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788663986
+      },
+      "admin_comment": "",
+      "allocating_node": "login-v02",
+      "array_job_id": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "array_task_id": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "array_max_tasks": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "array_task_string": "",
+      "association_id": 23,
+      "batch_features": "",
+      "batch_flag": true,
+      "batch_host": "n-38-12",
+      "flags": [
+        "EXACT_CPU_COUNT_REQUESTED",
+        "ACCRUE_COUNT_CLEARED",
+        "JOB_WAS_RUNNING",
+        "EXACT_MEMORY_REQUESTED",
+        "USING_DEFAULT_QOS",
+        "USING_DEFAULT_WCKEY"
+      ],
+      "burst_buffer": "",
+      "burst_buffer_state": "",
+      "cluster": "vega",
+      "cluster_features": "",
+      "command": "\/shared\/pilab\/alix\/lmft\/jobs\/train.sbatch",
+      "comment": "",
+      "container": "",
+      "container_id": "",
+      "contiguous": false,
+      "core_spec": 0,
+      "thread_spec": 32766,
+      "cores_per_socket": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "billable_tres": {
+        "set": true,
+        "infinite": false,
+        "number": 16.0
+      },
+      "cpus_per_task": {
+        "set": true,
+        "infinite": false,
+        "number": 16
+      },
+      "cpu_frequency_minimum": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpu_frequency_maximum": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpu_frequency_governor": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpus_per_tres": "",
+      "cron": "",
+      "deadline": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "delay_boot": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "dependency": "",
+      "derived_exit_code": {
+        "status": [
+          "SUCCESS"
+        ],
+        "return_code": {
+          "set": true,
+          "infinite": false,
+          "number": 0
+        },
+        "signal": {
+          "id": {
+            "set": false,
+            "infinite": false,
+            "number": 0
+          },
+          "name": ""
+        }
+      },
+      "eligible_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788663986
+      },
+      "end_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788921135
+      },
+      "excluded_nodes": "n-38-06",
+      "exit_code": {
+        "status": [
+          "SUCCESS"
+        ],
+        "return_code": {
+          "set": true,
+          "infinite": false,
+          "number": 0
+        },
+        "signal": {
+          "id": {
+            "set": false,
+            "infinite": false,
+            "number": 0
+          },
+          "name": ""
+        }
+      },
+      "extra": "",
+      "failed_node": "",
+      "features": "",
+      "federation_origin": "",
+      "federation_siblings_active": "",
+      "federation_siblings_viable": "",
+      "gres_detail": [
+        "gpu:nvidia_h200_nvl:2(IDX:0-1)"
+      ],
+      "group_id": 500,
+      "group_name": "rs",
+      "het_job_id": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "het_job_id_set": "",
+      "het_job_offset": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "job_id": 723952,
+      "job_resources": {
+        "select_type": [
+          "CORE"
+        ],
+        "nodes": {
+          "count": 1,
+          "select_type": [
+            "ONE_ROW"
+          ],
+          "list": "n-38-12",
+          "whole": false,
+          "allocation": [
+            {
+              "index": 0,
+              "name": "n-38-12",
+              "cpus": {
+                "count": 16,
+                "used": 0
+              },
+              "memory": {
+                "used": 0,
+                "allocated": 262144
+              },
+              "sockets": [
+                {
+                  "index": 0,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 1,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 2,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 3,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 4,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 5,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 6,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 7,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "cpus": 16,
+        "threads_per_core": {
+          "set": false,
+          "infinite": false,
+          "number": 0
+        }
+      },
+      "job_size_str": [
+      ],
+      "job_state": [
+        "RUNNING"
+      ],
+      "last_sched_evaluation": {
+        "set": true,
+        "infinite": false,
+        "number": 1788748335
+      },
+      "licenses": "",
+      "licenses_allocated": "",
+      "mail_type": [
+      ],
+      "mail_user": "alice0001@example.edu",
+      "max_cpus": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "max_nodes": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "mcs_label": "",
+      "memory_per_tres": "",
+      "name": "lmft-x07-trainer-s1",
+      "network": "",
+      "nodes": "n-38-12",
+      "nice": 0,
+      "tasks_per_core": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "tasks_per_tres": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "tasks_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "tasks_per_socket": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "tasks_per_board": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "cpus": {
+        "set": true,
+        "infinite": false,
+        "number": 16
+      },
+      "node_count": {
+        "set": true,
+        "infinite": false,
+        "number": 1
+      },
+      "tasks": {
+        "set": true,
+        "infinite": false,
+        "number": 1
+      },
+      "partition": "h200",
+      "prefer": "",
+      "memory_per_cpu": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "memory_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 262144
+      },
+      "minimum_cpus_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 16
+      },
+      "minimum_tmp_disk_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "power": {
+        "flags": [
+        ]
+      },
+      "preempt_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "preemptable_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788748335
+      },
+      "pre_sus_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "hold": false,
+      "priority": {
+        "set": true,
+        "infinite": false,
+        "number": 60585
+      },
+      "priority_by_partition": [
+      ],
+      "profile": [
+        "NOT_SET"
+      ],
+      "qos": "normal",
+      "reboot": false,
+      "required_nodes": "",
+      "required_switches": 0,
+      "requeue": true,
+      "resize_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "restart_cnt": 0,
+      "resv_name": "",
+      "scheduled_nodes": "",
+      "segment_size": 0,
+      "selinux_context": "",
+      "shared": [
+      ],
+      "step_id": {
+        "sluid": "sB6TW90GHFQW00",
+        "job_id": {
+          "set": true,
+          "infinite": false,
+          "number": 723952
+        },
+        "step_het_component": {
+          "set": false,
+          "infinite": false,
+          "number": 0
+        },
+        "step_id": "entire"
+      },
+      "sockets_per_board": 0,
+      "sockets_per_node": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "start_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788748335
+      },
+      "state_description": "",
+      "state_reason": "None",
+      "standard_input": "\/dev\/null",
+      "standard_output": "\/shared\/pilab\/alix\/lmft\/logs\/%x_%j.out",
+      "standard_error": "",
+      "stdin_expanded": "\/dev\/null",
+      "stdout_expanded": "\/shared\/pilab\/alix\/lmft\/logs\/lmft-x07-trainer-s1_723952.out",
+      "stderr_expanded": "",
+      "submit_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788663986
+      },
+      "submit_line": "sbatch --job-name=lmft-x07-trainer-s1 --chdir=\/shared\/pilab\/alix\/lmft --time=2-00:00:00 --account=pilab --exclude=n-38-06 --partition=h200 --gres=gpu:nvidia_h200_nvl:2 --cpus-per-task=16 --mem=256G --requeue jobs\/train.sbatch --config configs\/exp_b.yaml seed=1 lr=1e-5 steps=100",
+      "suspend_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "system_comment": "",
+      "time_limit": {
+        "set": true,
+        "infinite": false,
+        "number": 2880
+      },
+      "time_minimum": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "threads_per_core": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "tres_bind": "",
+      "tres_freq": "",
+      "tres_per_job": "",
+      "tres_per_node": "gres\/gpu:nvidia_h200_nvl:2",
+      "tres_per_socket": "",
+      "tres_per_task": "cpu=16",
+      "tres_req_str": "cpu=16,mem=256G,node=1,billing=16,gres\/gpu=2,gres\/gpu:nvidia_h200_nvl=2",
+      "tres_alloc_str": "cpu=16,mem=256G,node=1,billing=16,gres\/gpu=2,gres\/gpu:nvidia_h200_nvl=2",
+      "user_id": 610001,
+      "user_name": "alice0001",
+      "maximum_switch_wait_time": 0,
+      "wckey": "",
+      "current_working_directory": "\/shared\/pilab\/alix\/lmft"
+    },
+    {
+      "account": "pilab",
+      "accrue_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788663987
+      },
+      "admin_comment": "",
+      "allocating_node": "login-v01",
+      "array_job_id": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "array_task_id": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "array_max_tasks": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "array_task_string": "",
+      "association_id": 23,
+      "batch_features": "",
+      "batch_flag": true,
+      "batch_host": "n-38-01",
+      "flags": [
+        "EXACT_CPU_COUNT_REQUESTED",
+        "ACCRUE_COUNT_CLEARED",
+        "JOB_WAS_RUNNING",
+        "EXACT_MEMORY_REQUESTED",
+        "USING_DEFAULT_QOS",
+        "USING_DEFAULT_WCKEY"
+      ],
+      "burst_buffer": "",
+      "burst_buffer_state": "",
+      "cluster": "vega",
+      "cluster_features": "",
+      "command": "\/shared\/pilab\/alix\/lmft\/jobs\/train.sbatch",
+      "comment": "",
+      "container": "",
+      "container_id": "",
+      "contiguous": false,
+      "core_spec": 0,
+      "thread_spec": 32766,
+      "cores_per_socket": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "billable_tres": {
+        "set": true,
+        "infinite": false,
+        "number": 16.0
+      },
+      "cpus_per_task": {
+        "set": true,
+        "infinite": false,
+        "number": 16
+      },
+      "cpu_frequency_minimum": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpu_frequency_maximum": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpu_frequency_governor": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpus_per_tres": "",
+      "cron": "",
+      "deadline": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "delay_boot": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "dependency": "",
+      "derived_exit_code": {
+        "status": [
+          "SUCCESS"
+        ],
+        "return_code": {
+          "set": true,
+          "infinite": false,
+          "number": 0
+        },
+        "signal": {
+          "id": {
+            "set": false,
+            "infinite": false,
+            "number": 0
+          },
+          "name": ""
+        }
+      },
+      "eligible_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788663987
+      },
+      "end_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788930252
+      },
+      "excluded_nodes": "n-38-06",
+      "exit_code": {
+        "status": [
+          "SUCCESS"
+        ],
+        "return_code": {
+          "set": true,
+          "infinite": false,
+          "number": 0
+        },
+        "signal": {
+          "id": {
+            "set": false,
+            "infinite": false,
+            "number": 0
+          },
+          "name": ""
+        }
+      },
+      "extra": "",
+      "failed_node": "",
+      "features": "",
+      "federation_origin": "",
+      "federation_siblings_active": "",
+      "federation_siblings_viable": "",
+      "gres_detail": [
+        "gpu:nvidia_h200_nvl:2(IDX:0-1)"
+      ],
+      "group_id": 500,
+      "group_name": "rs",
+      "het_job_id": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "het_job_id_set": "",
+      "het_job_offset": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "job_id": 723954,
+      "job_resources": {
+        "select_type": [
+          "CORE"
+        ],
+        "nodes": {
+          "count": 1,
+          "select_type": [
+            "ONE_ROW"
+          ],
+          "list": "n-38-01",
+          "whole": false,
+          "allocation": [
+            {
+              "index": 0,
+              "name": "n-38-01",
+              "cpus": {
+                "count": 16,
+                "used": 0
+              },
+              "memory": {
+                "used": 0,
+                "allocated": 262144
+              },
+              "sockets": [
+                {
+                  "index": 0,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 1,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 2,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 3,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 4,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 5,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 6,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 7,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "cpus": 16,
+        "threads_per_core": {
+          "set": false,
+          "infinite": false,
+          "number": 0
+        }
+      },
+      "job_size_str": [
+      ],
+      "job_state": [
+        "RUNNING"
+      ],
+      "last_sched_evaluation": {
+        "set": true,
+        "infinite": false,
+        "number": 1788757452
+      },
+      "licenses": "",
+      "licenses_allocated": "",
+      "mail_type": [
+      ],
+      "mail_user": "alice0001@example.edu",
+      "max_cpus": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "max_nodes": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "mcs_label": "",
+      "memory_per_tres": "",
+      "name": "lmft-x07-sampler-s1",
+      "network": "",
+      "nodes": "n-38-01",
+      "nice": 0,
+      "tasks_per_core": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "tasks_per_tres": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "tasks_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "tasks_per_socket": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "tasks_per_board": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "cpus": {
+        "set": true,
+        "infinite": false,
+        "number": 16
+      },
+      "node_count": {
+        "set": true,
+        "infinite": false,
+        "number": 1
+      },
+      "tasks": {
+        "set": true,
+        "infinite": false,
+        "number": 1
+      },
+      "partition": "h200",
+      "prefer": "",
+      "memory_per_cpu": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "memory_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 262144
+      },
+      "minimum_cpus_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 16
+      },
+      "minimum_tmp_disk_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "power": {
+        "flags": [
+        ]
+      },
+      "preempt_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "preemptable_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788757452
+      },
+      "pre_sus_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "hold": false,
+      "priority": {
+        "set": true,
+        "infinite": false,
+        "number": 60592
+      },
+      "priority_by_partition": [
+      ],
+      "profile": [
+        "NOT_SET"
+      ],
+      "qos": "normal",
+      "reboot": false,
+      "required_nodes": "",
+      "required_switches": 0,
+      "requeue": true,
+      "resize_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "restart_cnt": 0,
+      "resv_name": "",
+      "scheduled_nodes": "",
+      "segment_size": 0,
+      "selinux_context": "",
+      "shared": [
+      ],
+      "step_id": {
+        "sluid": "sB6TW9XCKGHD00",
+        "job_id": {
+          "set": true,
+          "infinite": false,
+          "number": 723954
+        },
+        "step_het_component": {
+          "set": false,
+          "infinite": false,
+          "number": 0
+        },
+        "step_id": "entire"
+      },
+      "sockets_per_board": 0,
+      "sockets_per_node": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "start_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788757452
+      },
+      "state_description": "",
+      "state_reason": "None",
+      "standard_input": "\/dev\/null",
+      "standard_output": "\/shared\/pilab\/alix\/lmft\/logs\/%x_%j.out",
+      "standard_error": "",
+      "stdin_expanded": "\/dev\/null",
+      "stdout_expanded": "\/shared\/pilab\/alix\/lmft\/logs\/lmft-x07-sampler-s1_723954.out",
+      "stderr_expanded": "",
+      "submit_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788663987
+      },
+      "submit_line": "sbatch --job-name=lmft-x07-sampler-s1 --chdir=\/shared\/pilab\/alix\/lmft --time=2-00:00:00 --account=pilab --exclude=n-38-06 --partition=h200 --gres=gpu:nvidia_h200_nvl:2 --cpus-per-task=16 --mem=256G --requeue jobs\/train.sbatch --config configs\/exp_b.yaml seed=1 lr=1e-5 steps=100",
+      "suspend_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "system_comment": "",
+      "time_limit": {
+        "set": true,
+        "infinite": false,
+        "number": 2880
+      },
+      "time_minimum": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "threads_per_core": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "tres_bind": "",
+      "tres_freq": "",
+      "tres_per_job": "",
+      "tres_per_node": "gres\/gpu:nvidia_h200_nvl:2",
+      "tres_per_socket": "",
+      "tres_per_task": "cpu=16",
+      "tres_req_str": "cpu=16,mem=256G,node=1,billing=16,gres\/gpu=2,gres\/gpu:nvidia_h200_nvl=2",
+      "tres_alloc_str": "cpu=16,mem=256G,node=1,billing=16,gres\/gpu=2,gres\/gpu:nvidia_h200_nvl=2",
+      "user_id": 610001,
+      "user_name": "alice0001",
+      "maximum_switch_wait_time": 0,
+      "wckey": "",
+      "current_working_directory": "\/shared\/pilab\/alix\/lmft"
+    },
+    {
+      "account": "pilab",
+      "accrue_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788710647
+      },
+      "admin_comment": "",
+      "allocating_node": "login-v01",
+      "array_job_id": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "array_task_id": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "array_max_tasks": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "array_task_string": "",
+      "association_id": 23,
+      "batch_features": "",
+      "batch_flag": true,
+      "batch_host": "n-37-12",
+      "flags": [
+        "EXACT_CPU_COUNT_REQUESTED",
+        "ACCRUE_COUNT_CLEARED",
+        "JOB_WAS_RUNNING",
+        "EXACT_MEMORY_REQUESTED",
+        "USING_DEFAULT_QOS",
+        "USING_DEFAULT_WCKEY",
+        "BACKFILL_ATTEMPTED"
+      ],
+      "burst_buffer": "",
+      "burst_buffer_state": "",
+      "cluster": "vega",
+      "cluster_features": "",
+      "command": "\/shared\/pilab\/pilab\/orb\/jobs\/train.sbatch",
+      "comment": "",
+      "container": "",
+      "container_id": "",
+      "contiguous": false,
+      "core_spec": 0,
+      "thread_spec": 32766,
+      "cores_per_socket": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "billable_tres": {
+        "set": true,
+        "infinite": false,
+        "number": 8.0
+      },
+      "cpus_per_task": {
+        "set": true,
+        "infinite": false,
+        "number": 8
+      },
+      "cpu_frequency_minimum": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpu_frequency_maximum": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpu_frequency_governor": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpus_per_tres": "",
+      "cron": "",
+      "deadline": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "delay_boot": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "dependency": "",
+      "derived_exit_code": {
+        "status": [
+          "SUCCESS"
+        ],
+        "return_code": {
+          "set": true,
+          "infinite": false,
+          "number": 0
+        },
+        "signal": {
+          "id": {
+            "set": false,
+            "infinite": false,
+            "number": 0
+          },
+          "name": ""
+        }
+      },
+      "eligible_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788710647
+      },
+      "end_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788929575
+      },
+      "excluded_nodes": "",
+      "exit_code": {
+        "status": [
+          "SUCCESS"
+        ],
+        "return_code": {
+          "set": true,
+          "infinite": false,
+          "number": 0
+        },
+        "signal": {
+          "id": {
+            "set": false,
+            "infinite": false,
+            "number": 0
+          },
+          "name": ""
+        }
+      },
+      "extra": "",
+      "failed_node": "",
+      "features": "",
+      "federation_origin": "",
+      "federation_siblings_active": "",
+      "federation_siblings_viable": "",
+      "gres_detail": [
+        "gpu:nvidia_h200_nvl:1(IDX:0)"
+      ],
+      "group_id": 500,
+      "group_name": "rs",
+      "het_job_id": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "het_job_id_set": "",
+      "het_job_offset": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "job_id": 724245,
+      "job_resources": {
+        "select_type": [
+          "CORE"
+        ],
+        "nodes": {
+          "count": 1,
+          "select_type": [
+            "ONE_ROW"
+          ],
+          "list": "n-37-12",
+          "whole": false,
+          "allocation": [
+            {
+              "index": 0,
+              "name": "n-37-12",
+              "cpus": {
+                "count": 8,
+                "used": 0
+              },
+              "memory": {
+                "used": 0,
+                "allocated": 49152
+              },
+              "sockets": [
+                {
+                  "index": 0,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 1,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 2,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 3,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 4,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 5,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 6,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 7,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "cpus": 8,
+        "threads_per_core": {
+          "set": false,
+          "infinite": false,
+          "number": 0
+        }
+      },
+      "job_size_str": [
+      ],
+      "job_state": [
+        "RUNNING"
+      ],
+      "last_sched_evaluation": {
+        "set": true,
+        "infinite": false,
+        "number": 1788756775
+      },
+      "licenses": "",
+      "licenses_allocated": "",
+      "mail_type": [
+      ],
+      "mail_user": "alice0001@example.edu",
+      "max_cpus": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "max_nodes": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "mcs_label": "",
+      "memory_per_tres": "",
+      "name": "orb-swp--train--voc-cosinewarm--s47--a01",
+      "network": "",
+      "nodes": "n-37-12",
+      "nice": 0,
+      "tasks_per_core": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "tasks_per_tres": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "tasks_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "tasks_per_socket": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "tasks_per_board": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "cpus": {
+        "set": true,
+        "infinite": false,
+        "number": 8
+      },
+      "node_count": {
+        "set": true,
+        "infinite": false,
+        "number": 1
+      },
+      "tasks": {
+        "set": true,
+        "infinite": false,
+        "number": 1
+      },
+      "partition": "h200",
+      "prefer": "",
+      "memory_per_cpu": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "memory_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 49152
+      },
+      "minimum_cpus_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 8
+      },
+      "minimum_tmp_disk_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "power": {
+        "flags": [
+        ]
+      },
+      "preempt_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "preemptable_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788756775
+      },
+      "pre_sus_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "hold": false,
+      "priority": {
+        "set": true,
+        "infinite": false,
+        "number": 60553
+      },
+      "priority_by_partition": [
+      ],
+      "profile": [
+        "NOT_SET"
+      ],
+      "qos": "normal",
+      "reboot": false,
+      "required_nodes": "",
+      "required_switches": 0,
+      "requeue": true,
+      "resize_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "restart_cnt": 0,
+      "resv_name": "",
+      "scheduled_nodes": "",
+      "segment_size": 0,
+      "selinux_context": "",
+      "shared": [
+      ],
+      "step_id": {
+        "sluid": "sB6TW9W3MZQZ00",
+        "job_id": {
+          "set": true,
+          "infinite": false,
+          "number": 724245
+        },
+        "step_het_component": {
+          "set": false,
+          "infinite": false,
+          "number": 0
+        },
+        "step_id": "entire"
+      },
+      "sockets_per_board": 0,
+      "sockets_per_node": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "start_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788756775
+      },
+      "state_description": "",
+      "state_reason": "None",
+      "standard_input": "\/dev\/null",
+      "standard_output": "\/shared\/pilab\/pilab\/orb\/logs\/%x_%j.out",
+      "standard_error": "\/shared\/pilab\/pilab\/orb\/logs\/%x_%j.out",
+      "stdin_expanded": "\/dev\/null",
+      "stdout_expanded": "\/shared\/pilab\/pilab\/orb\/logs\/orb-swp--train--voc-cosinewarm--s47--a01_724245.out",
+      "stderr_expanded": "\/shared\/pilab\/pilab\/orb\/logs\/orb-swp--train--voc-cosinewarm--s47--a01_724245.out",
+      "submit_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788710647
+      },
+      "submit_line": "sbatch --job-name=orb-swp--train--voc-cosinewarm--s47--a01 --chdir=\/shared\/pilab\/pilab\/orb --time=2-00:00:00 --requeue --account=pilab --partition=h200 --gres=gpu:nvidia_h200_nvl:1 --cpus-per-task=8 --mem=48G --output=\/shared\/pilab\/pilab\/orb\/logs\/%x_%j.out --error=\/shared\/pilab\/pilab\/orb\/logs\/%x_%j.out jobs\/train.sbatch --config configs\/exp_a.yaml data=voc chunk=13 seeds=42,45,46,47,48",
+      "suspend_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "system_comment": "",
+      "time_limit": {
+        "set": true,
+        "infinite": false,
+        "number": 2880
+      },
+      "time_minimum": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "threads_per_core": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "tres_bind": "",
+      "tres_freq": "",
+      "tres_per_job": "",
+      "tres_per_node": "gres\/gpu:nvidia_h200_nvl:1",
+      "tres_per_socket": "",
+      "tres_per_task": "cpu=8",
+      "tres_req_str": "cpu=8,mem=48G,node=1,billing=8,gres\/gpu=1,gres\/gpu:nvidia_h200_nvl=1",
+      "tres_alloc_str": "cpu=8,mem=48G,node=1,billing=8,gres\/gpu=1,gres\/gpu:nvidia_h200_nvl=1",
+      "user_id": 610001,
+      "user_name": "alice0001",
+      "maximum_switch_wait_time": 0,
+      "wckey": "",
+      "current_working_directory": "\/shared\/pilab\/pilab\/orb"
+    },
+    {
+      "account": "pilab",
+      "accrue_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788710648
+      },
+      "admin_comment": "",
+      "allocating_node": "login-v01",
+      "array_job_id": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "array_task_id": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "array_max_tasks": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "array_task_string": "",
+      "association_id": 23,
+      "batch_features": "",
+      "batch_flag": true,
+      "batch_host": "n-38-06",
+      "flags": [
+        "EXACT_CPU_COUNT_REQUESTED",
+        "ACCRUE_COUNT_CLEARED",
+        "JOB_WAS_RUNNING",
+        "EXACT_MEMORY_REQUESTED",
+        "USING_DEFAULT_QOS",
+        "USING_DEFAULT_WCKEY",
+        "BACKFILL_ATTEMPTED"
+      ],
+      "burst_buffer": "",
+      "burst_buffer_state": "",
+      "cluster": "vega",
+      "cluster_features": "",
+      "command": "\/shared\/pilab\/pilab\/orb\/jobs\/train.sbatch",
+      "comment": "",
+      "container": "",
+      "container_id": "",
+      "contiguous": false,
+      "core_spec": 0,
+      "thread_spec": 32766,
+      "cores_per_socket": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "billable_tres": {
+        "set": true,
+        "infinite": false,
+        "number": 8.0
+      },
+      "cpus_per_task": {
+        "set": true,
+        "infinite": false,
+        "number": 8
+      },
+      "cpu_frequency_minimum": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpu_frequency_maximum": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpu_frequency_governor": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpus_per_tres": "",
+      "cron": "",
+      "deadline": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "delay_boot": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "dependency": "",
+      "derived_exit_code": {
+        "status": [
+          "SUCCESS"
+        ],
+        "return_code": {
+          "set": true,
+          "infinite": false,
+          "number": 0
+        },
+        "signal": {
+          "id": {
+            "set": false,
+            "infinite": false,
+            "number": 0
+          },
+          "name": ""
+        }
+      },
+      "eligible_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788710648
+      },
+      "end_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788929635
+      },
+      "excluded_nodes": "",
+      "exit_code": {
+        "status": [
+          "SUCCESS"
+        ],
+        "return_code": {
+          "set": true,
+          "infinite": false,
+          "number": 0
+        },
+        "signal": {
+          "id": {
+            "set": false,
+            "infinite": false,
+            "number": 0
+          },
+          "name": ""
+        }
+      },
+      "extra": "",
+      "failed_node": "",
+      "features": "",
+      "federation_origin": "",
+      "federation_siblings_active": "",
+      "federation_siblings_viable": "",
+      "gres_detail": [
+        "gpu:nvidia_h200_nvl:1(IDX:1)"
+      ],
+      "group_id": 500,
+      "group_name": "rs",
+      "het_job_id": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "het_job_id_set": "",
+      "het_job_offset": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "job_id": 724246,
+      "job_resources": {
+        "select_type": [
+          "CORE"
+        ],
+        "nodes": {
+          "count": 1,
+          "select_type": [
+            "ONE_ROW"
+          ],
+          "list": "n-38-06",
+          "whole": false,
+          "allocation": [
+            {
+              "index": 0,
+              "name": "n-38-06",
+              "cpus": {
+                "count": 8,
+                "used": 0
+              },
+              "memory": {
+                "used": 0,
+                "allocated": 49152
+              },
+              "sockets": [
+                {
+                  "index": 0,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 1,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 2,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 3,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 4,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "ALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 5,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 6,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "index": 7,
+                  "cores": [
+                    {
+                      "index": 0,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 1,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 2,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 3,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 4,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 5,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 6,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    },
+                    {
+                      "index": 7,
+                      "status": [
+                        "UNALLOCATED"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "cpus": 8,
+        "threads_per_core": {
+          "set": false,
+          "infinite": false,
+          "number": 0
+        }
+      },
+      "job_size_str": [
+      ],
+      "job_state": [
+        "RUNNING"
+      ],
+      "last_sched_evaluation": {
+        "set": true,
+        "infinite": false,
+        "number": 1788756835
+      },
+      "licenses": "",
+      "licenses_allocated": "",
+      "mail_type": [
+      ],
+      "mail_user": "alice0001@example.edu",
+      "max_cpus": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "max_nodes": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "mcs_label": "",
+      "memory_per_tres": "",
+      "name": "orb-swp--train--voc-cosinewarm--s48--a01",
+      "network": "",
+      "nodes": "n-38-06",
+      "nice": 0,
+      "tasks_per_core": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "tasks_per_tres": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "tasks_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "tasks_per_socket": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "tasks_per_board": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "cpus": {
+        "set": true,
+        "infinite": false,
+        "number": 8
+      },
+      "node_count": {
+        "set": true,
+        "infinite": false,
+        "number": 1
+      },
+      "tasks": {
+        "set": true,
+        "infinite": false,
+        "number": 1
+      },
+      "partition": "h200",
+      "prefer": "",
+      "memory_per_cpu": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "memory_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 49152
+      },
+      "minimum_cpus_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 8
+      },
+      "minimum_tmp_disk_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "power": {
+        "flags": [
+        ]
+      },
+      "preempt_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "preemptable_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788756835
+      },
+      "pre_sus_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "hold": false,
+      "priority": {
+        "set": true,
+        "infinite": false,
+        "number": 60553
+      },
+      "priority_by_partition": [
+      ],
+      "profile": [
+        "NOT_SET"
+      ],
+      "qos": "normal",
+      "reboot": false,
+      "required_nodes": "",
+      "required_switches": 0,
+      "requeue": true,
+      "resize_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "restart_cnt": 0,
+      "resv_name": "",
+      "scheduled_nodes": "",
+      "segment_size": 0,
+      "selinux_context": "",
+      "shared": [
+      ],
+      "step_id": {
+        "sluid": "sB6TW9N8B5HK00",
+        "job_id": {
+          "set": true,
+          "infinite": false,
+          "number": 724246
+        },
+        "step_het_component": {
+          "set": false,
+          "infinite": false,
+          "number": 0
+        },
+        "step_id": "entire"
+      },
+      "sockets_per_board": 0,
+      "sockets_per_node": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "start_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788756835
+      },
+      "state_description": "",
+      "state_reason": "None",
+      "standard_input": "\/dev\/null",
+      "standard_output": "\/shared\/pilab\/pilab\/orb\/logs\/%x_%j.out",
+      "standard_error": "\/shared\/pilab\/pilab\/orb\/logs\/%x_%j.out",
+      "stdin_expanded": "\/dev\/null",
+      "stdout_expanded": "\/shared\/pilab\/pilab\/orb\/logs\/orb-swp--train--voc-cosinewarm--s48--a01_724246.out",
+      "stderr_expanded": "\/shared\/pilab\/pilab\/orb\/logs\/orb-swp--train--voc-cosinewarm--s48--a01_724246.out",
+      "submit_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788710648
+      },
+      "submit_line": "sbatch --job-name=orb-swp--train--voc-cosinewarm--s48--a01 --chdir=\/shared\/pilab\/pilab\/orb --time=2-00:00:00 --requeue --account=pilab --partition=h200 --gres=gpu:nvidia_h200_nvl:1 --cpus-per-task=8 --mem=48G --output=\/shared\/pilab\/pilab\/orb\/logs\/%x_%j.out --error=\/shared\/pilab\/pilab\/orb\/logs\/%x_%j.out jobs\/train.sbatch --config configs\/exp_a.yaml data=voc chunk=14 seeds=42,45,46,47,48",
+      "suspend_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "system_comment": "",
+      "time_limit": {
+        "set": true,
+        "infinite": false,
+        "number": 2880
+      },
+      "time_minimum": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "threads_per_core": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "tres_bind": "",
+      "tres_freq": "",
+      "tres_per_job": "",
+      "tres_per_node": "gres\/gpu:nvidia_h200_nvl:1",
+      "tres_per_socket": "",
+      "tres_per_task": "cpu=8",
+      "tres_req_str": "cpu=8,mem=48G,node=1,billing=8,gres\/gpu=1,gres\/gpu:nvidia_h200_nvl=1",
+      "tres_alloc_str": "cpu=8,mem=48G,node=1,billing=8,gres\/gpu=1,gres\/gpu:nvidia_h200_nvl=1",
+      "user_id": 610001,
+      "user_name": "alice0001",
+      "maximum_switch_wait_time": 0,
+      "wckey": "",
+      "current_working_directory": "\/shared\/pilab\/pilab\/orb"
+    },
+    {
+      "account": "pilab",
+      "accrue_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788748390
+      },
+      "admin_comment": "",
+      "allocating_node": "login-v01",
+      "array_job_id": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "array_task_id": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "array_max_tasks": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "array_task_string": "",
+      "association_id": 23,
+      "batch_features": "",
+      "batch_flag": true,
+      "batch_host": "",
+      "flags": [
+        "EXACT_CPU_COUNT_REQUESTED",
+        "EXACT_MEMORY_REQUESTED",
+        "USING_DEFAULT_QOS",
+        "USING_DEFAULT_WCKEY",
+        "BACKFILL_ATTEMPTED",
+        "SCHEDULING_ATTEMPTED"
+      ],
+      "burst_buffer": "",
+      "burst_buffer_state": "",
+      "cluster": "vega",
+      "cluster_features": "",
+      "command": "\/shared\/pilab\/alix\/lmft\/jobs\/train.sbatch",
+      "comment": "",
+      "container": "",
+      "container_id": "",
+      "contiguous": false,
+      "core_spec": 0,
+      "thread_spec": 32766,
+      "cores_per_socket": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "billable_tres": {
+        "set": false,
+        "infinite": false,
+        "number": 0.0
+      },
+      "cpus_per_task": {
+        "set": true,
+        "infinite": false,
+        "number": 16
+      },
+      "cpu_frequency_minimum": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpu_frequency_maximum": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpu_frequency_governor": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "cpus_per_tres": "",
+      "cron": "",
+      "deadline": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "delay_boot": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "dependency": "",
+      "derived_exit_code": {
+        "status": [
+          "SUCCESS"
+        ],
+        "return_code": {
+          "set": true,
+          "infinite": false,
+          "number": 0
+        },
+        "signal": {
+          "id": {
+            "set": false,
+            "infinite": false,
+            "number": 0
+          },
+          "name": ""
+        }
+      },
+      "eligible_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788748390
+      },
+      "end_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "excluded_nodes": "n-38-06",
+      "exit_code": {
+        "status": [
+          "SUCCESS"
+        ],
+        "return_code": {
+          "set": true,
+          "infinite": false,
+          "number": 0
+        },
+        "signal": {
+          "id": {
+            "set": false,
+            "infinite": false,
+            "number": 0
+          },
+          "name": ""
+        }
+      },
+      "extra": "",
+      "failed_node": "",
+      "features": "",
+      "federation_origin": "",
+      "federation_siblings_active": "",
+      "federation_siblings_viable": "",
+      "gres_detail": [
+      ],
+      "group_id": 500,
+      "group_name": "rs",
+      "het_job_id": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "het_job_id_set": "",
+      "het_job_offset": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "job_id": 724479,
+      "job_resources": null,
+      "job_size_str": [
+      ],
+      "job_state": [
+        "PENDING"
+      ],
+      "last_sched_evaluation": {
+        "set": true,
+        "infinite": false,
+        "number": 1788778694
+      },
+      "licenses": "",
+      "licenses_allocated": "",
+      "mail_type": [
+      ],
+      "mail_user": "alice0001@example.edu",
+      "max_cpus": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "max_nodes": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "mcs_label": "",
+      "memory_per_tres": "",
+      "name": "lmft-x07-trainer-s0",
+      "network": "",
+      "nodes": "",
+      "nice": 0,
+      "tasks_per_core": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "tasks_per_tres": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "tasks_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "tasks_per_socket": {
+        "set": false,
+        "infinite": true,
+        "number": 0
+      },
+      "tasks_per_board": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "cpus": {
+        "set": true,
+        "infinite": false,
+        "number": 16
+      },
+      "node_count": {
+        "set": true,
+        "infinite": false,
+        "number": 1
+      },
+      "tasks": {
+        "set": true,
+        "infinite": false,
+        "number": 1
+      },
+      "partition": "h200",
+      "prefer": "",
+      "memory_per_cpu": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "memory_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 262144
+      },
+      "minimum_cpus_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 16
+      },
+      "minimum_tmp_disk_per_node": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "power": {
+        "flags": [
+        ]
+      },
+      "preempt_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "preemptable_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "pre_sus_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "hold": false,
+      "priority": {
+        "set": true,
+        "infinite": false,
+        "number": 59928
+      },
+      "priority_by_partition": [
+      ],
+      "profile": [
+        "NOT_SET"
+      ],
+      "qos": "normal",
+      "reboot": false,
+      "required_nodes": "",
+      "required_switches": 0,
+      "requeue": true,
+      "resize_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "restart_cnt": 0,
+      "resv_name": "",
+      "scheduled_nodes": "",
+      "segment_size": 0,
+      "selinux_context": "",
+      "shared": [
+      ],
+      "step_id": {
+        "sluid": "sB6TW9V7YW1N00",
+        "job_id": {
+          "set": true,
+          "infinite": false,
+          "number": 724479
+        },
+        "step_het_component": {
+          "set": false,
+          "infinite": false,
+          "number": 0
+        },
+        "step_id": "entire"
+      },
+      "sockets_per_board": 0,
+      "sockets_per_node": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "start_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "state_description": "",
+      "state_reason": "QOSMaxJobsPerUserLimit",
+      "standard_input": "\/dev\/null",
+      "standard_output": "\/shared\/pilab\/alix\/lmft\/logs\/%x_%j.out",
+      "standard_error": "",
+      "stdin_expanded": "\/dev\/null",
+      "stdout_expanded": "\/shared\/pilab\/alix\/lmft\/logs\/lmft-x07-trainer-s0_724479.out",
+      "stderr_expanded": "",
+      "submit_time": {
+        "set": true,
+        "infinite": false,
+        "number": 1788748390
+      },
+      "submit_line": "sbatch --job-name=lmft-x07-trainer-s0 --chdir=\/shared\/pilab\/alix\/lmft --time=2-00:00:00 --account=pilab --exclude=n-38-06 --partition=h200 --gres=gpu:nvidia_h200_nvl:2 --cpus-per-task=16 --mem=256G --requeue jobs\/train.sbatch --config configs\/exp_b.yaml seed=0 lr=1e-5 steps=100",
+      "suspend_time": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "system_comment": "",
+      "time_limit": {
+        "set": true,
+        "infinite": false,
+        "number": 2880
+      },
+      "time_minimum": {
+        "set": true,
+        "infinite": false,
+        "number": 0
+      },
+      "threads_per_core": {
+        "set": false,
+        "infinite": false,
+        "number": 0
+      },
+      "tres_bind": "",
+      "tres_freq": "",
+      "tres_per_job": "",
+      "tres_per_node": "gres\/gpu:nvidia_h200_nvl:2",
+      "tres_per_socket": "",
+      "tres_per_task": "cpu=16",
+      "tres_req_str": "cpu=16,mem=256G,node=1,billing=16,gres\/gpu=2,gres\/gpu:nvidia_h200_nvl=2",
+      "tres_alloc_str": "",
+      "user_id": 610001,
+      "user_name": "alice0001",
+      "maximum_switch_wait_time": 0,
+      "wckey": "",
+      "current_working_directory": "\/shared\/pilab\/alix\/lmft"
+    }
+  ],
+  "last_backfill": {
+    "set": true,
+    "infinite": false,
+    "number": 1788778694
+  },
+  "last_update": {
+    "set": true,
+    "infinite": false,
+    "number": 1788778707
+  },
+  "meta": {
+    "plugin": {
+      "type": "",
+      "name": "",
+      "data_parser": "data_parser\/v0.0.44",
+      "accounting_storage": "accounting_storage\/slurmdbd"
+    },
+    "client": {
+      "source": "",
+      "user": "alice0001",
+      "group": "rs"
+    },
+    "command": [
+      "squeue",
+      "--me"
+    ],
+    "slurm": {
+      "version": {
+        "major": "25",
+        "micro": "4",
+        "minor": "11"
+      },
+      "release": "25.11.4",
+      "cluster": "vega"
+    }
+  },
+  "errors": [
+  ],
+  "warnings": [
+  ]
+}

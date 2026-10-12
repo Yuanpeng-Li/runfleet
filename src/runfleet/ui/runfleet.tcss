@@ -1,0 +1,149 @@
+/* RunFleet: k9s × lazygit × nvitop. Dense, dark, transparent where the terminal allows. */
+
+Screen {
+    background: ansi_default;
+    color: ansi_default;     /* body text in the terminal's own foreground: readable on light and dark profiles */
+    layers: base overlay;
+}
+
+/* clickable chips / hints / tabs: no link underline, a hover tint instead */
+FleetHeader, HintBar, ViewTabs, .title-line {
+    link-style: none;
+    link-color: $foreground;
+    link-background: transparent;
+    link-style-hover: bold;
+    link-color-hover: $foreground;
+    link-background-hover: $accent 25%;
+}
+
+/* ---- main screen ---------------------------------------------------------------------- */
+#header, FleetHeader { background: $panel; color: $foreground; }
+#tabs { background: ansi_default; }
+#hints, HintBar { background: $panel; color: $foreground; dock: bottom; }
+App.-settings-open HintBar { visibility: hidden; }   /* the Settings panel has its own hint line */
+#views { height: 1fr; }
+
+/* ---- fleet cards ---------------------------------------------------------------------- */
+#fleet-cards { height: 1fr; scrollbar-size-vertical: 1; }
+#fleet-grid { grid-size: 2; grid-rows: auto; grid-gutter: 0 0; height: auto; padding: 0 0; }
+HostCard {
+    border: solid $foreground 25%;
+    border-title-color: $foreground;
+    border-title-align: left;
+    padding: 0 1;
+    height: auto;
+    background: ansi_default;
+}
+HostCard:focus { border: heavy $accent; background: $boost; }
+HostCard.-scoped { border: solid $accent 70%; }
+HostCard.-scoped:focus { border: heavy $accent; }
+HostCard.-problem { border: solid $error 60%; }
+HostCard.-problem:focus { border: heavy $error; }
+HostCard.-stale { color: $text-muted; }
+
+/* ---- tables --------------------------------------------------------------------------- */
+DataTable {
+    background: ansi_default;
+    scrollbar-size-vertical: 1;
+    height: 1fr;
+}
+DataTable > .datatable--header { background: ansi_default; color: $text-muted; text-style: bold; }
+DataTable > .datatable--cursor { background: $accent 30%; text-style: none; }
+DataTable:blur > .datatable--cursor { background: $accent 15%; }
+/* NO_COLOR strips backgrounds: the cursor row needs an attribute (tables without a ▸ marker) */
+.-no-color DataTable > .datatable--cursor { text-style: reverse; }
+.-no-color DataTable:blur > .datatable--cursor { text-style: underline; }
+DataTable > .datatable--hover { background: $boost; }
+DataTable > .datatable--header-hover { background: $boost; }
+
+/* ---- jobs view ------------------------------------------------------------------------ */
+#jobs-body { height: 1fr; layout: vertical; }
+JobsView.-side #jobs-body { layout: horizontal; }
+JobsView.-side #jobs-table { width: 62%; }
+JobsView.-side #preview { width: 1fr; height: 1fr; border-left: solid $foreground 20%; padding: 0 1; }
+#preview { height: 8; background: ansi_default; }
+FilterBar { background: $boost; }
+
+/* ---- detail screens ------------------------------------------------------------------- */
+.box {
+    border: solid $foreground 25%;
+    border-title-align: left;
+    border-title-color: $foreground;
+    padding: 0 1;
+    height: auto;
+    background: ansi_default;
+}
+.box:focus-within { border: solid $accent; }
+.title-line { height: 1; padding: 0 1; }
+.note { color: $text-muted; height: auto; padding: 0 1; }
+
+TabbedContent { height: 1fr; }
+TabbedContent ContentSwitcher { height: 1fr; }
+TabPane { padding: 0; }
+Tabs { height: 2; }
+
+/* ---- modals --------------------------------------------------------------------------- */
+ModalScreen { background: $background 60%; align: center middle; }
+.dialog {
+    border: solid $accent;
+    border-title-align: left;
+    border-title-color: $accent;
+    border-title-style: bold;
+    border-subtitle-align: right;
+    border-subtitle-color: $text-muted;
+    background: $surface;
+    color: $foreground;      /* explicit surface: explicit theme foreground, whatever the terminal's */
+    padding: 0 1;
+    width: 80;
+    max-width: 96%;
+    height: auto;
+    max-height: 90%;
+}
+#help-box { width: 116; }
+#confirm-box { width: 78; }
+#menu-box { width: 66; }
+#menu, #menu:focus { border: none; background: transparent; padding: 0; height: auto; max-height: 16; }
+#err-box, #log-box { width: 100; }
+#doctor-box, #manual-box { width: 92; }
+.dialog-buttons { height: auto; align-horizontal: right; padding-top: 1; }
+.dialog-buttons Button { margin-left: 2; }
+
+/* ---- notifications -------------------------------------------------------------------- */
+Toast { max-width: 70; }
+
+/* ---- job detail ----------------------------------------------------------------------- */
+#summary-top { height: auto; }
+#summary-top > #job-box { width: 1fr; height: auto; min-height: 10; }
+#summary-top > #right-col { width: 1fr; height: auto; }
+#right-col > .box { width: 1fr; }
+#summary-log { height: 1fr; min-height: 6; }
+#summary-compact { height: auto; }
+JobDetailScreen.-compact #summary-top { display: none; }
+#steps-table { height: auto; max-height: 14; }
+#why { height: auto; }
+#raw-text { padding: 0 1; }
+
+/* ---- host detail ---------------------------------------------------------------------- */
+#ws-layout, #cluster-layout { height: 1fr; }
+#procs-box, #nodes-box { height: 1fr; min-height: 5; }
+#parts-box { height: auto; }
+#parts-box > PartitionTable { height: auto; max-height: 8; }
+#host-box, #ws-conn, #myjobs-box, #caps-box { height: auto; }
+#banner { color: $warning; }
+#myjobs-box, #caps-box { text-wrap: wrap; }
+
+/* ---- shared: never wrap box content (lines are pre-fitted; overflow ends in …), subtle scrollbars ---- */
+.box { text-wrap: nowrap; text-overflow: ellipsis; }
+DataTable, RichLog, VerticalScroll {
+    scrollbar-size-horizontal: 1;
+    scrollbar-color: $accent 45%;
+    scrollbar-color-hover: $accent 70%;
+    scrollbar-color-active: $accent;
+    scrollbar-background: $panel;
+    scrollbar-background-hover: $panel;
+    scrollbar-background-active: $panel;
+    scrollbar-corner-color: $panel;
+}
+PartitionTable, NodeTable, ProcTable, #steps-table { overflow-x: hidden; }
+JobDetailScreen.-narrow #summary-top { layout: vertical; }
+JobDetailScreen.-narrow #summary-top > #job-box, JobDetailScreen.-narrow #summary-top > #right-col { width: 1fr; }

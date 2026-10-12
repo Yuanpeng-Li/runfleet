@@ -1,0 +1,83 @@
+2330994|lmft-x07-lr3e-6|CANCELLED by 610001|0:0|00:00:00|None|2026-09-05T10:28:16|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2331250|sim_b_1|COMPLETED|0:0|00:10:57|2026-09-05T13:33:25|2026-09-05T13:44:22|n-40-01|billing=8,cpu=8,gres/gpu:nvidia_a100-sxm4-40gb=1,gres/gpu=1,mem=96G,node=1|gpu-preempt|/shared/pilab/bob/rlsim/sim
+2331251|sim_b_2|COMPLETED|0:0|00:10:30|2026-09-05T13:33:25|2026-09-05T13:43:55|n-40-01|billing=8,cpu=8,gres/gpu:nvidia_a100-sxm4-40gb=1,gres/gpu=1,mem=96G,node=1|gpu-preempt|/shared/pilab/bob/rlsim/sim
+2331252|sim_a_1|COMPLETED|0:0|00:07:24|2026-09-05T13:33:25|2026-09-05T13:40:49|n-40-01|billing=8,cpu=8,gres/gpu:nvidia_a100-sxm4-40gb=1,gres/gpu=1,mem=96G,node=1|gpu-preempt|/shared/pilab/bob/rlsim/sim
+2331253|sim_a_2|COMPLETED|0:0|00:05:59|2026-09-05T13:33:25|2026-09-05T13:39:24|n-37-03|billing=8,cpu=8,gres/gpu:nvidia_h100_nvl=1,gres/gpu=1,mem=96G,node=1|gpu-preempt|/shared/pilab/bob/rlsim/sim
+2331254|sim_c_1|COMPLETED|0:0|00:08:12|2026-09-05T13:33:25|2026-09-05T13:41:37|n-37-02|billing=8,cpu=8,gres/gpu:nvidia_h100_nvl_1g.12gb=1,gres/gpu=1,mem=96G,node=1|gpu-preempt|/shared/pilab/bob/rlsim/sim
+2331255|sim_c_2|COMPLETED|0:0|00:04:24|2026-09-05T13:33:25|2026-09-05T13:37:49|n-37-02|billing=8,cpu=8,gres/gpu:nvidia_h100_nvl_1g.12gb=1,gres/gpu=1,mem=96G,node=1|gpu-preempt|/shared/pilab/bob/rlsim/sim
+2331256|sim_cpu|COMPLETED|0:0|00:04:32|2026-09-05T13:29:15|2026-09-05T13:33:47|m-31-03|billing=16,cpu=16,mem=32G,node=1|cpu-preempt|/shared/pilab/bob/rlsim/sim
+2331260|sim_cpu2|COMPLETED|0:0|00:01:13|2026-09-05T13:32:15|2026-09-05T13:33:28|m-31-05|billing=8,cpu=8,mem=16G,node=1|cpu-preempt|/shared/pilab/bob/rlsim/sim
+2331270|sim_cpu3|COMPLETED|0:0|00:07:20|2026-09-05T13:37:15|2026-09-05T13:44:35|m-31-03|billing=16,cpu=16,mem=48G,node=1|cpu-preempt|/shared/pilab/bob/rlsim/sim
+2331274|sim_d_1|COMPLETED|0:0|00:22:24|2026-09-05T13:40:55|2026-09-05T14:03:19|n-40-01|billing=8,cpu=8,gres/gpu:nvidia_a100-sxm4-40gb=1,gres/gpu=1,mem=96G,node=1|gpu-preempt|/shared/pilab/bob/rlsim/sim
+2331276|sim_d_2|COMPLETED|0:0|00:04:28|2026-09-05T13:42:25|2026-09-05T13:46:53|n-37-02|billing=8,cpu=8,gres/gpu:nvidia_h100_nvl_1g.12gb=1,gres/gpu=1,mem=96G,node=1|gpu-preempt|/shared/pilab/bob/rlsim/sim
+2330992|lmft-x07-lr1e-5|CANCELLED by 610001|0:0|00:00:00|None|2026-09-05T22:04:25|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2330993|lmft-x07-lr1e-6|CANCELLED by 610001|0:0|00:00:00|None|2026-09-05T22:04:25|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2332803|orb-ab--train--resnet18-bs64--s42--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332804|orb-ab--train--resnet18-bs128--s42--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332805|orb-ab--train--resnet18-bs256--s42--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332806|orb-ab--train--resnet18-bs64--s45--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332807|orb-ab--train--resnet18-bs128--s45--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332808|orb-ab--train--resnet18-bs256--s45--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332809|orb-ab--train--resnet18-bs64--s46--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332810|orb-ab--train--resnet18-bs128--s46--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332811|orb-ab--train--resnet18-bs256--s46--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332812|orb-ab--train--resnet18-bs64--s47--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332813|orb-ab--train--resnet18-bs128--s47--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332814|orb-ab--train--resnet18-bs256--s47--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332815|orb-ab--train--resnet18-bs64--s48--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332816|orb-ab--train--resnet18-bs128--s48--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332817|orb-ab--train--resnet18-bs256--s48--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332818|orb-ab--train--vit-bs64--s43--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332819|orb-ab--train--vit-bs128--s43--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332820|orb-ab--train--vit-bs256--s43--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332821|orb-ab--train--vit-bs64--s44--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332822|orb-ab--train--vit-bs128--s44--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332823|orb-ab--train--vit-bs256--s44--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T13:01:32|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332828|orb-swp--train--cifar---s43--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T11:13:53|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332829|orb-swp--train--cifar-warmup--s43--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T11:13:53|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332830|orb-swp--train--cifar-const--s43--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T11:13:53|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332831|orb-swp--train--cifar---s44--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T11:13:53|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332832|orb-swp--train--cifar-warmup--s44--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T11:13:53|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332833|orb-swp--train--cifar-const--s44--a01|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T11:13:53|None assigned||gpu-preempt|/shared/pilab/pilab/orb
+2332861|orb-swp--train--cifar-warmup--s43--a02|RUNNING|0:0|04:07:01|2026-09-07T01:50:27|Unknown|n-40-01|billing=8,cpu=8,gres/gpu:nvidia_a100-sxm4-40gb=1,gres/gpu=1,mem=48G,node=1|gpu-preempt|/shared/pilab/pilab/orb
+2332862|orb-swp--train--cifar-const--s43--a02|RUNNING|0:0|04:07:01|2026-09-07T01:50:27|Unknown|n-40-01|billing=8,cpu=8,gres/gpu:nvidia_a100-sxm4-40gb=1,gres/gpu=1,mem=48G,node=1|gpu-preempt|/shared/pilab/pilab/orb
+2332863|orb-swp--train--cifar-cosinewarm--s43--a02|RUNNING|0:0|04:07:01|2026-09-07T01:50:27|Unknown|n-40-01|billing=8,cpu=8,gres/gpu:nvidia_a100-sxm4-40gb=1,gres/gpu=1,mem=48G,node=1|gpu-preempt|/shared/pilab/pilab/orb
+2333095|orb-ab--train--resnet18-bs512--s42--a02|COMPLETED|0:0|05:39:38|2026-09-06T13:13:42|2026-09-06T18:53:20|n-38-03|billing=8,cpu=8,gres/gpu:nvidia_rtx_pro_6000_blackwell_server_edition=1,gres/gpu=1,mem=48G,node=1|gpu-preempt|/shared/pilab/pilab/orb
+2333096|orb-ab--train--resnet18-bs512--s45--a02|COMPLETED|0:0|05:43:34|2026-09-06T13:13:42|2026-09-06T18:57:16|n-38-03|billing=8,cpu=8,gres/gpu:nvidia_rtx_pro_6000_blackwell_server_edition=1,gres/gpu=1,mem=48G,node=1|gpu-preempt|/shared/pilab/pilab/orb
+2333097|orb-ab--train--resnet18-bs512--s46--a02|COMPLETED|0:0|11:24:33|2026-09-06T13:49:15|2026-09-07T01:13:48|n-32-03|billing=8,cpu=8,gres/gpu:nvidia_geforce_rtx_3090=1,gres/gpu=1,mem=48G,node=1|gpu-preempt|/shared/pilab/pilab/orb
+2333099|orb-ab--train--resnet18-bs512--s47--a02|COMPLETED|0:0|11:26:03|2026-09-06T13:49:15|2026-09-07T01:15:18|n-32-03|billing=8,cpu=8,gres/gpu:nvidia_geforce_rtx_3090=1,gres/gpu=1,mem=48G,node=1|gpu-preempt|/shared/pilab/pilab/orb
+2333100|orb-ab--train--resnet18-bs512--s48--a02|COMPLETED|0:0|06:54:46|2026-09-06T13:57:45|2026-09-06T20:52:31|n-38-01|billing=8,cpu=8,gres/gpu=1,mem=48G,node=1|gpu-preempt|/shared/pilab/pilab/orb
+2333101|orb-ab--train--vit-bs512--s43--a02|COMPLETED|0:0|06:54:56|2026-09-06T13:57:45|2026-09-06T20:52:41|n-38-01|billing=8,cpu=8,gres/gpu=1,mem=48G,node=1|gpu-preempt|/shared/pilab/pilab/orb
+2333102|orb-ab--train--vit-bs512--s44--a02|COMPLETED|0:0|06:53:38|2026-09-06T13:57:45|2026-09-06T20:51:23|n-38-01|billing=8,cpu=8,gres/gpu=1,mem=48G,node=1|gpu-preempt|/shared/pilab/pilab/orb
+2333760|lmft-x07-sampler-s0|RUNNING|0:0|09:02:15|2026-09-06T20:55:13|Unknown|n-38-01|billing=16,cpu=16,gres/gpu=2,mem=256G,node=1|gpu-preempt|/shared/pilab/alix/lmft
+2333761|lmft-x07-trainer-s1|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T20:58:58|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2333762|lmft-x07-sampler-s1|CANCELLED by 610001|0:0|00:00:00|None|2026-09-06T20:58:59|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334205|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T02:41:44|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334215|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T02:48:54|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334243|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T02:56:05|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334290|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T03:03:15|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334318|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T03:10:25|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334330|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T03:17:35|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334343|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T03:24:46|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334356|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T03:31:56|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334365|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T03:39:06|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334372|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T03:46:16|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334380|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T03:53:26|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334388|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T04:00:37|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334396|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T04:07:46|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334403|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T04:14:58|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334411|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T04:22:08|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334418|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T04:29:18|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334428|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T04:36:29|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334435|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T04:43:39|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334445|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T04:50:49|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334456|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T04:57:59|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334464|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T05:05:09|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334502|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T05:12:19|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334534|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T05:19:28|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334543|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T05:26:39|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334554|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T05:33:49|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334561|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T05:41:00|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334564|smoke-test|PENDING|0:0|00:00:00|Unknown|Unknown|None assigned||gpu-preempt|/shared/pilab/pilab/rl-benchmarks
+2334571|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T05:48:10|None assigned||gpu-preempt|/shared/pilab/alix/lmft
+2334583|lmft-x07-trainer-s0|CANCELLED by 610001|0:0|00:00:00|None|2026-09-07T05:55:19|None assigned||gpu-preempt|/shared/pilab/alix/lmft

@@ -1,0 +1,2 @@
+SQUEUE_FORMAT=%.12i %.10P %.10j %.9u %.2t %.10M %.6D %R
+(end)

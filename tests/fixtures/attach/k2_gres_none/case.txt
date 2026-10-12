@@ -1,0 +1,11 @@
+# k2: a step that sees no GPU. Field probe B ran `srun --gres=none` on job 2332862: CUDA_VISIBLE_DEVICES empty,
+# nvidia-smi "No devices found." (RunFleet never passes --gres=none; the same answer comes from a job without GPUs or
+# a node whose driver hides them). The cgroup is still readable.
+# source (raw capture, not published): k2/05-srun-gresnone-rich-sacct.txt (B), k2/03-ssh-node-procs-cgroups.txt (cgroup of
+#         2332862); nvidia-smi's rc was not recorded (6 = "No devices were found"); ps/listpids/map not captured
+#         for that step (empty here).
+host=k2
+mode=srun
+job=2332862
+nodes=n-40-01
+jobs.n-40-01=2332862

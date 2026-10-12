@@ -1,0 +1,12 @@
+login-v01
+alice0001
+SHELL=/bin/bash
+/home/alice0001:/bin/bash
+HOME=/home/alice0001
+nfs1.example.edu:/export/home nfs4 68719476736 17179869184 51539607552      25% /home
+fstype=nfs
+VERSION_ID="9.8"
+PRETTY_NAME="Rocky Linux 9.8 (Blue Onyx)"
+5.14.0-687.41.1.el9_8.x86_64
+32
+1.08 0.94 0.89 2/7041 263904

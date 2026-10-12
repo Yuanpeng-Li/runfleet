@@ -1,0 +1,22 @@
+# My fleet — hand-written, keep these notes.
+# (RunFleet must not lose any comment in here.)
+
+[general]
+readonly = false     # flip to true on the shared account
+default_view = "jobs"
+
+[defaults.slurm]
+poll_jobs = "20s"    # be nice to the controller
+
+# k2: the main cluster
+[[host]]
+name = "k2"
+protected_qos = ["labpi"]   # never touch these
+
+[[host]]
+name = "lyra"
+group = "clusters"
+
+# [[host]]
+# name = "atlas"
+# ssh = "local"

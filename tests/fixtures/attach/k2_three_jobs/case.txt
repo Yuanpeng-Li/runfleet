@@ -1,0 +1,11 @@
+# k2: three own jobs share n-40-01 (one A100 each); ssh to the node lands in the newest one (2332863) while job
+# 2332861 is attached: its GPU rows belong to 2332863, the cgroups/ps/listpids of all three jobs are readable.
+# source (raw capture, not published): k2/02-ssh-node-basic.txt (node.id, nvidia-smi 17:38:20),
+#         k2/03-ssh-node-procs-cgroups.txt (ps, listpids, cgroups, /proc/driver/nvidia), k2/07-final-audit.txt;
+#         reformatted into the node sections' output (ps: pgid = process-group leader inferred from the tree, pmem
+#         from rss / RealMemory 512000 MiB; nvidia-smi fields the field query did not ask for are [N/A]).
+host=k2
+mode=ssh
+job=2332861
+nodes=n-40-01
+jobs.n-40-01=2332861 2332862 2332863

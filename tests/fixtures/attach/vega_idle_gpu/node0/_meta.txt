@@ -1,0 +1,23 @@
+## node.id
+rc=0 ms=5
+
+## node.cg
+rc=0 ms=6
+
+## node.ps
+rc=0 ms=19
+
+## node.pids
+rc=0 ms=9
+
+## node.map
+rc=0 ms=2
+
+## node.gpu
+rc=0 ms=36
+
+## node.apps
+rc=0 ms=22
+
+## node.self
+rc=0 ms=5

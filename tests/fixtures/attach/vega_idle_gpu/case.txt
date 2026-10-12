@@ -1,0 +1,10 @@
+# vega: job 724655 holds both H200s of n-37-08; GPU0 at 100 %, GPU1 at 0 % holding 84725 MiB (python3 rank of the
+# trainer). ssh lands in the job itself. /proc/driver/nvidia was not read on vega: node.map is empty, so no IDX.
+# source (raw capture, not published): vega/03-ssh-node-n-37-08.txt (nvidia-smi, listpids, ps 17:39:15),
+#         vega/04-node-cgroup-exporters.txt (job cgroup), vega/09-final-audit.txt; ps etime converted to seconds,
+#         pgid inferred from the tree; nvidia-smi fan.speed/pstate were not queried: [N/A].
+host=vega
+mode=ssh
+job=724655
+nodes=n-37-08
+jobs.n-37-08=724655

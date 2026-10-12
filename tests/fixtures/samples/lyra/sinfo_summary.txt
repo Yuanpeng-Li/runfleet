@@ -1,0 +1,9 @@
+PARTITION    AVAIL  TIMELIMIT   NODES(A/I/O/T) NODELIST
+free            up 3-00:00:00      207/2/3/212 lyra-34-[00-31],lyra-35-[00-31],lyra-37-[00-19],lyra-38-[00-01],lyra-39-[00-01,03-07,09-19],lyra-40-[00-32],lyra-41-[00-32],lyra-42-[00-14,17],lyra-43-[00-18],lyra-44-[00-02],lyra-q38-[00-01,04-05]
+free-gpu        up 3-00:00:00        36/0/0/36 lyra-gpu-36-[00-07],lyra-gpu-37-[02-04],lyra-gpu-38-[00-04],lyra-gpu-44-[05-08],lyra-gpu-p71-[00-05],lyra-gpu-q71-[00-09]
+free-gpuxl      up 3-00:00:00         9/1/0/10 lyra-gpu-p71-[06-08],lyra-gpu-r71-[00-02],lyra-gpu-s71-[00-03]
+gpu             up 14-00:00:0        35/0/0/35 lyra-gpu-36-[00-07],lyra-gpu-37-[02-04],lyra-gpu-38-[00-04],lyra-gpu-44-[05-08],lyra-gpu-p71-[01-05],lyra-gpu-q71-[00-09]
+gpu-highmem     up 1-00:00:00          1/0/0/1 lyra-gpu-p71-00
+gpuxl           up 14-00:00:0         9/1/0/10 lyra-gpu-p71-[06-08],lyra-gpu-r71-[00-02],lyra-gpu-s71-[00-03]
+standard*       up 14-00:00:0      179/0/2/181 lyra-34-[00-31],lyra-35-[00-19,21,24-31],lyra-37-[08-11],lyra-38-[00-01],lyra-39-[00-01,03-07,09-19],lyra-40-[00-15,23,25-32],lyra-41-[00-32],lyra-42-[00-04,06-14,17],lyra-43-[00-18],lyra-q38-[00-01,04-05]
+standard-mem    up 1-00:00:00          3/0/0/3 lyra-44-[00-02]

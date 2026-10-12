@@ -1,0 +1,14 @@
+@@cg 31367626 /sys/fs/cgroup/system.slice/slurmstepd.scope/sQ4HR26FE80M00
+memory.current 78738329600
+memory.peak 78747062272
+memory.max 103079215104
+low 0
+high 0
+max 0
+oom 0
+oom_kill 0
+oom_group_kill 0
+anon 36293398528
+file 42085376000
+shmem 40595066880
+usage_usec 115399681972

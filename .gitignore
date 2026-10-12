@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments
+.venv/
+.env
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Textual snapshot report (baselines under tests/**/__snapshots__/ ARE committed)
+snapshot_report.html
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Internal dev notes and raw field probes (local-only, never published)
+/docs/research/
+/docs/integration-notes.md

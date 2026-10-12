@@ -1,0 +1,5 @@
+## slurm.attach.node0
+rc=0 ms=618
+
+## slurm.attach.audit
+rc=0 ms=41

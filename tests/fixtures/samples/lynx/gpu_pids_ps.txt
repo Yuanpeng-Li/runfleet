@@ -1,0 +1,3 @@
+    PID    PPID USER     ELAPSED %CPU %MEM COMMAND
+ 642234  642229 alice07    67512  121  1.9 /data/home/alice07/projects/orb/.venv/bin/python -m orb.train --config configs/exp_a.yaml data=cifar sched=const seed=44 run_dir=runs/cifar/baseline-const/s44
+ 786345  642229 alice07     3103  114  1.9 /data/home/alice07/projects/orb/.venv/bin/python -m orb.train --config configs/exp_a.yaml data=cifar sched=cosinewarm seed=44 run_dir=runs/cifar/baseline-cosinewarm/s44

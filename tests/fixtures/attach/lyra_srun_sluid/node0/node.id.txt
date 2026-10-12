@@ -1,0 +1,3 @@
+lyra-gpu-s71-03
+0::/system.slice/slurmstepd.scope/sQ4HR26FE80M00/step_0/user/task_0
+J=31367626 G=1

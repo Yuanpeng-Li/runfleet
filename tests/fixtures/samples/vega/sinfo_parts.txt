@@ -1,0 +1,7 @@
+a30|up|2-00:00:00|4|mixed-|gpu:nvidia_a30:2(S:4,10)|n-31-01,n-32-01,n-33-01,n-34-01
+h100|up|2-00:00:00|1|mixed-|gpu:nvidia_h100_80gb_hbm3:4(S:0-1)|n-34-02
+h100|up|2-00:00:00|1|mixed-|gpu:nvidia_h100_nvl:1(S:1)|n-35-01
+h100|up|2-00:00:00|1|mixed-|gpu:nvidia_h100_nvl:2(S:1)|n-36-01
+h200|up|2-00:00:00|23|mixed-|gpu:nvidia_h200_nvl:2(S:3-4)|n-37-[01-08,10-13],n-38-[01-07,09-10,12-13]
+h200|up|2-00:00:00|2|mixed|gpu:nvidia_h200_nvl:2(S:3-4)|n-38-[08,11]
+h200|up|2-00:00:00|1|reserved|gpu:nvidia_h200_nvl:2(S:3-4)|n-37-09

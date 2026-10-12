@@ -1,0 +1,30 @@
+    PID    PPID ELAPSED %CPU %MEM STAT COMMAND
+ 360796  360588   68483  0.0  0.0 S    sshd: alice07@pts/3
+ 363942       1   68047  0.0  0.0 SN   python -m orb.launch --manifest manifests/voc_s44.txt --per-gpu 1 --threads 16
+ 363948  363942   68046  100  0.8 SNl  /home/alice07/projects/orb/.venv/bin/python -m orb.train --config configs/exp_a.yaml data=voc sched=cosinewarm seed=44 run_dir=runs/voc/baseline-cosinewarm/s44
+ 374177  360796   65956  0.0  0.0 Ss   -zsh
+ 374231  374177   65953  2.0  0.0 Sl+  /home/alice07/.local/share/uv/tools/nvitop/bin/python /home/alice07/.local/bin/nvitop
+ 576764  360796       3  0.6  0.0 Ss   bash -s
+ 576892  576764       0  0.0  0.0 S    bash -s
+ 576893  576892       0  0.0  0.0 S    bash -s
+ 576894  576893       0  0.0  0.0 S    bash -s
+ 576895  576894       0  0.0  0.0 R    ps -u alice07 -o pid,ppid,etimes,pcpu,pmem,stat,args -ww
+ 576896  576894       0  0.0  0.0 S    head -30
+2318537       1 2497055  0.0  0.0 Ssl  /home/alice07/.vscode-server/code-8a67639f74080f56c5aa328f676226e236a23e23 --cli-data-dir /home/alice07/.vscode-server/cli agent host
+2613940       1 5319375  0.0  0.0 S    Xvfb :99 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.rCOX6J/Xauthority
+2623543       1 5318274  0.0  0.0 S    Xvfb :100 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.hw7Hd1/Xauthority
+2623769       1 5318165  0.0  0.0 S    Xvfb :101 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.1XzWL8/Xauthority
+2623970       1 5318066  0.0  0.0 S    Xvfb :102 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.MHpoKE/Xauthority
+2624176       1 5317855  0.0  0.0 S    Xvfb :103 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.zViXZy/Xauthority
+2624419       1 5317717  0.0  0.0 S    Xvfb :104 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.a8cdFO/Xauthority
+2624588       1 5317635  0.0  0.0 S    Xvfb :105 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.cVwWBh/Xauthority
+2624748       1 5317571  0.0  0.0 S    Xvfb :106 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.qG5KSF/Xauthority
+2624942       1 5317484  0.0  0.0 S    Xvfb :107 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.dPE0SP/Xauthority
+2625137       1 5317421  0.0  0.0 S    Xvfb :108 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.gjtHfb/Xauthority
+2625316       1 5317358  0.0  0.0 S    Xvfb :109 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.1F6w70/Xauthority
+2625523       1 5317294  0.0  0.0 S    Xvfb :110 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.WAKadY/Xauthority
+2625708       1 5317229  0.0  0.0 S    Xvfb :111 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.EjW1W5/Xauthority
+2625890       1 5317164  0.0  0.0 S    Xvfb :112 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.bSapfQ/Xauthority
+2626073       1 5317085  0.0  0.0 S    Xvfb :113 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.7Dh3yE/Xauthority
+2626245       1 5317018  0.0  0.0 S    Xvfb :114 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.g42ipq/Xauthority
+2626414       1 5316951  0.0  0.0 S    Xvfb :115 -screen 0 1280x800x24 -nolisten tcp -auth /tmp/xvfb-run.nX1fkk/Xauthority

@@ -1,0 +1,12 @@
+161460
+ 161459  161453  161453       0  0.0  0.0  8528 S    sshd-session: alice0001@notty
+ 161460  161459  161460       0  0.0  0.0  3524 Ss   bash -s
+ 161578  161460  161460       0  0.0  0.0  1836 S    timeout 20 ps -u alice0001 -o pid,ppid,pcpu,pmem,rss,etime,stat,args --forest
+ 161579  161578  161460       0  0.0  0.0  3528 R    ps -u alice0001 -o pid,ppid,pcpu,pmem,rss,etime,stat,args --forest
+ 129234  129225  129234   18459  0.0  0.0  3636 S    /bin/bash /var/spool/slurmd/job724655/slurm_script --config configs/exp_b.yaml seed=0 lr=1e-5 steps=100
+ 129302  129234  129234   18448  0.0  0.0 23844 Sl   Singularity runtime parent
+ 129330  129302  129330   18448  0.0  0.0   296 S    /usr/bin/bash scripts/serve_eval.sh --config configs/exp_b.yaml seed=0
+ 129361  129330  129330   18447 19.6 30.7 121633844 Sl   python3 -m vllm.entrypoints.openai.api_server --model Qwen/Qwen2.5-7B-Instruct --port 8011 --gpu-memory-utilization 0.35 --max-model-len 16384 --seed 0
+ 129392  129361  129330   18424 80.5  0.6 2553624 Rl   VLLM::EngineCore
+ 129676  129392  129330   18375  0.0  0.0 388456 Sl   /usr/bin/python3 /usr/local/lib/python3.12/dist-packages/torch/_inductor/compile_worker/__main__.py --pickler=torch._inductor.compile_worker.subproc_pool.SubprocPickler --kind=fork --workers=16 --parent=129392 --read-fd=124 --write-fd=127 --torch-key=Q2xhdWRlRml4dHVyZUtleU5vdEFSZWFsT25lMTIzNDU=
+ 129362  129330  129330   18447  0.0  0.0   268 S    tee logs/serve_eval_s0_724655.log

@@ -1,0 +1,9 @@
+nvidia-smi /usr/bin/nvidia-smi
+python3 /usr/bin/python3
+jq /usr/bin/jq
+timeout /usr/bin/timeout
+tmux /usr/bin/tmux
+squeue MISSING
+nvitop /usr/local/bin/nvitop
+gpustat MISSING
+Python 3.10.12

@@ -1,0 +1,3 @@
+index, uuid, name, utilization.gpu [%], memory.used [MiB], memory.total [MiB], temperature.gpu, power.draw [W], power.limit [W], fan.speed [%], pstate, clocks.current.sm [MHz], utilization.memory [%]
+0, GPU-c6faebeb-cf00-3f1a-1182-49cec7f3d256, NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 97 %, 15246 MiB, 97887 MiB, 55, 195.87 W, 300.00 W, 30 %, P1, 2347 MHz, 28 %
+1, GPU-35765204-ac46-81e4-b43b-71a7d77aedd9, NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 100 %, 15244 MiB, 97887 MiB, 57, 209.38 W, 300.00 W, 30 %, P1, 2227 MHz, 44 %

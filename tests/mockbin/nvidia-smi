@@ -1,0 +1,30 @@
+#!/bin/sh
+# mock nvidia-smi: --version, --query-gpu (gpu_query padded with [N/A] to the requested field count) and
+# --query-compute-apps. RF_MOCK_NVIDIA_HANG=<s> makes --query-gpu ignore TERM and hang (pid appended to
+# $RF_MOCK_NVIDIA_PIDS); RF_MOCK_NVIDIA_RC=<rc> fails like a broken driver.
+. "$RF_MOCK_BIN/_lib.sh"
+mock_log nvidia-smi "$@"
+q=; apps=
+for a in "$@"; do
+  case $a in
+    --version) cat "$S/nvidia_smi_version.txt"; exit 0 ;;
+    --query-gpu=*) q=${a#--query-gpu=} ;;
+    --query-compute-apps=*) apps=1 ;;
+  esac
+done
+if [ -n "${RF_MOCK_NVIDIA_RC-}" ]; then
+  echo "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver." >&2
+  exit "$RF_MOCK_NVIDIA_RC"
+fi
+if [ -n "$q" ]; then
+  if [ -n "${RF_MOCK_NVIDIA_HANG-}" ]; then
+    trap '' TERM HUP INT
+    [ -n "${RF_MOCK_NVIDIA_PIDS-}" ] && echo $$ >>"$RF_MOCK_NVIDIA_PIDS"
+    exec sleep "$RF_MOCK_NVIDIA_HANG"
+  fi
+  n=$(printf '%s\n' "$q" | awk -F, '{print NF}')
+  awk -v extra=$((n - 9)) '{s = $0; for (i = 0; i < extra; i++) s = s ", [N/A]"; print s}' "$(fixture GPU gpu_query)"
+  exit 0
+fi
+[ -n "$apps" ] && cat "$(fixture APPS compute_apps)"
+exit 0

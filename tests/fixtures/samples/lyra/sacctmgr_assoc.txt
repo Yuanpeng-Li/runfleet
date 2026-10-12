@@ -1,0 +1,3 @@
+lyra|pilab_02||high,low,normal,standard-mem|||
+lyra|pilab_02_gpu||gpu-highmem,high,low,normal|||
+lyra|alice07||high,low,normal,standard-mem|||
