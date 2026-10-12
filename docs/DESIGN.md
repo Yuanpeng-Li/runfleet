@@ -106,7 +106,7 @@ build-backend = "hatchling.build"
 [project]
 name = "runfleet"
 version = "0.1.0"
-description = "nvitop-like TUI for Slurm clusters and GPU workstations over SSH"
+description = "All your Slurm jobs and GPU machines in one terminal: queues, GPUs, logs and failures over plain SSH"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

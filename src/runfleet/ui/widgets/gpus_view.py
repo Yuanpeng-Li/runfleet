@@ -29,7 +29,7 @@ COLUMNS: tuple[tuple[str, str, int], ...] = (
 NARROW_DROP = ("node", "temp", "pwr")
 NODE_MAX = 18
 SORTS = ("host", "util", "mem", "temp")
-NOTE = "* per-job aggregate from Slurm accounting (sstat), not a per-GPU reading · per-GPU Slurm readings are v0.2"
+NOTE = "* per-job aggregate from Slurm accounting (sstat), not a per-GPU reading · per-GPU readings: open the job, GPU tab"
 
 
 @dataclass(frozen=True, slots=True)

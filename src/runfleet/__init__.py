@@ -1,3 +1,3 @@
-"""[WP1] RunFleet: nvitop-like TUI for Slurm clusters and GPU workstations over SSH."""
+"""[WP1] RunFleet: Slurm jobs and GPU machines in one terminal UI, over plain SSH."""
 
 __version__ = "0.1.0"

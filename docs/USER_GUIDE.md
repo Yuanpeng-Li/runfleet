@@ -55,7 +55,7 @@ the title an ended job that did not succeed shows its **cause chip** and a pendi
 the Summary's right column shows an ended job's **Efficiency** box instead of its GPU box (see *Why did it fail?*
 below).
 
-**Host detail** (`enter` on a host). Workstations: nvitop-style GPU bars, host CPU/memory, and processes (GPU holders
+**Host detail** (`enter` on a host). Workstations: per-GPU bars, host CPU/memory, and processes (GPU holders
 of all users plus the members of your tasks; `u` toggles other users). Clusters: partitions with free GPUs by type,
 nodes (state, CPU, memory, GPU use, which of your jobs run there) and the detected capabilities. A host that never
 connected shows only its connection panel (`c` log in, `e` details, `t` disable).
