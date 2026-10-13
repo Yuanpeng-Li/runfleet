@@ -67,6 +67,9 @@ class SectionStatus:
     last_ok: datetime | None
     error: HostError | None = None
 
+DETECT_REV = 1      # bump when detection learns something new: cached capabilities of an older revision are re-detected
+
+
 @dataclass(frozen=True, slots=True)
 class Capabilities:
     remote_user: str
@@ -83,6 +86,8 @@ class Capabilities:
     gpu_tres: bool | None = None             # cluster records gres/gpuutil (None = not known yet), §5.1
     sacct_fields: frozenset[str] = frozenset()
     associations: tuple[tuple[str, str, str, str], ...] = ()       # (cluster, account, partition, qos)
+    gpu_partitions: tuple[str, ...] = ()     # GPU partitions the user may submit to (scontrol show partition), §5.1
+    detect_rev: int = 0                      # DETECT_REV of the detection that produced these (0 = before 0.2.1)
     driver_version: str | None = None        # nvidia "KMD version" (fallback "DRIVER version")
     node_ssh: Literal["adopt", "denied"] | None = None   # Attach (§7.16), learned via caps_patch by the first node
                                              # ssh: "adopt" = login→node ssh lands in a job (pam_slurm_adopt);

@@ -23,7 +23,7 @@ LBS_LOG = "/home/alice/projects/orb/logs/launch_voc_s44.log"
 # Appendix A: every section name with representative meta, and the host that can answer it.
 CATALOGUE: list[tuple[str, str, dict[str, object]]] = [
     ("k2", "detect.id", {}), ("lynx", "detect.tools", {}),
-    ("k2", "slurm.version", {}), ("k2", "slurm.config", {}), ("k2", "slurm.assoc", {}),
+    ("k2", "slurm.version", {}), ("k2", "slurm.config", {}), ("k2", "slurm.assoc", {}), ("k2", "slurm.parts", {}),
     ("k2", "slurm.sacctfmt", {}), ("k2", "slurm.gputres", {}), ("labstation", "nvidia.version", {}),
     ("k2", "slurm.squeue", {"users": [], "extra": [], "sep": "\x1f", "format": "O"}),
     ("k2", "slurm.sacct", {"since_s": 86400, "fields": ["JobID", "JobIDRaw", "State"], "sep": "\x1f"}),

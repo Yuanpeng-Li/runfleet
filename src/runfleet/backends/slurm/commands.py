@@ -135,6 +135,22 @@ VERSION_CMD = "sinfo --version"
 CONFIG_CMD = ("scontrol show config | grep -E '^(ClusterName|AccountingStorageType|JobAcctGatherType|"
               "JobAcctGatherFrequency|PreemptMode|PrologFlags|LaunchParameters|MinJobAge|PrivateData) '")
 ASSOC_CMD = 'sacctmgr -n -P show assoc where user="$(id -un)" format=Cluster,Account,Partition,QOS'
+# who may submit where (§5.1): the user's groups (group database, comma-separated: names may hold spaces), the parent
+# chain of the user's accounts (Allow/DenyAccounts include sub-accounts; `parent=cluster|account|parent`, up to 6
+# levels, root left out; `parents=complete` only when every sacctmgr call worked and the chain ended), then one line
+# per partition (AllowGroups/Accounts/Qos, Deny*, Hidden, RootOnly, State, TRES gres/gpu=N)
+PARTS_CMD = (
+    "u=$(id -un); g=$(for i in $(id -G \"$u\"); do getent group \"$i\" 2>/dev/null | cut -d: -f1; done "
+    "| paste -sd, -); [ -n \"$g\" ] || g=$(id -Gn \"$u\" | tr ' ' ,); printf 'groups=%s\\n' \"$g\"; ok=1; "
+    "r=$(sacctmgr -n -P show assoc where user=\"$u\" format=Account 2>/dev/null) || ok=0; "
+    "a=$(printf '%s\\n' \"$r\" | sed '/^$/d' | sort -u | paste -sd, -); i=0; "
+    "while [ -n \"$a\" ] && [ $i -lt 6 ]; do "
+    "r=$(sacctmgr -n -P show assoc where account=\"$a\" format=Cluster,Account,User,ParentName 2>/dev/null) || ok=0; "
+    "p=$(printf '%s\\n' \"$r\" | awk -F'|' '$3 == \"\" && $4 != \"\" && $4 != \"root\" {print $1 \"|\" $2 \"|\" $4}' "
+    "| sort -u); [ -n \"$p\" ] && printf '%s\\n' \"$p\" | sed 's/^/parent=/'; "
+    "a=$(printf '%s\\n' \"$p\" | sed '/^$/d' | cut -d'|' -f3 | sort -u | paste -sd, -); i=$((i + 1)); done; "
+    "[ -z \"$a\" ] && [ $ok = 1 ] && echo parents=complete; "
+    "scontrol show partition -o")
 SACCTFMT_CMD = "sacct --helpformat"
 GPUTRES_CMD = ("j=$(sacct -u \"$(id -un)\" -S now-14days -E now -X -n -P --format=JobIDRaw,AllocTRES,State "
                "| awk -F'|' '$2 ~ /gres\\/gpu/ && $3 !~ /^(RUNNING|PENDING)/ {j=$1} END {print j}'); "

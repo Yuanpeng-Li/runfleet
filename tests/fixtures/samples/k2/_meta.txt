@@ -104,3 +104,7 @@ rc=0 ms=53
 ## sacctmgr_assoc
 cmd: sacctmgr -n -P show assoc where user=$USER format=Cluster,Account,Partition,QOS,GrpTRES,MaxJobs,MaxSubmit
 rc=0 ms=31
+
+## scontrol_partitions
+cmd: PARTS_CMD (groups, parent accounts, scontrol show partition -o; fields trimmed to the access/TRES subset)
+rc=0 ms=21

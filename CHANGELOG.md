@@ -5,6 +5,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-13
+
+### Fixed
+- **GPU partitions you have not used lately disappeared**: the node view and the host card only covered partitions of
+  your jobs from the last few days (plus association partitions, which most sites leave empty), so a lab's paid GPU
+  partition vanished once you had run only in free ones for a while. Detection now also reads
+  `scontrol show partition -o` (with your groups and the parent chain of your accounts) once and adds every GPU
+  partition you may submit to: AllowGroups, AllowAccounts/DenyAccounts (sub-accounts included, as in Slurm) and
+  AllowQos/DenyQos checked against your associations on that cluster; hidden, root-only, inactive and drained
+  partitions stay out. Capabilities cached by an older version are detected again at start, so the change shows up
+  right after the upgrade. A `partitions` list in the config still replaces the derived set.
+- **Host card free GPUs**: with many partitions the line was cut off at the card edge. It now drops the
+  "(N planned)" notes, then wraps to a second line, and only then ends with "+N more" (host detail lists all).
+
 ## [0.2.0] - 2026-10-13
 
 ### Added
@@ -222,6 +236,7 @@ First public release.
   opt-in with `--yes`); `scripts/gen_docs.py`; `scripts/screenshots.py`.
 - CI: lint, types and tests on Python 3.11 and 3.13, plus a packaging job that runs the demo from the built wheel.
 
-[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Yuanpeng-Li/runfleet/releases/tag/v0.1.0

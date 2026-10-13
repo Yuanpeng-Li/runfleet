@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from runfleet.backends.base import Collector
 from runfleet.config import HostConfig
 from runfleet.errors import RunFleetError
-from runfleet.models import Capabilities
+from runfleet.models import DETECT_REV, Capabilities
 from runfleet.probe.section import Section, SectionResult
 
 log = logging.getLogger("runfleet.backends.detect")
@@ -28,7 +28,7 @@ _TZ = re.compile(r"^([+-])(\d{2}):?(\d{2})$")
 
 # Capabilities fields a collector may set through ingest_capabilities (anything else is ignored with a warning).
 _CAP_FIELDS = frozenset({"slurm_version", "cluster_name", "slurm_config", "acct_gather_freq_s", "gpu_tres",
-                         "sacct_fields", "associations", "driver_version"})
+                         "sacct_fields", "associations", "gpu_partitions", "driver_version"})
 
 
 def detect_sections(host: HostConfig, collectors: Mapping[str, type[Collector]]) -> list[Section]:
@@ -100,7 +100,7 @@ def build_capabilities(results: Mapping[str, SectionResult], host: HostConfig, n
             else:
                 log.warning("collector %s: ignoring unknown capability %s", cname, field_name)
     caps = Capabilities(remote_user=user, uid=uid, login_host=values.get("host", ""), tz_offset=tz,
-                        clock_skew=timedelta(seconds=epoch - now.timestamp()), tools=tools)
+                        clock_skew=timedelta(seconds=epoch - now.timestamp()), tools=tools, detect_rev=DETECT_REV)
     caps = dataclasses.replace(caps, **fields)  # type: ignore[arg-type]  # values are checked per field below
     _check_types(caps)
     return dataclasses.replace(caps, profile=choose_profile(caps, host))
@@ -111,7 +111,7 @@ def _check_types(caps: Capabilities) -> None:
     expected: dict[str, tuple[type, ...]] = {
         "slurm_version": (str, type(None)), "cluster_name": (str, type(None)), "slurm_config": (Mapping,),
         "acct_gather_freq_s": (int, type(None)), "gpu_tres": (bool, type(None)), "sacct_fields": (frozenset,),
-        "associations": (tuple,), "driver_version": (str, type(None)),
+        "associations": (tuple,), "gpu_partitions": (tuple,), "driver_version": (str, type(None)),
     }
     for name, types in expected.items():
         if not isinstance(getattr(caps, name), types):

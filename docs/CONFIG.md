@@ -179,7 +179,7 @@ Slurm keys may be written flat in a `[[host]]` table and override `[defaults.slu
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `users` | list | `[]` | whose jobs to list (`squeue -u`); empty = `squeue --me` |
-| `partitions` | list | `[]` | partitions shown in the node view; empty = partitions of your jobs and associations |
+| `partitions` | list | `[]` | partitions shown in the node view and on the card; empty = partitions of your recent jobs and associations, plus every GPU partition your accounts may submit to |
 | `squeue_args` | list | `[]` | extra squeue arguments (validated tokens) |
 | `poll_jobs`, `poll_history`, `poll_nodes`, `poll_usage`, `poll_logstat` | duration | see `[defaults.slurm]` | refresh intervals while the host is on screen (×3 when hidden); values below the floor are raised to it with a warning |
 | `sacct_window` | duration | `3d` | how far back finished jobs are listed |

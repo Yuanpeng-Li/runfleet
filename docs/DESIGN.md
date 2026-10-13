@@ -423,6 +423,8 @@ class Capabilities:
     gpu_tres: bool | None = None             # cluster records gres/gpuutil (None = not known yet), §5.1
     sacct_fields: frozenset[str] = frozenset()
     associations: tuple[tuple[str, str, str, str], ...] = ()       # (cluster, account, partition, qos)
+    gpu_partitions: tuple[str, ...] = ()     # GPU partitions the user may submit to (scontrol show partition), §5.1
+    detect_rev: int = 0                      # DETECT_REV of the detection (cache.load_caps drops older ones: detect again)
     driver_version: str | None = None        # nvidia "KMD version" (fallback "DRIVER version")
     node_ssh: Literal["adopt", "denied"] | None = None   # Attach (§7.16), learned via caps_patch by the first node
                                              # ssh: "adopt" = login→node ssh lands in a job (pam_slurm_adopt);
@@ -1941,6 +1943,7 @@ The **detect probe** (one round trip, purpose `detect`) holds the generic sectio
 | `slurm.version` (req `sinfo`) | `sinfo --version` | `slurm 25.05.8` → "25.05.8" |
 | `slurm.config` (req `scontrol`) | `scontrol show config \| grep -E '^(ClusterName\|AccountingStorageType\|JobAcctGatherType\|JobAcctGatherFrequency\|PreemptMode\|PrologFlags\|LaunchParameters\|MinJobAge\|PrivateData) '` | cluster_name, slurm_config, acct_gather_freq_s |
 | `slurm.assoc` (req `sacctmgr`) | `sacctmgr -n -P show assoc where user="$(id -un)" format=Cluster,Account,Partition,QOS` | associations |
+| `slurm.parts` (req `scontrol`) | `commands.PARTS_CMD`: `groups=` (comma-separated names from the group database via `getent`, not the session's groups), `parent=cluster\|account\|parent` lines walking up from the user's accounts (account-level `sacctmgr show assoc` rows, ≤ 6 levels, `root` left out), `parents=complete` when every sacctmgr call worked and the chain ended, then `scontrol show partition -o` (a value runs to the next ` Key=`, so names with spaces stay whole) | gpu_partitions: partitions with `gres/gpu` in TRES, not `Hidden`, `RootOnly`, `INACTIVE` or `DRAIN`, whose AllowGroups holds one of your groups and where, for some account, the association of this cluster for that partition (else the one for all partitions, as Slurm picks) passes AllowAccounts/DenyAccounts with the account or a parent (the lists are hierarchical; a DenyAccounts list needs `parents=complete`) and has a QOS passing AllowQos/DenyQos (an empty QOS list passes only unrestricted partitions). No association data at all: only partitions open to every account and QOS; associations on other clusters only: none |
 | `slurm.sacctfmt` (req `sacct`) | `sacct --helpformat` | sacct_fields (enables `StdOut,StdErr` when present) |
 | `slurm.gputres` (req `sacct`) | `j=$(sacct -u "$(id -un)" -S now-14days -E now -X -n -P --format=JobIDRaw,AllocTRES,State \| awk -F'\|' '$2 ~ /gres\/gpu/ && $3 !~ /^(RUNNING\|PENDING)/ {j=$1} END {print j}'); [ -n "$j" ] && sacct -j "$j" -n -P --format=JobID,TRESUsageInMax%400; true` | gpu_tres seed |
 | `nvidia.version` (req `nvidia-smi`) | `nvidia-smi --version` | driver_version: key `KMD version`, fallback `DRIVER version` |
@@ -1994,7 +1997,7 @@ def choose_profile(caps: Capabilities, host: HostConfig) -> tuple[str, ...]: ...
 | `slurm.history` (interval) | `slurm.sacct` | 120 s / 60 s / ×3 / ×1 | always (incremental window) |
 | `slurm.vanished` (event) | `slurm.sacct_ids` | — | ids that left squeue and are not yet terminal in history |
 | `slurm.logstat` (interval) | `slurm.logstat` | 120 s / 60 s / ×3 / ×0.5 | RUNNING jobs with a known stdout path (≤ 30) |
-| `slurm.nodes` (interval) | `slurm.sinfo` | 120 s / 60 s / ×5 / ×1 | partitions known: config `partitions`, else partitions of the user's jobs (live + history) ∪ non-empty association partitions |
+| `slurm.nodes` (interval) | `slurm.sinfo` | 120 s / 60 s / ×5 / ×1 | partitions known: config `partitions`, else partitions of the user's jobs (live + history) ∪ non-empty association partitions ∪ `caps.gpu_partitions` (GPU partitions you may use but have not used lately, e.g. a lab's paid partition) |
 
 All due groups ride **one** probe per tick, and groups are only evaluated at ticks (§5.4), so a visible Slurm host
 costs 4 round trips/min (1.3 hidden). Job detail is a separate on-demand probe (`detail_sections`: `slurm.scontrol` for
@@ -4015,7 +4018,7 @@ Owner = `Section.owner` (name prefix). All `meta` values are also interpolated (
 | Section | `meta` | Purpose |
 |---|---|---|
 | `detect.id`, `detect.tools` | — | identity, tz, epoch, tools |
-| `slurm.version`, `slurm.config`, `slurm.assoc`, `slurm.sacctfmt`, `slurm.gputres` | — | capabilities, gpu_tres seed |
+| `slurm.version`, `slurm.config`, `slurm.assoc`, `slurm.parts`, `slurm.sacctfmt`, `slurm.gputres` | — | capabilities, gpu_tres seed |
 | `nvidia.version` | — | driver version |
 | `slurm.squeue` | `users: list[str]`, `extra: list[str]`, `sep: str`, `format: "O"\|"legacy"` | live jobs |
 | `slurm.sacct` | `since_s: int`, `fields: list[str]`, `sep: str` | history window |

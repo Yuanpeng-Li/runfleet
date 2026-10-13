@@ -444,6 +444,9 @@ def test_sinfo_partitions_nodes_and_type_from_sinfo() -> None:
     assert SlurmCollector(cfg.host).partitions(cfg) == ["lab"]
     assoc = ctx("k2", associations=(("k2", "campus01", "gpu,cpu", "normal"),))
     assert SlurmCollector(assoc.host).partitions(assoc) == ["cpu", "gpu"]
+    paid = ctx("k2", gpu_partitions=("labpi", "gpu-preempt"))           # GPU partitions you may use, never used yet
+    assert SlurmCollector(paid.host).partitions(paid) == ["gpu-preempt", "labpi"]
+    assert SlurmCollector(cfg.host).partitions(dataclasses.replace(cfg, caps=paid.caps)) == ["lab"]   # config wins
 
 
 def test_new_running_jobs_request_usage_followup() -> None:

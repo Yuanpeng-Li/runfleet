@@ -245,6 +245,7 @@ HANDLERS: dict[str, Handler] = {
     "slurm.version": _simple(render.sinfo_version, "sinfo"),
     "slurm.config": _simple(render.slurm_config, "scontrol"),
     "slurm.assoc": _simple(render.sacctmgr_assoc, "sacctmgr"),
+    "slurm.parts": _simple(render.scontrol_partitions, "scontrol"),
     "slurm.sacctfmt": _simple(render.sacct_helpformat, "sacct"),
     "slurm.gputres": _h_gputres,
     "nvidia.version": _h_nvidia_version,

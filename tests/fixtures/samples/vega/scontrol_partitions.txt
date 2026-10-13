@@ -1,0 +1,11 @@
+groups=staff,chem,pilab
+parent=vega|dept|college
+parent=vega|pilab|dept
+parent=vega|college|campus
+parents=complete
+PartitionName=normal AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Default=YES Hidden=NO MaxTime=2-00:00:00 State=UP TotalNodes=83 TRES=cpu=5312,mem=31125G,node=83,billing=5312 
+PartitionName=a30 AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Default=NO Hidden=NO MaxTime=2-00:00:00 State=UP TotalNodes=4 TRES=cpu=512,mem=4000G,node=4,billing=512,gres/gpu=8,gres/gpu:nvidia_a30=8 
+PartitionName=dev AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Default=NO Hidden=NO MaxTime=02:00:00 State=UP TotalNodes=8 TRES=cpu=512,mem=3000G,node=8,billing=512 
+PartitionName=h100 AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Default=NO Hidden=NO MaxTime=2-00:00:00 State=UP TotalNodes=3 TRES=cpu=192,mem=1500G,node=3,billing=192,gres/gpu=7,gres/gpu:nvidia_h100_80gb_hbm3=4,gres/gpu:nvidia_h100_nvl=3 
+PartitionName=h200 AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Default=NO Hidden=NO MaxTime=2-00:00:00 State=UP TotalNodes=26 TRES=cpu=1664,mem=9750G,node=26,billing=1664,gres/gpu=52,gres/gpu:nvidia_h200_nvl=52 
+PartitionName=vdi AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Default=NO Hidden=NO MaxTime=08:00:00 State=UP TotalNodes=2 TRES=cpu=256,mem=750G,node=2,billing=256 

@@ -321,6 +321,28 @@ def test_free_gpus_names_the_planned_part() -> None:
     assert render.free_gpus(dataclasses.replace(p, gpus_free_planned=0)).plain == "8/16"
 
 
+def test_card_free_gpus_fit_every_partition_or_say_how_many_more(service: FakeService) -> None:
+    state = service.store.hosts["lyra"]
+    assert state.snapshot is not None
+    parts = tuple(PartitionSummary(n, 1, t, f, pl, {}, {}) for n, f, t, pl in (
+        ("free-gpu", 6, 136, 2), ("free-gpuxl", 15, 40, 0), ("gpu", 3, 132, 1), ("gpu-highmem", 0, 4, 0),
+        ("gpuxl", 2, 40, 0)))
+    state.snapshot = dataclasses.replace(state.snapshot, partitions=parts)
+
+    def free(width: int) -> list[str]:
+        lines = [t.plain.rstrip() for t in card_lines(state, T0, width=width)]
+        i = next(i for i, line in enumerate(lines) if line.startswith("free GPUs"))
+        return [lines[i]] + [x for x in lines[i + 1:i + 2] if x.startswith(" " * 10)]
+
+    wide = free(140)                                   # one line, "(planned)" notes kept
+    assert len(wide) == 1 and "gpu 3/132 (1 planned)" in wide[0] and "gpuxl 2/40" in wide[0]
+    two = free(58)                                     # the paid "gpu" partition is not cut off: a second line
+    assert len(two) == 2 and "planned" not in "".join(two) and all(len(x) <= 58 for x in two)
+    assert all(f" {n} " in " ".join(two) + " " for n in ("gpu", "gpuxl", "gpu-highmem"))
+    narrow = free(40)
+    assert len(narrow) == 2 and narrow[1].endswith("more") and all(len(x) <= 40 for x in narrow)
+
+
 # ---------------------------------------------------------------- UI-46 GPU occupancy
 def test_a_gpu_holding_memory_is_not_free(service: FakeService) -> None:
     snap = service.store.hosts["labstation"].snapshot

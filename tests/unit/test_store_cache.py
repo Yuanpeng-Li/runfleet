@@ -13,12 +13,12 @@ from runfleet.backends.base import CollectorOutput
 from runfleet.config import HostConfig
 from runfleet.core.cache import Cache, JobMeta, enrich_from_meta
 from runfleet.core.store import ChangeSet, FleetStore, HostState, job_material_eq
-from runfleet.models import (Capabilities, ConnState, HostMetrics, HostSnapshot, HostStatus, Job, JobKey, JobKind,
-                             JobState, LogRef, NodeAlloc, ResourceAlloc, StateGroup)
+from runfleet.models import (DETECT_REV, Capabilities, ConnState, HostMetrics, HostSnapshot, HostStatus, Job, JobKey,
+                             JobKind, JobState, LogRef, NodeAlloc, ResourceAlloc, StateGroup)
 
 T0 = datetime(2026, 9, 7, 10, 42, 37, tzinfo=UTC)
 CAPS = Capabilities(remote_user="me", uid=1, login_host="l", tz_offset=timedelta(0), clock_skew=timedelta(0),
-                    tools=frozenset(), profile=("slurm", "procfs"))
+                    tools=frozenset(), profile=("slurm", "procfs"), detect_rev=DETECT_REV)
 
 
 def job(jid: str, state: JobState = JobState.RUNNING, host: str = "k2", **kw: object) -> Job:
@@ -124,6 +124,9 @@ def test_cache_round_trip(tmp_path: Path) -> None:
     assert c2.load_snapshots() == {"k2": snap}
     assert c2.load_caps("k2", T0 + timedelta(hours=1)) == (CAPS, T0)
     assert c2.load_caps("k2", T0 + timedelta(hours=25)) is None        # 24 h
+    c2.put_caps("vega", replace(CAPS, detect_rev=0), T0)   # detected by an older version: detect again
+    c2.flush_sync()
+    assert c2.load_caps("vega", T0 + timedelta(minutes=1)) is None
     assert c2.load_jobmeta("k2") == {"1": meta}
     assert c2.load_ended_tasks("lynx", T0 - timedelta(hours=1)) == {"p1-2": ended}
     c2.prune(T0 + timedelta(days=8))

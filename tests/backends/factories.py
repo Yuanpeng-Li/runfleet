@@ -10,7 +10,7 @@ from typing import Any
 
 from runfleet.backends.base import HostContext
 from runfleet.config import GeneralSettings, HostConfig, SlurmSettings, WorkstationSettings
-from runfleet.models import Capabilities
+from runfleet.models import DETECT_REV, Capabilities
 from runfleet.probe.section import SectionOutcome, SectionResult
 from tests.conftest import meta, sample
 
@@ -74,7 +74,7 @@ def caps(host: str = "k2", **overrides: Any) -> Capabilities:
         profile=("slurm", "procfs") if slurm else ("process", "nvidia", "procfs"),
         slurm_version={"k2": "25.05.8", "vega": "25.11.4", "lyra": "26.05.3"}.get(host),
         cluster_name=host if slurm else None, slurm_config=SLURM_CONFIG.get(host, {}),
-        acct_gather_freq_s=30 if slurm else None, gpu_tres=GPU_TRES.get(host),
+        acct_gather_freq_s=30 if slurm else None, gpu_tres=GPU_TRES.get(host), detect_rev=DETECT_REV,
     )
     return dataclasses.replace(base, **overrides)
 

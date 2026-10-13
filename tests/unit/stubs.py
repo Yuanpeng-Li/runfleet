@@ -26,8 +26,8 @@ from runfleet.config import HostConfig
 from runfleet.core.clock import ManualClock
 from runfleet.core.poller import BackendHooks
 from runfleet.errors import ActionError, AttachBlocked, RunFleetError
-from runfleet.models import (GPU, ActionResult, AttachMode, Capabilities, ErrorKind, HostError, HostMetrics, Job,
-                             JobDetail, JobKey, JobKind, JobLive, JobState, LogRef, NodeInspect)
+from runfleet.models import (DETECT_REV, GPU, ActionResult, AttachMode, Capabilities, ErrorKind, HostError, HostMetrics,
+                             Job, JobDetail, JobKey, JobKind, JobLive, JobState, LogRef, NodeInspect)
 from runfleet.probe import framing
 from runfleet.probe.section import Section, SectionOutcome, SectionResult
 
@@ -339,7 +339,7 @@ def stub_caps(host: HostConfig, profile: tuple[str, ...] | None = None, **kw: ob
         profile = ("process", "nvidia", "procfs") if host.backend == "workstation" else ("slurm", "procfs")
     return Capabilities(remote_user="me", uid=1000, login_host=host.name, tz_offset=timedelta(0),
                         clock_skew=timedelta(0), tools=frozenset({"squeue", "sinfo", "less", "timeout"}),
-                        profile=profile, **kw)   # type: ignore[arg-type]
+                        profile=profile, detect_rev=DETECT_REV, **kw)   # type: ignore[arg-type]
 
 
 def stub_build_capabilities(results: Mapping[str, SectionResult], host: HostConfig, now: datetime,

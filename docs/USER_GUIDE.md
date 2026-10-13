@@ -57,8 +57,10 @@ below).
 
 **Host detail** (`enter` on a host). Workstations: per-GPU bars, host CPU/memory, and processes (GPU holders
 of all users plus the members of your tasks; `u` toggles other users). Click a GPU row (or step with `[` / `]`) to
-list only the processes on that GPU, whoever owns them; click it again for all processes. Clusters: partitions with free GPUs by type,
-nodes (state, CPU, memory, GPU use, which of your jobs run there) and the detected capabilities. A host that never
+list only the processes on that GPU, whoever owns them; click it again for all processes. Clusters: partitions with
+free GPUs by type (those of your recent jobs, plus every GPU partition your accounts may submit to, such as a lab's
+paid partition you have not used lately; `partitions` in the config pins the list), nodes (state, CPU, memory, GPU
+use, which of your jobs run there) and the detected capabilities. A host that never
 connected shows only its connection panel (`c` log in, `e` details, `t` disable).
 
 **Log viewer** (`l`). The job's stdout or stderr (`o`/`e`), following the file as it grows (`F` toggles). Progress

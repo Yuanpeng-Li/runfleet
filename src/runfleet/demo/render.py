@@ -667,6 +667,21 @@ def sinfo_version(c: SimCluster) -> Out:
     return Out(f"slurm {c.slurm_version}\n")
 
 
+def scontrol_partitions(c: SimCluster) -> Out:
+    """`printf 'groups=…'; scontrol show partition -o`: open to every account and QOS, TRES from the nodes."""
+    parts: dict[str, list[SimNode]] = {}
+    for node in c.nodes:
+        for p in node.partitions:
+            parts.setdefault(p, []).append(node)
+    rows = [f"groups={c.group}\n", "parents=complete\n"]
+    for name, nodes in parts.items():
+        gpus = sum(n.gpu_total for n in nodes)
+        tres = f"cpu={sum(n.cpus for n in nodes)},mem={sum(n.mem_mib for n in nodes)}M,node={len(nodes)}"
+        rows.append(f"PartitionName={name} AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Hidden=NO State=UP "
+                    f"TotalNodes={len(nodes)} TRES={tres}{f',gres/gpu={gpus}' if gpus else ''}\n")
+    return Out("".join(rows))
+
+
 def slurm_config(c: SimCluster) -> Out:
     return Out("".join(f"{k:<23} = {val}\n" for k, val in c.config.items()))
 

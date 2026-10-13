@@ -161,3 +161,7 @@ JobId=31367493 does not exist on node (null).
 ## squeue_array_expand
 cmd: squeue --me -h -r -o '%i|%A|%a|%F|%K|%T' | head -10
 rc=0 ms=16
+
+## scontrol_partitions
+cmd: PARTS_CMD (groups, parent accounts, scontrol show partition -o; fields trimmed to the access/TRES subset)
+rc=0 ms=21

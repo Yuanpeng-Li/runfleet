@@ -71,7 +71,7 @@ def test_detect_sections() -> None:
     names = [s.name for s in secs]
     assert names[:2] == ["detect.id", "detect.tools"]
     assert set(names) == {"detect.id", "detect.tools", "slurm.version", "slurm.config", "slurm.assoc",
-                          "slurm.sacctfmt", "slurm.gputres", "nvidia.version"}
+                          "slurm.parts", "slurm.sacctfmt", "slurm.gputres", "nvidia.version"}
     by = {s.name: s for s in secs}
     assert by["slurm.version"].requires == ("sinfo",) and by["nvidia.version"].requires == ("nvidia-smi",)
     assert "date +%z" in by["detect.id"].cmd and "command -v" in by["detect.tools"].cmd

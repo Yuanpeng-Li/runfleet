@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from runfleet import paths
-from runfleet.models import Capabilities, HostSnapshot, Job, JobKind, LogRef, NodeAlloc, from_json, to_json
+from runfleet.models import DETECT_REV, Capabilities, HostSnapshot, Job, JobKind, LogRef, NodeAlloc, from_json, to_json
 
 log = logging.getLogger("runfleet.core.cache")
 
@@ -173,9 +173,12 @@ class Cache:
         if row is None or now.timestamp() - row[0] > max_age:
             return None
         try:
-            return from_json(Capabilities, json.loads(row[1])), datetime.fromtimestamp(row[0], tz=UTC)
+            caps = from_json(Capabilities, json.loads(row[1]))
         except (ValueError, TypeError, KeyError):
             return None
+        if caps.detect_rev < DETECT_REV:          # detected by an older version: lacks newer fields, detect again
+            return None
+        return caps, datetime.fromtimestamp(row[0], tz=UTC)
 
     def load_jobmeta(self, host: str) -> dict[str, JobMeta]:
         with self._db_lock:

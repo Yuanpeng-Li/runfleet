@@ -1,0 +1,7 @@
+groups=staff,pilab,k2
+parents=complete
+PartitionName=cpu-preempt AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Default=NO Hidden=NO MaxTime=7-00:00:00 State=UP TotalNodes=96 TRES=cpu=13840,mem=45503000M,node=96,billing=13840 
+PartitionName=gpu-preempt AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Default=NO Hidden=NO MaxTime=7-00:00:00 State=UP TotalNodes=30 TRES=cpu=2616,mem=16731800M,node=30,billing=2616,gres/gpu=138,gres/gpu:nvidia_a100-sxm4-40gb=4,gres/gpu:nvidia_a100-sxm4-80gb=8,gres/gpu:nvidia_a100_3g.20gb=2,gres/gpu:nvidia_a100_80gb_pcie=2,gres/gpu:nvidia_a100_80gb_pcie_1g.10gb=7,gres/gpu:nvidia_a100_80gb_pcie_3g.40gb=2,gres/gpu:nvidia_a30=3,gres/gpu:nvidia_a30_1g.6gb=4,gres/gpu:nvidia_a30_2g.12gb=2,gres/gpu:nvidia_a30_4g.24gb=1,gres/gpu:nvidia_geforce_rtx_3090=76,gres/gpu:nvidia_h100_nvl=5,gres/gpu:nvidia_h100_nvl_1g.12gb=7,gres/gpu:nvidia_rtx_pro_6000_blackwell_server_edition=4,gres/gpu:tesla_p100-pcie-16gb=1,gres/gpu:tesla_v100-pcie-16gb=6 
+PartitionName=lab AllowGroups=pilab,hpcadm AllowAccounts=ALL AllowQos=ALL Default=NO Hidden=NO MaxTime=7-00:00:00 State=UP TotalNodes=1 TRES=cpu=128,mem=1500G,node=1,billing=128,gres/gpu=4 
+PartitionName=labpi AllowGroups=pilab,hpcadm AllowAccounts=ALL AllowQos=labpi Default=NO Hidden=NO MaxTime=7-00:00:00 State=UP TotalNodes=1 TRES=cpu=128,mem=1500G,node=1,billing=128,gres/gpu=4 
+PartitionName=vdi AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Default=NO Hidden=NO MaxTime=08:00:00 State=UP TotalNodes=2 TRES=cpu=256,mem=750G,node=2,billing=256 

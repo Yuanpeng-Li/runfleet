@@ -123,6 +123,7 @@ class SlurmCollector(SchedulerCollector):
             Section("slurm.version", cmds.VERSION_CMD, timeout=10, requires=("sinfo",)),
             Section("slurm.config", cmds.CONFIG_CMD, timeout=10, requires=("scontrol",)),
             Section("slurm.assoc", cmds.ASSOC_CMD, timeout=15, requires=("sacctmgr",)),
+            Section("slurm.parts", cmds.PARTS_CMD, timeout=15, requires=("scontrol",)),
             Section("slurm.sacctfmt", cmds.SACCTFMT_CMD, timeout=10, requires=("sacct",)),
             Section("slurm.gputres", cmds.GPUTRES_CMD, timeout=30, requires=("sacct",)),
         ]
@@ -272,7 +273,7 @@ class SlurmCollector(SchedulerCollector):
 
     def partitions(self, ctx: HostContext) -> list[str]:
         """sinfo scope (§5.2.1): config `partitions`, else partitions of the user's jobs (live + history) ∪ non-empty
-        association partitions."""
+        association partitions ∪ GPU partitions the user may submit to (detect)."""
         if ctx.host.slurm.partitions:
             return [p for p in ctx.host.slurm.partitions if cmds.NAME_RE.match(p)]
         found: dict[str, None] = {}
@@ -280,9 +281,13 @@ class SlurmCollector(SchedulerCollector):
             if job.is_mine:
                 for p in (job.partition or "").split(","):
                     found[p] = None
-        for _cluster, _account, part, _qos in ctx.caps.associations:
+        for cluster, _account, part, _qos in ctx.caps.associations:
+            if ctx.caps.cluster_name and cluster and cluster != ctx.caps.cluster_name:
+                continue                                   # a slurmdbd shared by several clusters lists them all
             for p in part.split(","):
                 found[p] = None
+        for p in ctx.caps.gpu_partitions:
+            found[p] = None
         return sorted(p for p in found if p and cmds.NAME_RE.match(p))
 
     def _sinfo_section(self, ctx: HostContext) -> Section | None:
@@ -928,6 +933,94 @@ def _err(r: SectionResult, at: datetime) -> HostError:
     return err
 
 
+def _names(value: str | None) -> set[str] | None:
+    """A partition's Allow*/Deny* list; None = no restriction (absent, empty or ALL)."""
+    if not value or value == "ALL":
+        return None
+    return {v for v in value.split(",") if v}
+
+
+_FIELD = re.compile(r"(?:^|\s)([A-Za-z]+)=")
+
+
+def _fields(line: str) -> dict[str, str]:
+    """`scontrol show partition -o` fields; a value runs to the next ` Key=`, so names with spaces stay whole."""
+    marks = list(_FIELD.finditer(line))
+    return {m.group(1): line[m.end():marks[i + 1].start() if i + 1 < len(marks) else len(line)].strip()
+            for i, m in enumerate(marks)}
+
+
+def gpu_partitions(text: str, associations: Sequence[tuple[str, str, str, str]],
+                   cluster: str | None = None) -> tuple[str, ...]:
+    """GPU partitions (TRES gres/gpu > 0) the user may submit to, from `slurm.parts` and the user's associations (of
+    `cluster` when known): not hidden, root-only, inactive or drained; a group in AllowGroups; and an account whose
+    association for this partition (else its association for all partitions) passes AllowAccounts/DenyAccounts, the
+    account or a parent account counting, with a QOS that passes AllowQos/DenyQos. A DenyAccounts list needs the
+    complete parent chain. Without association data (no sacctmgr) only partitions open to every account and QOS
+    count; with associations on other clusters only, none."""
+    groups: set[str] | None = None
+    parent: dict[str, str] = {}
+    complete = False
+    parts: list[dict[str, str]] = []
+    for line in text.splitlines():
+        if line.startswith("groups="):
+            groups = {g for g in line[len("groups="):].split(",") if g}
+        elif line.startswith("parent="):
+            c, _, rest = line[len("parent="):].partition("|")
+            acct, _, up = rest.partition("|")
+            if acct and up and (cluster is None or c == cluster):
+                parent.setdefault(acct, up)
+        elif line == "parents=complete":
+            complete = True
+        elif line.startswith("PartitionName="):
+            parts.append(_fields(line))
+    mine = [a for a in associations if cluster is None or not a[0] or a[0] == cluster]
+
+    def lineage(account: str) -> set[str]:
+        out = {account}
+        while (account := parent.get(account, "")) and account not in out:
+            out.add(account)
+        return out
+
+    found: list[str] = []
+    for f in parts:
+        name = f.get("PartitionName", "")
+        if (not name or not cmds.NAME_RE.match(name) or f.get("Hidden") == "YES" or f.get("RootOnly") == "YES"
+                or f.get("State") in ("INACTIVE", "DRAIN")):
+            continue
+        gpus = re.search(r"(?:^|,)gres/gpu=(\d+)", f.get("TRES", ""))
+        if not gpus or int(gpus.group(1)) == 0:
+            continue
+        allow_groups = _names(f.get("AllowGroups"))
+        if allow_groups is not None and not (groups and groups & allow_groups):
+            continue
+        allow_acc, deny_acc = _names(f.get("AllowAccounts")), _names(f.get("DenyAccounts")) or set()
+        allow_qos, deny_qos = _names(f.get("AllowQos")), _names(f.get("DenyQos")) or set()
+        if not associations:
+            ok = allow_acc is None and not deny_acc and allow_qos is None and not deny_qos
+        else:
+            ok = False
+            for _cluster, account, part, qos in _effective(mine, name):
+                chain = lineage(account)
+                if (allow_acc is not None and not chain & allow_acc) or (deny_acc and (not complete or chain & deny_acc)):
+                    continue
+                qs = {q for q in qos.split(",") if q}
+                if (not qs and allow_qos is None and not deny_qos) or any(
+                        (allow_qos is None or q in allow_qos) and q not in deny_qos for q in qs):
+                    ok = True
+                    break
+        if ok:
+            found.append(name)
+    return tuple(sorted(set(found)))
+
+
+def _effective(assocs: Sequence[tuple[str, str, str, str]], partition: str) -> list[tuple[str, str, str, str]]:
+    """Per account, Slurm uses the association for this partition when there is one, else the one for all."""
+    specific = [a for a in assocs if a[2] and partition in a[2].split(",")]
+    have = {a[1] for a in specific}
+    return specific + [a for a in assocs if not a[2] and a[1] not in have]
+
+
 def parse_capabilities(results: Mapping[str, SectionResult]) -> dict[str, object]:
     """Capability sections (§5.1) → Capabilities fields."""
     out: dict[str, object] = {}
@@ -957,6 +1050,11 @@ def parse_capabilities(results: Mapping[str, SectionResult]) -> dict[str, object
             if len(parts) >= 4 and parts[0]:
                 assoc.append((parts[0], parts[1], parts[2], parts[3]))
         out["associations"] = tuple(assoc)
+    r = results.get("slurm.parts")
+    if r is not None and usable(r):
+        assoc_now, cluster = out.get("associations"), out.get("cluster_name")
+        out["gpu_partitions"] = gpu_partitions(r.stdout, assoc_now if isinstance(assoc_now, tuple) else (),
+                                               cluster if isinstance(cluster, str) else None)
     r = results.get("slurm.sacctfmt")
     if r is not None and usable(r):
         out["sacct_fields"] = frozenset(r.stdout.split())

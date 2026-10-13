@@ -8,6 +8,7 @@ classified error and the key that fixes it.
 
 from __future__ import annotations
 
+import dataclasses
 from collections import Counter
 from datetime import datetime
 from typing import Any
@@ -123,6 +124,44 @@ def _error_lines(state: HostState, now: datetime, width: int) -> list[Text]:
 
 
 # ---------------------------------------------------------------- Slurm
+def _free_lines(snap: HostSnapshot, width: int) -> list[Text]:
+    """Free GPUs per partition in `width` cells: one line in full, else one line without the "(N planned)" notes, else
+    two lines (full, then short), the second ending in "+N more" when even that does not fit (host detail lists all)."""
+    if not snap.partitions:
+        return [Text(humanize.NA, style=theme.dim())]
+    sep = Text(" · ", style=theme.dim())
+
+    def item(p: Any, short: bool) -> Text:
+        out = Text(p.name + " ", style=theme.muted())
+        out.append_text(render.free_gpus(dataclasses.replace(p, gpus_free_planned=0) if short else p))
+        return out
+
+    def pack(items: list[Text], rows: int) -> list[Text] | None:
+        out: list[Text] = []
+        for it in items:
+            if it.cell_len > width:
+                return None
+            if out and out[-1].cell_len + sep.cell_len + it.cell_len <= width:
+                out[-1].append_text(sep)
+                out[-1].append_text(it)
+            elif len(out) < rows:
+                out.append(it.copy())
+            else:
+                return None
+        return out
+
+    for rows, short in ((1, False), (1, True), (2, False), (2, True)):
+        packed = pack([item(p, short) for p in snap.partitions], rows)
+        if packed is not None:
+            return packed
+    items = [item(p, True) for p in snap.partitions]
+    for keep in range(len(items) - 1, -1, -1):         # as many as fit, then "+N more"
+        packed = pack([*items[:keep], Text(f"+{len(items) - keep} more", style=theme.dim())], 2)
+        if packed is not None:
+            return packed
+    return [Text(f"{len(items)} partitions", style=theme.dim())]
+
+
 def _slurm_lines(state: HostState, snap: HostSnapshot, now: datetime, width: int, window: float,
                  thresholds: tuple[float, float]) -> list[Text]:
     jobs = [j for j in snap.jobs.values() if j.is_mine]
@@ -161,14 +200,9 @@ def _slurm_lines(state: HostState, snap: HostSnapshot, now: datetime, width: int
         util.append(mem, style=theme.muted())
     lines.append(render.label_value("job util", util, width=LABEL_W))
 
-    free = Text()
-    for p in snap.partitions:
-        if free:
-            free.append(" · ", style=theme.dim())
-        free.append(p.name + " ", style=theme.muted())
-        free.append_text(render.free_gpus(p))
-    lines.append(render.label_value("free GPUs", free if free else Text(humanize.NA, style=theme.dim()),
-                                    width=LABEL_W))
+    free = _free_lines(snap, width - LABEL_W)
+    lines.append(render.label_value("free GPUs", free[0], width=LABEL_W))
+    lines += [render.label_value("", more, width=LABEL_W) for more in free[1:]]
 
     errors = _error_lines(state, now, width)
     if errors:
