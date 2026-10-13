@@ -33,6 +33,8 @@ class Cadence:
     hidden_factor: float = 3.0   # multiplier when the host is not on screen
     focused_factor: float = 1.0  # multiplier when the host is focused (detail screen)
     max_backoff: float = 600.0   # cap of this group's failure backoff
+    focused_only: bool = False   # due only while the host is focused (a detail screen is open); served at once when
+                                 # the host becomes focused and the last run is older than the period
 
 @dataclass(frozen=True, slots=True)
 class HostContext:

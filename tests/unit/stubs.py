@@ -57,6 +57,7 @@ class StubSlurm(SchedulerCollector):
         return [Cadence("slurm.jobs", s.poll_jobs, floor=10),
                 Cadence("slurm.history", s.poll_history, floor=60),
                 Cadence("slurm.nodes", s.poll_nodes, floor=60, hidden_factor=5),
+                Cadence("slurm.occupants", 30, floor=30, focused_only=True),
                 Cadence("slurm.jobinfo", 0, mode="event")]
 
     def sections(self, due: frozenset[str], ctx: HostContext) -> list[Section]:
@@ -67,6 +68,8 @@ class StubSlurm(SchedulerCollector):
             out.append(Section("slurm.sacct", "sacct", timeout=30))
         if "slurm.nodes" in due:
             out.append(Section("slurm.sinfo", "sinfo", timeout=20))
+        if "slurm.occupants" in due:
+            out.append(Section("slurm.occupants", "squeue -a -t R,CG", timeout=20))
         if "slurm.jobinfo" in due:
             ids = sorted(set(self.jobs) - self.seen_info)
             out.append(Section("slurm.scontrol", "scontrol " + " ".join(ids), meta={"ids_raw": ids}))

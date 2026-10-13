@@ -39,6 +39,7 @@ backends.common backends.common.nvidia backends.common.procfs backends.common.gp
 backends.slurm backends.slurm.collector backends.slurm.commands backends.slurm.states backends.slurm.parse_squeue
 backends.slurm.parse_sacct backends.slurm.parse_scontrol backends.slurm.parse_sinfo backends.slurm.parse_sstat
 backends.slurm.logpaths backends.slurm.actions backends.slurm.attach backends.slurm.parse_attach
+backends.slurm.parse_occupants
 backends.process backends.process.collector backends.process.parse_ps backends.process.tasks
 backends.process.actions
 core core.service core.store core.clock core.poller core.actions core.logs core.cache core.doctor
@@ -165,7 +166,10 @@ def _instances() -> list[object]:
     gres = m.GresCount(name="gpu", type="a30", total=4, used=1, used_indices="0")
     node = m.Node(name="n-31-04", partitions=("lab",), state="mixed", flags=frozenset(), usable=True,
                   cpus_alloc=None, cpus_idle=None, cpus_other=None, cpus_total=None, mem_total_mib=None,
-                  mem_alloc_mib=None, mem_free_mib=None, gres=(gres,), reason=None)
+                  mem_alloc_mib=None, mem_free_mib=None, gres=(gres,), reason=None,
+                  jobs=(m.NodeJob(job_id="2332861", user="usr", real_name=None, account="lab", partition="lab",
+                                  name="train", state="R", gpus=1, gpus_exact=True, gpu_type="a30", elapsed_s=60,
+                                  limit_s=3600, mine=True),), jobs_at=T0)
     part = m.PartitionSummary(name="lab", nodes=1, gpus_total=4, gpus_free=1, gpus_free_planned=0,
                               gpu_types={"a30": (1, 4)}, states={"mixed": 1})
     step = m.JobStep(step_id="2332861.batch", name="batch", state=m.JobState.FAILED, raw_state="FAILED",
@@ -221,7 +225,7 @@ def _instances() -> list[object]:
             part, step, detail, snap, result, detect, check, doctor, sstatus, sec, sres, script, spec, run, pres,
             c.SlurmSettings(), c.WorkstationSettings(), hcfg, general, c.UISettings(), fleet, cad, ctx, mview,
             cout, param, aspec, plan, hstate, change, lupd, lpeek, c.NotifySettings(), cg, ninsp, live, offer, astate,
-            aplan]
+            aplan, *(node.jobs or ())]
 
 
 def test_every_contract_dataclass_constructs() -> None:

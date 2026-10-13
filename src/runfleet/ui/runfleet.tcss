@@ -129,7 +129,7 @@ JobDetailScreen.-compact #summary-top { display: none; }
 #procs-box, #nodes-box { height: 1fr; min-height: 5; }
 #parts-box { height: auto; }
 #parts-box > PartitionTable { height: auto; max-height: 8; }
-#host-box, #ws-conn, #myjobs-box, #caps-box { height: auto; }
+#host-box, #ws-conn, #myjobs-box, #caps-box, #onnode-box { height: auto; }
 #banner { color: $warning; }
 #myjobs-box, #caps-box { text-wrap: wrap; }
 

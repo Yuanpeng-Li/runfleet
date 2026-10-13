@@ -73,7 +73,7 @@ revision 3 brings into scope.
 | Area | v0.1 | v0.2 | v0.3+ |
 |---|---|---|---|
 | Hosts | `config.toml`; `runfleet hosts import` (non-interactive, plus a plain first-run prompt when no config exists); ad-hoc `runfleet k2 lynx`; local host | import wizard UI, node-ssh mode (pam_slurm_adopt), multiple login endpoints | asyncssh transport (Windows), long-lived framed session per host |
-| Slurm | own jobs (squeue), history (sacct, bounded window), job detail (scontrol -d, sacct steps, sstat), job GPU util via sstat, sinfo nodes for the user's partitions | **Attach** (§7.16): per-GPU / per-process / cgroup readings of a running job via node ssh or a confirmed `srun --overlap`, on-demand `history <dur>`, other users' jobs / queue position, `scontrol update TimeLimit`, seff-style efficiency | PBS/Torque, LSF, HTCondor, Kubernetes |
+| Slurm | own jobs (squeue), history (sacct, bounded window), job detail (scontrol -d, sacct steps, sstat), job GPU util via sstat, sinfo nodes for the user's partitions | **Attach** (§7.16): per-GPU / per-process / cgroup readings of a running job via node ssh or a confirmed `srun --overlap`, on-demand `history <dur>`, other users' running jobs per node (host detail, §5.2.9), queue position, `scontrol update TimeLimit`, seff-style efficiency | PBS/Torque, LSF, HTCondor, Kubernetes |
 | Workstation | NVIDIA GPUs, GPU processes of all users, own tasks (sticky process trees), CPU/mem/load, logs via `/proc/<pid>/fd/1`, exit log scan (Traceback/OOM/Killed), stall hints | AMD `rocm-smi`, Intel | Apple |
 | Views | **Fleet (default)**, Jobs, GPUs, Job detail, Host detail, Log viewer (append + follow), Help, Confirm, Action menu, Host error, Textual command palette with RunFleet commands | log search / older-chunk paging / re-wrap, preview modes, themes / ASCII mode, pins, sparklines, experiment-regex grouping, column chooser, `:` command grammar, `:history` | LED grid for > 20 hosts |
 | Actions | Slurm cancel, hold/release, requeue; task terminate (TERM→grace→KILL, re-enumerated remotely), interrupt (INT), kill; host/task shell via `App.suspend`; log in `$PAGER`; copy id/path; `--readonly` | job attach (`srun --pty` / node ssh), Slurm signal, signals beyond TERM/INT/KILL, custom commands, notifications | batch "rerun failed" hook |
@@ -287,6 +287,7 @@ src/runfleet/
       commands.py        every Slurm command string / field list (single source)        [WP2]
       states.py          state mapping, reason humanizer, exit explanations, hints       [WP2]
       parse_squeue.py parse_sacct.py parse_scontrol.py parse_sinfo.py parse_sstat.py     [WP2]
+      parse_occupants.py every user's running jobs per node + getent names (§5.2.9)    [WP2]
       logpaths.py        %x/%j/%A/%a… expansion, WorkDir resolution, merged-stderr rules [WP2]
       actions.py         cancel / hold / release / requeue specs, plans, interpretation [WP2]
       attach.py          Attach plan/ingest, nested node script, section names + thresholds (§7.16)  [WP2]
@@ -691,6 +692,27 @@ class Node:
     mem_free_mib: int | None
     gres: tuple[GresCount, ...]
     reason: str | None
+    jobs: tuple[NodeJob, ...] | None = None   # running jobs of every user (§5.2.9); None = not sampled lately
+    jobs_at: datetime | None = None           # when `jobs` was sampled
+    # jobs_seen(now): `jobs` while younger than NODE_JOBS_TTL (3 min), else None
+
+@dataclass(frozen=True, slots=True)
+class NodeJob:
+    """A running job on one node, any user (§5.2.9: sampled while the host's detail is open)."""
+    job_id: str                  # display id (`123_4` for an array task)
+    user: str
+    real_name: str | None        # GECOS of `getent passwd` (None: unknown or not looked up yet)
+    account: str | None
+    partition: str | None
+    name: str
+    state: str                   # squeue compact state: "R" / "CG"
+    gpus: int | None             # GPUs on this node (None: unknown); a multi-node job's split when not exact
+    gpus_exact: bool             # False: an even split of a multi-node job's total
+    gpu_type: str | None
+    elapsed_s: int | None
+    limit_s: int | None          # None: UNLIMITED / unknown
+    mine: bool
+    # left_s (property): limit_s - elapsed_s, ≥ 0; None without both
 
 @dataclass(frozen=True, slots=True)
 class PartitionSummary:
@@ -1059,6 +1081,9 @@ class Cadence:
     hidden_factor: float = 3.0   # multiplier when the host is not on screen
     focused_factor: float = 1.0  # multiplier when the host is focused (detail screen)
     max_backoff: float = 600.0   # cap of this group's failure backoff
+    focused_only: bool = False   # due only while the host is focused (a detail screen is open); served at once when
+                                 # the host becomes focused and the last run is older than the period (no early
+                                 # retry while the host backs off or is paused)
 
 @dataclass(frozen=True, slots=True)
 class HostContext:
@@ -1998,9 +2023,11 @@ def choose_profile(caps: Capabilities, host: HostConfig) -> tuple[str, ...]: ...
 | `slurm.vanished` (event) | `slurm.sacct_ids` | — | ids that left squeue and are not yet terminal in history |
 | `slurm.logstat` (interval) | `slurm.logstat` | 120 s / 60 s / ×3 / ×0.5 | RUNNING jobs with a known stdout path (≤ 30) |
 | `slurm.nodes` (interval) | `slurm.sinfo` | 120 s / 60 s / ×5 / ×1 | partitions known: config `partitions`, else partitions of the user's jobs (live + history) ∪ non-empty association partitions ∪ `caps.gpu_partitions` (GPU partitions you may use but have not used lately, e.g. a lab's paid partition) |
+| `slurm.occupants` (interval, **focused only**) | `slurm.sinfo` + `slurm.occupants` | 30 s / 30 s / — / ×1 | the host's detail screen (or a job detail on it) is open and partitions are known; not after the squeue `-o` fallback (§5.2.9) |
+| `slurm.names` (event) | `slurm.names` | — | users in the last `slurm.occupants` reading never looked up (≤ 200 per probe) |
 
 All due groups ride **one** probe per tick, and groups are only evaluated at ticks (§5.4), so a visible Slurm host
-costs 4 round trips/min (1.3 hidden). Job detail is a separate on-demand probe (`detail_sections`: `slurm.scontrol` for
+costs 4 round trips/min (1.3 hidden); an open host detail adds nothing but two more sections every 30 s. Job detail is a separate on-demand probe (`detail_sections`: `slurm.scontrol` for
 that id if older than 30 s, `slurm.steps`, `slurm.sstat` if running, `slurm.logstat`).
 
 #### 5.2.2 Exact commands (`backends/slurm/commands.py`)
@@ -2057,12 +2084,21 @@ SINFO_FIELDS = ["NodeList", "Partition", "StateLong", "CPUsState", "Memory", "Al
 def sinfo_cmd(partitions: list[str], sep: str = SEP) -> str:
     fmt = ",".join(f"{f}:{sep}" for f in SINFO_FIELDS)
     return f"sinfo -h -N -p {shlex.quote(','.join(partitions))} -O {shlex.quote(fmt)}"
+
+# every user's running jobs in the partitions in scope (§5.2.9, host detail only)
+OCCUPANT_FIELDS = ["JobID", "ArrayJobID", "ArrayTaskID", "UserName", "Account", "Partition", "StateCompact",
+                   "TimeUsed", "TimeLimit", "NumNodes", "NodeList", "tres-alloc", "Name"]   # Name last: free text
+def occupants_cmd(partitions: list[str], sep: str = SEP) -> str:
+    fmt = ",".join(f"{f}:{sep}" for f in OCCUPANT_FIELDS)
+    return f"squeue -a -h -t R,CG -p {shlex.quote(','.join(partitions))} -O {shlex.quote(fmt)}"
+def names_cmd(users: list[str]) -> str:               # getent exits 2 when one user is unknown: the rest still print
+    return "getent passwd " + " ".join(map(shlex.quote, users)) + " | cut -d: -f1,5; true"
 ```
 
 Incremental history: `since_s` = seconds since `max(last successful sacct − 300 s, now − sacct_window)`.
 Validators (`util/shell.py`): `JOBID_RE = r"^\d+(_(\d+|\[[\d,\-%]+\]))?(\.(batch|extern|\d+))?$"`, partition/user/QOS
 `^[A-Za-z0-9_.\-]+$`, paths absolute without NUL/newline. Anything else is rejected before rendering. Timeouts: squeue
-20 s, sacct 30 s, scontrol loop 15 s, sstat 15 s, logstat 10 s, sinfo 20 s.
+20 s, sacct 30 s, scontrol loop 15 s, sstat 15 s, logstat 10 s, sinfo 20 s, occupants 20 s, names 10 s.
 
 #### 5.2.3 Parsing rules
 - **Rows** are split on `"\n"` only (a trailing `\r` dropped) in every Slurm and ps parser: `str.splitlines()` also
@@ -2274,6 +2310,35 @@ and only where `caps.sacct_fields` lists it.
   when squeue gave one, the start estimate with its caveat ("Slurm's backfill guess — it moves when running jobs end
   early or higher-priority jobs arrive").
 
+
+#### 5.2.9 Who runs on a node (`parse_occupants.py`)
+"A node is busy and none of it is mine — whose is it, and when does it free up?" Where `PrivateData` does not hide
+jobs (none of the three clusters does), `squeue -a` lists every user's jobs, so RunFleet shows them — **only while the
+host detail is open** (`slurm.occupants` is a focused-only cadence group, §5.4): the fleet view never pays for it.
+- **Reading**: one `occupants_cmd` over the **nodes** in scope (`-w`, from the last sinfo: a node shared with a
+  partition outside the scope, such as a lab's private one, shows those jobs too; `-p <partitions>` only before the
+  nodes are known or past 1000 nodes), planned **with** `slurm.sinfo` so the GPU counts and the jobs are of one
+  moment (sections of one name are planned once per probe). Rows parse into `Occupant`s (display id, user, account,
+  partition, compact state, elapsed / limit seconds, expanded node list, job GPUs from tres-alloc: no `gres/gpu` at
+  all = 0, a `gres/gpu` that does not parse = unknown). Shown for 3 min (`models.NODE_JOBS_TTL`): every nodes output
+  in that window carries them (`Node.jobs`, `Node.jobs_at`), later ones carry `jobs=None`, and the renderers read
+  `Node.jobs_seen(now)` (None once the reading is older than the TTL), so a reading never outlives the visit even when
+  no new nodes output arrives. A failed reading keeps the last one (within the TTL) and reports a section error; a
+  mostly unparsable one is a PARSE error.
+- **GPUs per node**: squeue has no per-node split. One node: exact. Several: an even split marked inexact (`~2`);
+  an uneven total: unknown (`?`). (`scontrol show job -d` has the split, but one RPC per job is too dear here.)
+- **Names**: new users of a reading are looked up once with `getent passwd` (event group `slurm.names`, ≤ 200 per
+  probe, cached for the session; a user without an entry is not asked again). GECOS up to the first comma.
+- **Display** (host detail, mockup H): the node table's JOBS column lists the user's own job ids (accent), then the
+  other users with the GPUs they hold there (`bob×4 · carol×3 +1`, most GPUs first; ends in `+N` when it does not
+  fit). Without a reading it falls back to the user's own jobs. A panel under the table lists the jobs on the node
+  under the cursor: JOB, USER, NAME (GECOS), ACCOUNT, PARTITION, GPU, ELAPSED / LIMIT, LEFT, JOB NAME — own jobs
+  first, then the one that ends soonest; ≤ 8 rows then `+N more`; columns dropped when narrow (account, name,
+  partition, time). Times move on from `jobs_at`. Subtitle: `N GPUs free now`, or on a full node
+  `next GPU frees in ≤ 2h17m` (time limits are upper bounds; a job whose split is unknown counts as holding GPUs),
+  plus `as of 2m ago` once a reading is ≥ 90 s old.
+  With `PrivateData=jobs` in `caps.slurm_config` the panel says only the user's jobs are listed.
+
 ### 5.3 Workstations (`backends/process/`, `backends/common/nvidia.py`, `backends/common/procfs.py`)
 
 #### 5.3.1 Sections and cadence
@@ -2412,6 +2477,10 @@ class HostPoller:
 **Ticks.** Effective period of a group = `interval × visibility factor × multiplier × (1 + (n_hosts − 10)/20 if > 10
 hosts, workstations only)`, clamped to `floor`, plus the group's failure backoff. The **tick period** = the minimum
 effective period over `interval`-mode groups (Slurm 15 s, workstation 5 s), published as `HostStatus.tick_interval`.
+A `focused_only` group (`slurm.occupants`, §5.2.9) exists only while the host is FOCUSED: it neither sets the tick nor
+is due otherwise; when the host becomes focused and its last run is older than its period it is forced and the host
+woken (3 s floor) — while the host backs off or is paused it is only forced, for the next scheduled tick, and a focus
+wake still pending when a probe fails is dropped (the backoff deadline wins).
 Jitter: tick k is placed at `anchor + (k + U(0, 0.2)) × period` (fresh draw per tick; the grid is re-anchored when
 the period changes, after a wake and after a failure), so gaps vary ±20 % but the mean is exactly one period and
 ≤ 240 probes/hour holds deterministically (×U(0.9, 1.1) per tick made it a coin flip). Groups are requested per cadence group (`sections(frozenset({group}), ctx)` once per due group), so a failed
@@ -2823,18 +2892,23 @@ lines come from a cached one-shot peek after 1 s of dwell (§4.7), not a stream.
 
 ```
  RunFleet ▏k2▕ › Hosts › k2                      ● ok 0.21s · 8s ago · Slurm 25.05.8 · cluster k2 · login login02  ⟳ 15s
-┌ Partitions (mine: assoc + recent jobs) ──────────────────────────────────────────────────────────────────────────────┐
+┌ Partitions (assoc, recent jobs, GPU partitions open to you) ─────────────────────────────────────────────────────────┐
 │  PARTITION     NODES  STATES                         GPUS FREE/TOTAL   BY TYPE (free/total)                          │
 │  gpu-preempt   24     mixed 17 · alloc 5 · planned 2  27 / 152          3090 12/64 · a100-80g 0/12 · h200 3/4 · …    │
 ├ Nodes · gpu-preempt ────────────────────────────────────────────────────────────── f: free GPUs only · sort: name ▲ ─┤
-│  NODE      STATE       CPU A/I/T      MEM ALLOC/TOTAL   GPU USED/TOTAL         TYPE                     MY JOBS      │
-│  n-31-01   mixed       34/30/64       282/500G          8/8  ████████          nvidia_geforce_rtx_3090  —            │
-│  n-31-04   mixed       6/50/56        72/125G           3/4  ███░              tesla_v100-pcie-16gb     —            │
-│  n-31-05   planned     0/64/64        0/503G            0/12 ░░░░░░░░░░░░      a100 MIG (4 types)       —            │
-│  n-32-03   mixed-      36/28/64       368/503G          8/8  ████████          nvidia_geforce_rtx_3090  —            │
-│  n-38-01   mixed       …              …                 4/4  ████              nvidia_h200_nvl          2333760      │
-│  n-40-01   mixed       …              …                 3/4  ███░              nvidia_a100-sxm4-40gb    2332861 +2   │
+│  NODE      STATE       CPU A/I/T      MEM ALLOC/TOTAL   GPU USED/TOTAL       TYPE        JOBS                        │
+│  n-31-01   mixed       34/30/64       282/500G          8/8  ████████        3090        bob×4 · carol×3 · dave×1    │
+│  n-31-04   mixed       6/50/56        72/125G           3/4  ███░            V100-16G    erin×2 · frank×1            │
+│  n-31-05   planned     0/64/64        0/503G            0/12 ░░░░░░░░░░░░    A100 MIG    —                           │
+│  n-32-03   mixed-      36/28/64       368/503G          8/8  ████████        3090        bob×4 · grace×~4            │
+│  n-38-01   mixed       …              …                 4/4  ████            H200        2333760 · heidi×2           │
+│  n-40-01   mixed       …              …                 3/4  ███░            A100-40G    2332861 · 2332862 +1        │
 │  …                                                                                                                   │
+├ Jobs on n-31-01 ─────────────────────────────────────────────────────────────────────── next GPU frees in ≤ 2h17m ─┤
+│  JOB        USER       NAME               ACCOUNT        PARTITION    GPU  ELAPSED / LIMIT     LEFT     JOB NAME     │
+│  2333115    carol      Carol Example      lab            gpu-preempt  3    1:42:30 / 4:00:00   2:17:30  llama-ft-lora│
+│  2333301    dave       Dave Sample        physics        gpu-preempt  1    0:18:02 / 1-00:00   23:41:58 jupyter      │
+│  2331907    bob        Bob Example        lab            gpu-preempt  4    20:11:05 / 2-00:00  1-03:48  ddp-train-r50│
 ├ My jobs on k2 ───────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │  2332861 R n-40-01 · 2332862 R n-40-01 · 2332863 R n-40-01 · 2333760 R n-38-01 · 2334564 PD (priority)               │
 ├ Capabilities / connection ───────────────────────────────────────────────────────────────────────────────────────────┤
@@ -4028,6 +4102,8 @@ Owner = `Section.owner` (name prefix). All `meta` values are also interpolated (
 | `slurm.steps` | `job_id_raw: str`, `sep: str`, `fields: list[str]` | detail: step forensics (+ TotalCPU, §5.2.8) |
 | `slurm.logstat` | `paths: list[str]` | size + mtime |
 | `slurm.sinfo` | `partitions: list[str]`, `sep: str` | nodes, free GPUs |
+| `slurm.occupants` | `partitions: list[str]`, `sep: str` | every user's running jobs per node (§5.2.9) |
+| `slurm.names` | `users: list[str]` | GECOS names of those users |
 | `slurm.act.cancel`, `slurm.act.hold`, `slurm.act.release` | `ids: list[str]` (display ids, throttle stripped) | actions |
 | `slurm.act.requeue` | `ids: list[str]`, `hold: bool` | action |
 | `procfs.host` | — | load, mem, cpu, uptime |

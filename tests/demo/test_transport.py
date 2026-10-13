@@ -33,6 +33,7 @@ CATALOGUE: list[tuple[str, str, dict[str, object]]] = [
     ("lyra", "slurm.steps", {"job_id_raw": "32354789", "sep": "\x1f"}),
     ("k2", "slurm.logstat", {"paths": [K2_LOG]}),
     ("vega", "slurm.sinfo", {"partitions": ["h200"], "sep": "\x1f"}),
+    ("vega", "slurm.occupants", {"partitions": ["h200"], "sep": "\x1f"}), ("k2", "slurm.names", {"users": ["bob"]}),
     ("k2", "slurm.act.hold", {"ids": ["3372066"]}), ("k2", "slurm.act.release", {"ids": ["3372066"]}),
     ("k2", "slurm.act.requeue", {"ids": ["3370391"], "hold": False}),
     ("k2", "slurm.act.cancel", {"ids": ["3370390"]}),
@@ -248,3 +249,26 @@ async def test_latency_is_simulated_when_enabled(clock: StepClock) -> None:
     start = time.monotonic()
     await probe(t, Section("detect.id", "x"))
     assert 0.18 < time.monotonic() - start < 2.0
+
+
+@pytest.mark.parametrize("host", ["k2", "vega", "lyra"])
+def test_occupants_account_for_every_busy_gpu(world: DemoWorld, host: str) -> None:
+    """The simulated other users' jobs hold exactly each node's background GPUs; the user's own jobs are in it too."""
+    from runfleet.backends.slurm.parse_occupants import parse_names, parse_occupants
+    from runfleet.demo import render
+    from runfleet.demo.world import free_gpus
+
+    c = world.cluster(host)
+    parts = sorted({p for n in c.nodes for p in n.partitions})
+    pr = parse_occupants(render.squeue_occupants(c, world.now(), partitions=parts).stdout)
+    assert pr.items and not pr.bad_lines
+    held: dict[str, int] = {}
+    for o in pr.items:
+        for n in o.nodes:
+            held[n] = held.get(n, 0) + (o.gpus or 0) // len(o.nodes)
+    for node in c.nodes:
+        if node.state not in ("down", "drained"):
+            assert held.get(node.name, 0) == node.gpu_total - len(free_gpus(c, node, None)), node.name
+    assert any(o.user == c.user for o in pr.items)
+    names = parse_names(render.getent_names(c, users=sorted({o.user for o in pr.items}) + ["ghost"]).stdout)
+    assert names[c.user] == render.OWN_NAME and "ghost" not in names

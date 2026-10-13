@@ -133,6 +133,19 @@ def _h_sinfo(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
     return render.sinfo_nodes(c, partitions=meta_list(s.meta, "partitions"), sep=_meta_str(s.meta, "sep", "\x1f"))
 
 
+def _h_occupants(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
+    c = _cluster(h, "squeue")
+    if isinstance(c, Out):
+        return c
+    return render.squeue_occupants(c, now, nodes=meta_list(s.meta, "nodes"),
+                                   partitions=meta_list(s.meta, "partitions"), sep=_meta_str(s.meta, "sep", "\x1f"))
+
+
+def _h_names(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
+    c = _cluster(h, "getent")
+    return c if isinstance(c, Out) else render.getent_names(c, users=meta_list(s.meta, "users"))
+
+
 def _h_slurm_act(verb: str) -> Handler:
     def handler(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
         c = _cluster(h, "scancel" if verb == "cancel" else "scontrol")
@@ -257,6 +270,8 @@ HANDLERS: dict[str, Handler] = {
     "slurm.steps": _h_steps,
     "slurm.logstat": _h_logstat,
     "slurm.sinfo": _h_sinfo,
+    "slurm.occupants": _h_occupants,
+    "slurm.names": _h_names,
     "slurm.act.cancel": _h_slurm_act("cancel"),
     "slurm.act.hold": _h_slurm_act("hold"),
     "slurm.act.release": _h_slurm_act("release"),

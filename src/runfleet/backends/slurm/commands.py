@@ -34,6 +34,12 @@ STEP_EXTRA = ("TotalCPU",)      # efficiency card (§5.2.8): appended when caps.
 
 SSTAT_FMT = "JobID,NTasks,AveCPU,AveRSS,MaxRSS,TRESUsageInAve%400,TRESUsageInMax%400,TRESUsageInTot%400"
 
+# every user's running jobs on the nodes in scope (§5.2.9, host detail only)
+OCCUPANT_FIELDS = ["JobID", "ArrayJobID", "ArrayTaskID", "UserName", "Account", "Partition", "StateCompact",
+                   "TimeUsed", "TimeLimit", "NumNodes", "NodeList", "tres-alloc", "Name"]   # Name last: free text
+MAX_NAME_LOOKUPS = 200                                   # users per getent call
+MAX_OCCUPANT_NODES = 1000                                # more nodes: select by partition instead (`-w` too long)
+
 SINFO_FIELDS = ["NodeList", "Partition", "StateLong", "CPUsState", "Memory", "AllocMem", "FreeMem", "Gres", "GresUsed",
                 "Reason"]                                # Reason last
 
@@ -128,6 +134,22 @@ def sinfo_cmd(partitions: Sequence[str], sep: str = SEP) -> str:
     fmt = ",".join(f"{f}:{sep}" for f in SINFO_FIELDS)
     parts = ",".join(check_name(p, "partition") for p in partitions)
     return f"sinfo -h -N -p {shlex.quote(parts)} -O {shlex.quote(fmt)}"
+
+
+def occupants_cmd(nodes: Sequence[str], partitions: Sequence[str], sep: str = SEP) -> str:
+    """By node (`-w`): a node shared with a partition outside the scope (a lab's private one) shows those jobs too;
+    by partition (`-p`) only before the nodes are known."""
+    fmt = ",".join(f"{f}:{sep}" for f in OCCUPANT_FIELDS)
+    if nodes:
+        where = "-w " + shlex.quote(",".join(check_name(n, "node") for n in nodes))
+    else:
+        where = "-p " + shlex.quote(",".join(check_name(p, "partition") for p in partitions))
+    return f"squeue -a -h -t R,CG {where} -O {shlex.quote(fmt)}"
+
+
+def names_cmd(users: Sequence[str]) -> str:
+    """`user:GECOS` per known user (`getent` exits 2 when one is unknown: the rest still print)."""
+    return "getent passwd " + _q(check_name(u, "user") for u in users) + " | cut -d: -f1,5; true"
 
 
 # ---------------------------------------------------------------- detect (capability) commands (§5.1)

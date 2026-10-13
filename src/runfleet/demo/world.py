@@ -1222,8 +1222,8 @@ def _slurm_config(cluster: str, preempt: str, launch: str, prolog: str) -> dict[
 
 
 # what `command -v` finds; detect.tools reports the subset it asks for (render.DETECT_TOOLS)
-BASE_TOOLS = frozenset({"sh", "awk", "cat", "cut", "date", "grep", "head", "id", "kill", "nproc", "paste", "readlink",
-                        "sleep", "sort", "tail", "tr", "wc", "timeout", "less", "stat", "ps", "pgrep"})
+BASE_TOOLS = frozenset({"sh", "awk", "cat", "cut", "date", "getent", "grep", "head", "id", "kill", "nproc", "paste",
+                        "readlink", "sleep", "sort", "tail", "tr", "wc", "timeout", "less", "stat", "ps", "pgrep"})
 SLURM_TOOLS = BASE_TOOLS | {"squeue", "sacct", "sinfo", "scontrol", "sstat", "scancel", "sacctmgr", "srun", "ssh"}
 WS_TOOLS = BASE_TOOLS | {"nvidia-smi"}
 

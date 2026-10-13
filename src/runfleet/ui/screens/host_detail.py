@@ -25,7 +25,7 @@ from runfleet.ui.widgets.header import FleetHeader
 from runfleet.ui.widgets.hintbar import HintBar
 from runfleet.ui.widgets.host_card import busy_note, is_cluster
 from runfleet.ui.widgets.job_table import ClickTable
-from runfleet.ui.widgets.node_table import NodeTable, PartitionTable
+from runfleet.ui.widgets.node_table import NodeTable, PartitionTable, occupant_lines
 from runfleet.ui.widgets.proc_table import SORT_LABELS, SORTS, ProcTable
 from runfleet.util import humanize
 
@@ -213,13 +213,14 @@ class HostDetailScreen(FleetScreen):
                 yield PartitionTable(id="parts")
             with Vertical(id="nodes-box", classes="box"):
                 yield NodeTable(id="nodes")
+            yield Static("", id="onnode-box", classes="box")
             yield Static("", id="myjobs-box", classes="box")
             yield Static("", id="caps-box", classes="box")
         yield HintBar(self.help_contexts(), id="hints")
 
     def on_mount(self) -> None:
         for box_id, title in (("#gpu-panel", "GPUs"), ("#host-box", "Host"), ("#ws-conn", "Connection"),
-                              ("#parts-box", "Partitions (mine: assoc + recent jobs)"),
+                              ("#parts-box", "Partitions (assoc, recent jobs, GPU partitions open to you)"),
                               ("#caps-box", "Capabilities / connection"), ("#myjobs-box", f"My jobs on {self.host}")):
             self.query_one(box_id).border_title = title
         self.refresh_data(None)
@@ -305,7 +306,7 @@ class HostDetailScreen(FleetScreen):
         ptable.styles.height = max(2, len(parts) + 1)
         nodes = [n for n in (snap.nodes if snap else ()) if self.partition is None or self.partition in n.partitions]
         jobs = list(snap.jobs.values()) if snap else []
-        shown = self.query_one(NodeTable).show(nodes, jobs, free_only=self.free_only)
+        shown = self.query_one(NodeTable).show(nodes, jobs, free_only=self.free_only, now=now)
         box = self.query_one("#nodes-box")
         box.border_title = f"Nodes · {self.partition or 'all'} ({shown})"
         box.border_subtitle = f"f: {'free GPUs only' if self.free_only else 'all nodes'} · [ ]: partition"
@@ -313,9 +314,23 @@ class HostDetailScreen(FleetScreen):
             box.border_title += " — no node data yet (refreshed every 2 min)"
         elif not shown and self.free_only:
             box.border_title += f" — no node with free GPUs in {self.partition or 'scope'} (f shows all)"
+        self._render_onnode()
         self.query_one("#myjobs-box", Static).update(my_jobs_line(jobs, width))
         lines = capability_lines(state, width) + connection_lines(state, now, width)
         self.query_one("#caps-box", Static).update(Text("\n").join(lines))
+
+    def _render_onnode(self) -> None:
+        """The jobs on the node under the cursor, every user's (§5.2.9)."""
+        snap = self.state.snapshot
+        name = self.query_one(NodeTable).cursor_key
+        node = next((n for n in (snap.nodes if snap else ()) if n.name == name), None)
+        caps = snap.caps if snap is not None else None
+        hidden = caps is not None and "jobs" in caps.slurm_config.get("PrivateData", "").lower()
+        lines, sub = occupant_lines(node, self._width(), self.rf.now(), hidden=hidden)
+        box = self.query_one("#onnode-box", Static)
+        box.border_title = f"Jobs on {node.name}" if node is not None else "Jobs on the node"
+        box.border_subtitle = sub
+        box.update(Text("\n").join(lines))
 
     # ------------------------------------------------------------------ FleetScreen
     def help_contexts(self) -> list[str]:
@@ -352,6 +367,8 @@ class HostDetailScreen(FleetScreen):
 
     # ------------------------------------------------------------------ events / actions
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if isinstance(event.data_table, NodeTable) and self.cluster:
+            self._render_onnode()
         if isinstance(event.data_table, PartitionTable) and event.row_key.value is not None:
             name = str(event.row_key.value)
             if name != self.partition:
@@ -377,7 +394,8 @@ class HostDetailScreen(FleetScreen):
             self.rf.toast("this process belongs to no task", severity="warning")
         else:
             node = self.query_one(NodeTable).cursor_key
-            self.rf.toast(f"no job of yours on {node}" if node else "no node selected", severity="warning")
+            self.rf.toast(f"no job of yours on {node} (its jobs are listed below)" if node else "no node selected",
+                          severity="warning")
 
     def action_toggle_users(self) -> None:
         self.show_others = not self.show_others

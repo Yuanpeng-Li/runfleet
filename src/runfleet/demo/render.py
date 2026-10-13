@@ -40,6 +40,8 @@ STEP_FIELDS = ["JobID", "JobName", "State", "ExitCode", "DerivedExitCode", "Reas
                "NodeList", "NTasks", "MaxRSS", "AveCPU", "TRESUsageInMax", "TRESUsageInTot"]
 SSTAT_FIELDS = ["JobID", "NTasks", "AveCPU", "AveRSS", "MaxRSS", "TRESUsageInAve", "TRESUsageInMax",
                 "TRESUsageInTot"]
+OCCUPANT_FIELDS = ["JobID", "ArrayJobID", "ArrayTaskID", "UserName", "Account", "Partition", "StateCompact",
+                   "TimeUsed", "TimeLimit", "NumNodes", "NodeList", "tres-alloc", "Name"]
 SINFO_FIELDS = ["NodeList", "Partition", "StateLong", "CPUsState", "Memory", "AllocMem", "FreeMem", "Gres", "GresUsed",
                 "Reason"]
 NVIDIA_GPU_FIELDS = ["index", "uuid", "name", "utilization.gpu", "memory.used", "memory.total", "temperature.gpu",
@@ -660,6 +662,71 @@ def sinfo_nodes(c: SimCluster, *, partitions: Sequence[str], sep: str = "\x1f") 
                       str(node.free_mem_mib), gres, ",".join(used_parts) or "(null)", node.reason]
             rows.append("".join(val + sep for val in values) + "\n")
     return Out("".join(rows))
+
+
+# Other users of the simulated clusters: their jobs are the nodes' background load (`bg_gpu_idx`, `bg_cpus`).
+OTHER_USERS = (("bob", "Bob Example", "lab"), ("carol", "Carol Example", "lab"), ("dave", "Dave Sample", "physics"),
+               ("erin", "Erin Sample", "chem"), ("frank", "Frank Placeholder", "bio"),
+               ("grace", "Grace Placeholder", "physics"), ("heidi", "Heidi Demo", "chem"))
+OWN_NAME = "Alice Example"
+_BG_JOB_NAMES = ("ddp-train", "llama-ft", "md-sim", "eval-sweep", "diffusion", "jupyter", "rl-ppo", "vasp")
+_BG_LIMITS = (4 * 3600, 86400, 2 * 86400, 7 * 86400)
+
+
+def _background_jobs(c: SimCluster, node: SimNode, part: str, now: float) -> list[dict[str, str]]:
+    """The jobs behind a node's background load: its busy GPUs split into one or two jobs, else one CPU job."""
+    h = stable_hash(f"{c.name}/{node.name}")
+    idx = sorted(node.bg_gpu_idx)
+    chunks: list[list[int]] = []
+    if idx:
+        cut = 1 + h % len(idx) if len(idx) > 1 and h % 3 else len(idx)
+        chunks = [chunk for chunk in (idx[:cut], idx[cut:]) if chunk]
+    elif node.bg_cpus:
+        chunks = [[]]
+    rows: list[dict[str, str]] = []
+    for k, chunk in enumerate(chunks):
+        hk = stable_hash(f"{c.name}/{node.name}/{k}/{','.join(map(str, chunk))}")
+        user, _full, account = OTHER_USERS[hk % len(OTHER_USERS)]
+        limit = _BG_LIMITS[hk % len(_BG_LIMITS)]
+        used = (hk // 7) % max(600, limit - 1800) + int(now - c.boot) % 600
+        cpus = max(1, node.bg_cpus // len(chunks))
+        tres = f"cpu={cpus},mem={mem_str(max(1024, node.bg_mem_mib // len(chunks)))},node=1,billing={cpus}"
+        types = {gpu_type_at(node, i) for i in chunk}
+        if chunk:
+            tres += f",gres/gpu={len(chunk)}"
+            if len(types) == 1 and None not in types and c.gpu_tres:
+                tres += f",gres/gpu:{next(iter(types))}={len(chunk)}"
+        job_id = str(7_000_000 + hk % 900_000)
+        rows.append({"JobID": job_id, "ArrayJobID": job_id, "ArrayTaskID": "N/A", "UserName": user,
+                     "Account": account, "Partition": part, "StateCompact": "R", "TimeUsed": squeue_time(used),
+                     "TimeLimit": squeue_time(limit), "NumNodes": "1", "NodeList": node.name, "tres-alloc": tres,
+                     "Name": _BG_JOB_NAMES[hk % len(_BG_JOB_NAMES)]})
+    return rows
+
+
+def squeue_occupants(c: SimCluster, now: float, *, nodes: Sequence[str] = (), partitions: Sequence[str] = (),
+                     sep: str = "\x1f") -> Out:
+    """`squeue -a -h -t R,CG {-w <nodes>|-p <parts>} -O 'F:<sep>,…'`: the user's running jobs and the other users'
+    (the nodes' background load)."""
+    on = set(nodes) or {n.name for n in c.nodes if set(n.partitions) & set(partitions)}
+    rows: list[str] = []
+    for job in sorted(c.jobs.values(), key=lambda j: j.job_id):
+        if job.state in ("RUNNING", "COMPLETING") and on & set(job.nodes) and (nodes or set(partitions) &
+                                                                              set(job.partition.split(","))):
+            rows.append("".join(_squeue_value(c, job, f, now, "epoch") + sep for f in OCCUPANT_FIELDS))
+    for node in sorted(c.nodes, key=lambda n: n.name):
+        if node.name not in on or node.state in ("down", "drained"):
+            continue
+        part = next((p for p in node.partitions if p in partitions), node.partitions[0])
+        for row in _background_jobs(c, node, part, now):
+            rows.append("".join(row[f] + sep for f in OCCUPANT_FIELDS))
+    return Out("".join(r + "\n" for r in rows))
+
+
+def getent_names(c: SimCluster, *, users: Sequence[str]) -> Out:
+    """`getent passwd U… | cut -d: -f1,5`: the simulated users' GECOS."""
+    known = {u: full for u, full, _a in OTHER_USERS} | {c.user: OWN_NAME}
+    return Out("".join(f"{u}:{known[u]},,,\n" for u in users if u in known))
 
 
 # ====================================================================================================== capabilities

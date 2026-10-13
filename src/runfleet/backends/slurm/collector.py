@@ -31,6 +31,7 @@ from runfleet.backends.slurm import actions as slurm_actions
 from runfleet.backends.slurm import attach
 from runfleet.backends.slurm import commands as cmds
 from runfleet.backends.slurm.logpaths import JobNames, refs_from_paths, refs_from_templates
+from runfleet.backends.slurm.parse_occupants import Occupant, nodes_with_jobs, parse_names, parse_occupants
 from runfleet.backends.slurm.parse_sacct import gputres_seed, parse_sacct, parse_steps
 from runfleet.backends.slurm.parse_scontrol import JobInfo, parse_scontrol
 from runfleet.backends.slurm.parse_sinfo import gpu_types, parse_sinfo, summarize
@@ -41,8 +42,8 @@ from runfleet.backends.slurm.states import (explain, humanize_reason, min_job_ag
 from runfleet.config import HostConfig
 from runfleet.errors import AttachBlocked
 from runfleet.models import (ActionResult, AttachMode, Capabilities, ErrorKind, HostError, Job, JobDetail, JobKey,
-                             JobKind, JobLive, JobState, JobStep, LogRef, Node, NodeAlloc, PartitionSummary,
-                             StateGroup)
+                             JobKind, JobLive, JobState, JobStep, LogRef, NODE_JOBS_TTL, Node, NodeAlloc,
+                             PartitionSummary, StateGroup)
 from runfleet.probe.section import Section, SectionOutcome, SectionResult
 from runfleet.util.efficiency import efficiency
 from runfleet.util.efficiency import lines as efficiency_lines
@@ -57,6 +58,7 @@ MAX_LOGSTAT_PATHS = 30
 MAX_VANISHED_IDS = 50
 MAX_VANISHED_TRIES = 6                                  # sacct -j lookups per vanished job (30 s … 10 min apart)
 DETAIL_JOBINFO_MAX_AGE = timedelta(seconds=30)
+OCCUPANTS_PERIOD = 30.0                                # every user's jobs on the nodes: while the detail is open
 
 _CTLD_DOWN = re.compile(r"Unable to contact slurm controller|Socket timed out|slurm_load_jobs error|"
                         r"Zero Bytes were transmitted", re.IGNORECASE)
@@ -111,6 +113,11 @@ class SlurmCollector(SchedulerCollector):
         self._sstat_last: dict[str, datetime] = {}         # job id -> when its usage was last planned
         self._last_usage_at: datetime | None = None         # when the last background sstat was planned
         self._smi_model: dict[str, tuple[str, float | None]] = {}   # display id -> (gres-style type, MiB per GPU)
+        self._occupants: tuple[Occupant, ...] = ()         # every user's running jobs in scope (§5.2.9)
+        self._occupants_at: datetime | None = None
+        self._real_names: dict[str, str | None] = {}       # user -> GECOS name (None: looked up, none known)
+        self._occ_sep = cmds.SEP                           # separator of the last planned occupants squeue
+        self._names_asked: list[str] = []                  # users of the last planned getent
 
     # ------------------------------------------------------------ detection
     @classmethod
@@ -144,6 +151,8 @@ class SlurmCollector(SchedulerCollector):
             Cadence("slurm.vanished", 0.0, mode="event"),
             Cadence("slurm.logstat", max(s.poll_logstat, 60.0), floor=60.0, focused_factor=0.5),
             Cadence("slurm.nodes", max(s.poll_nodes, 60.0), floor=60.0, hidden_factor=5.0),
+            Cadence("slurm.occupants", OCCUPANTS_PERIOD, floor=OCCUPANTS_PERIOD, focused_only=True),
+            Cadence("slurm.names", 0.0, mode="event"),
         ]
 
     def sections(self, due: frozenset[str], ctx: HostContext) -> list[Section]:
@@ -161,6 +170,10 @@ class SlurmCollector(SchedulerCollector):
         if "slurm.logstat" in due and (sec := self._logstat_section()) is not None:
             out.append(sec)
         if "slurm.nodes" in due and (sec := self._sinfo_section(ctx)) is not None:
+            out.append(sec)
+        if "slurm.occupants" in due:
+            out += self._occupant_sections(ctx)       # with sinfo: the GPU counts and the jobs of one moment
+        if "slurm.names" in due and (sec := self._names_section()) is not None:
             out.append(sec)
         return out
 
@@ -299,6 +312,32 @@ class SlurmCollector(SchedulerCollector):
         return Section("slurm.sinfo", cmds.sinfo_cmd(parts, sep), timeout=20, requires=("sinfo",),
                        meta={"partitions": parts, "sep": sep})
 
+    def _occupant_sections(self, ctx: HostContext) -> list[Section]:
+        """`sinfo` + every user's running jobs in the partitions in scope (§5.2.9); none after the squeue -O fallback
+        (the legacy -o has no tres-alloc)."""
+        sinfo = self._sinfo_section(ctx)
+        if sinfo is None or self._squeue_legacy:
+            return [sinfo] if sinfo is not None else []
+        parts = list(self._sinfo_parts)
+        nodes = sorted({n.name for n in self._nodes or ()
+                        if set(n.partitions) & set(parts) and cmds.NAME_RE.match(n.name)})
+        if len(nodes) > cmds.MAX_OCCUPANT_NODES:
+            nodes = []
+        sep = self._occ_sep = self._sep["squeue"]
+        return [sinfo, Section("slurm.occupants", cmds.occupants_cmd(nodes, parts, sep), timeout=20,
+                               requires=("squeue",), meta={"nodes": nodes, "partitions": parts, "sep": sep})]
+
+    def _unnamed(self) -> list[str]:
+        users = dict.fromkeys(o.user for o in self._occupants)
+        return [u for u in users if u not in self._real_names and cmds.NAME_RE.match(u)][:cmds.MAX_NAME_LOOKUPS]
+
+    def _names_section(self) -> Section | None:
+        users = self._names_asked = self._unnamed()
+        if not users:
+            return None
+        return Section("slurm.names", cmds.names_cmd(users), timeout=10, requires=("getent",),
+                       meta={"users": users})
+
     # ------------------------------------------------------------ ingest
     def ingest(self, results: Mapping[str, SectionResult], ctx: HostContext,
                monitors: MonitorView) -> CollectorOutput:
@@ -324,6 +363,10 @@ class SlurmCollector(SchedulerCollector):
         partitions: tuple[PartitionSummary, ...] | None = None
         if (r := results.get("slurm.sinfo")) is not None:
             nodes, partitions = self._ingest_sinfo(r, ctx, errors)
+        if self._ingest_occupants(results, ctx, errors) and self._unnamed():
+            followups.add("slurm.names")
+        if self._nodes is not None and ({"slurm.sinfo", "slurm.occupants", "slurm.names"} & set(results)):
+            nodes = self._nodes_now(ctx)
 
         if any(self._jobinfo_due(d, now) for d in self._want_jobinfo):
             followups.add("slurm.jobinfo")
@@ -522,6 +565,37 @@ class SlurmCollector(SchedulerCollector):
         self._nodes = tuple(pr.items)
         self._node_types = {n.name: gpu_types(n) for n in self._nodes}
         return self._nodes, summarize(self._nodes, self.partitions(ctx))
+
+    def _ingest_occupants(self, results: Mapping[str, SectionResult], ctx: HostContext,
+                          errors: list[HostError]) -> bool:
+        """Every user's running jobs and their names (§5.2.9); True when a new jobs reading arrived."""
+        fresh = False
+        if (r := results.get("slurm.occupants")) is not None:
+            if not r.ok:
+                errors.append(_err(r, ctx.now))
+            if usable(r):
+                pr = parse_occupants(r.stdout, sep=self._occ_sep)
+                if pr.mostly_bad:
+                    errors.append(parse_error(r.name, pr, ctx.now, "squeue"))
+                elif r.ok or pr.items:
+                    self._occupants, self._occupants_at, fresh = tuple(pr.items), ctx.now, True
+        if (r := results.get("slurm.names")) is not None:
+            if usable(r):
+                found = parse_names(r.stdout)
+                self._real_names.update({u: found.get(u) for u in self._names_asked})   # unknown users: not asked again
+                self._real_names.update(found)
+            elif not r.ok:
+                errors.append(_err(r, ctx.now))
+        return fresh
+
+    def _nodes_now(self, ctx: HostContext) -> tuple[Node, ...]:
+        """The last sinfo nodes, with every user's jobs when they were read lately (§5.2.9)."""
+        nodes = self._nodes or ()
+        at = self._occupants_at
+        if at is None or ctx.now - at > NODE_JOBS_TTL:
+            return nodes
+        with_jobs = nodes_with_jobs(nodes, self._occupants, self._real_names, ctx.caps.remote_user)
+        return tuple(dataclasses.replace(n, jobs_at=at) for n in with_jobs)
 
     def _maybe_fallback(self, kind: str, r: SectionResult) -> None:
         """A cluster that rejects the unit separator falls back to `|` (then squeue to the legacy -o format)."""

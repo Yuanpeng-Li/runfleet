@@ -291,6 +291,7 @@ class HostPoller:
         self._auth_paused = False
         self._idle_paused = False
         self._wake_pending = False
+        self._wake_soft = False           # the pending wake is only a focus wake: a transport failure drops it
         self._wake_floor = True
         self._manual_retry = False
         self._force_prepare = False       # next prepare is user-initiated: bypass the 30 s master throttle
@@ -312,6 +313,7 @@ class HostPoller:
             self._forced |= self._fast_groups()
         if reason in ("manual", "connect") and self._auth_paused:
             self._manual_retry = True
+        self._wake_soft = reason == "focus" and (self._wake_soft or not self._wake_pending)
         self._wake_pending = True
         self._event.set()
 
@@ -324,7 +326,7 @@ class HostPoller:
         self._auth_paused = False
         self._manual_retry = False
         self._force_prepare = True
-        self._wake_pending = True
+        self._wake_pending, self._wake_soft = True, False
         self._wake_floor = False
         self._publish(state=ConnState.CONNECTING, error=None, consecutive_failures=0)
         self._event.set()
@@ -333,6 +335,15 @@ class HostPoller:
         if v != self._visibility:
             self._visibility = v
             self._reschedule()
+            if v is Visibility.FOCUSED and self.caps is not None:
+                now_m, last = self.clock.monotonic(), self._last_run
+                stale = frozenset(c.group for cs in self._cadences(self.context()).values() for c in cs
+                                  if c.focused_only
+                                  and (c.group not in last or now_m - last[c.group] >= self.effective_period(c)))
+                if stale and (self._consecutive > 0 or self._auth_paused or self._idle_paused):
+                    self._forced |= stale                 # backoff / paused: due at the next tick, no early retry
+                elif stale:
+                    self.wake("focus", groups=stale)      # a detail screen just opened: its data now, not a tick later
 
     def set_multiplier(self, m: float) -> None:
         if m != self._multiplier:
@@ -399,7 +410,7 @@ class HostPoller:
 
     async def _cycle(self) -> None:
         was_wake = self._wake_pending
-        self._wake_pending = False
+        self._wake_pending = self._wake_soft = False
         self._wake_floor = True
         prepared_now = False
         if self._need_prepare or self.caps is None or not self.profile:
@@ -526,7 +537,8 @@ class HostPoller:
         out: dict[str, list[Cadence]] = {}
         for c in self.profile:
             try:
-                out[c.name] = list(c.cadences(ctx))
+                focused = self._visibility is Visibility.FOCUSED
+                out[c.name] = [cad for cad in c.cadences(ctx) if focused or not cad.focused_only]
             except Exception as e:
                 self._internal_error(e, collector=c.name)
                 out[c.name] = []
@@ -823,6 +835,8 @@ class HostPoller:
         self._publish(latency_s=res.run.elapsed_s, consecutive_failures=0)
 
     async def _on_transport_failure(self, err: HostError) -> None:
+        if self._wake_pending and self._wake_soft:     # a focus wake set while this probe ran: the backoff wins
+            self._wake_pending = self._wake_soft = False
         self._consecutive += 1
         n = self._consecutive
         err = dataclasses.replace(err, at=err.at or self.clock.now())

@@ -60,7 +60,12 @@ of all users plus the members of your tasks; `u` toggles other users). Click a G
 list only the processes on that GPU, whoever owns them; click it again for all processes. Clusters: partitions with
 free GPUs by type (those of your recent jobs, plus every GPU partition your accounts may submit to, such as a lab's
 paid partition you have not used lately; `partitions` in the config pins the list), nodes (state, CPU, memory, GPU
-use, which of your jobs run there) and the detected capabilities. A host that never
+use, who runs there) and the detected capabilities. The JOBS column lists your job ids, then the other users with the
+GPUs they hold on the node (`bob×4 · carol×3`; `~2` is an even split of a multi-node job). The panel under the nodes
+lists every job on the selected node: user and real name, account, partition, GPUs, elapsed / limit and time left,
+yours first, then the job that ends soonest; on a full node it says when the next GPU frees up at the latest (time
+limits are upper bounds). Other users' jobs are read only while this screen is open (every 30 s), and only where the
+cluster lets users see them (`PrivateData=jobs` hides them; the panel then says so). A host that never
 connected shows only its connection panel (`c` log in, `e` details, `t` disable).
 
 **Log viewer** (`l`). The job's stdout or stderr (`o`/`e`), following the file as it grows (`F` toggles). Progress

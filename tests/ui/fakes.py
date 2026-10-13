@@ -28,7 +28,7 @@ from runfleet.models import (
     GPU, ActionResult, AttachMode, AttachOffer, AttachState, AttachStatus, Capabilities, CgroupStats, ConnState,
     DetectReport, DoctorCheck, DoctorReport, ErrorKind, GPUProcess, GresCount, HostError, HostMetrics, HostSnapshot,
     HostStatus, Job, JobDetail, JobGpuUsage, JobKey, JobKind, JobLive, JobState, JobStep, LogRef, Node, NodeAlloc,
-    NodeInspect, PartitionSummary, Proc, ResourceAlloc, SectionStatus, StateGroup, Visibility,
+    NodeInspect, NodeJob, PartitionSummary, Proc, ResourceAlloc, SectionStatus, StateGroup, Visibility,
 )
 from runfleet.util.efficiency import efficiency
 from runfleet.util.efficiency import lines as efficiency_lines
@@ -215,6 +215,12 @@ def _node(name: str, state: str, used: int, total: int, gtype: str, cpus: tuple[
                 mem[0] * 1024, (mem[1] - mem[0]) * 1024, (GresCount("gpu", gtype, total, used, None),), None)
 
 
+def _nj(jid: str, user: str, gpus: int | None, elapsed: timedelta, limit: timedelta | None, name: str, *,
+        real: str | None = None, account: str = "lab", exact: bool = True) -> NodeJob:
+    return NodeJob(jid, user, real, account, "gpu-preempt", name, "R", gpus, exact, None,
+                   int(elapsed.total_seconds()), int(limit.total_seconds()) if limit is not None else None, user == ME)
+
+
 def _caps(user: str, login: str, profile: tuple[str, ...], **kw: Any) -> Capabilities:
     return Capabilities(remote_user=user, uid=610001, login_host=login, tz_offset=timedelta(hours=-5),
                         clock_skew=timedelta(0), tools=frozenset(kw.pop("tools", ("squeue", "sacct", "sinfo",
@@ -283,14 +289,34 @@ def build_world() -> tuple[FleetConfig, list[HostState]]:
                                                                   "nvidia_h200_nvl": (3, 4)},
                                  {"mixed": 19, "allocated": 3, "planned": 2, "idle": 2}),
                 PartitionSummary("labpi", 4, 16, 2, 0, {"nvidia_a100-sxm4-40gb": (2, 16)}, {"mixed": 4}))
-    k2_nodes = (
+    occupants = {      # every user's jobs per node (§5.2.9): the host detail panel and its JOBS column
+        "n-31-01": (_nj("2331907", "bob", 4, _hms(20, 11, 5), _hms(d=2), "ddp-train-r50", real="Bob Example"),
+                    _nj("2333115", "carol", 3, _hms(1, 42, 30), _hms(4), "llama-ft-lora", real="Carol Example"),
+                    _nj("2333301", "dave", 1, _hms(0, 18, 2), _hms(d=1), "jupyter", real="Dave Sample",
+                        account="physics")),
+        "n-31-04": (_nj("2330422", "erin", 2, _hms(2, 3, 0, d=1), _hms(d=3), "md-sim-04", real="Erin Sample",
+                        account="chem"),
+                    _nj("2333412", "frank", 1, _hms(3, 10, 44), None, "vasp-relax", account="bio")),
+        "n-31-05": (),
+        "n-32-03": (_nj("2329950", "grace", 4, _hms(5, 31, 0, d=2), _hms(d=7), "rl-ppo-atari",
+                        real="Grace Placeholder", account="physics", exact=False),
+                    _nj("2332001", "bob", 4, _hms(7, 2, 51), _hms(d=1), "eval-sweep", real="Bob Example")),
+        "n-38-01": (_nj("2333760", ME, 2, _hms(9, 2, 26), _hms(d=3), "lmft-x07-sampler-s0", real="Alice Example"),
+                    _nj("2333590", "heidi", 2, _hms(11, 40, 9), _hms(d=1), "diffusion-xl", real="Heidi Demo",
+                        account="chem")),
+        "n-40-01": tuple(_nj(j, ME, 1, _hms(18, 54, 4), _hms(d=3), n, real="Alice Example")
+                         for j, n in (("2332861", "orb-swp--train--cifar-warmup--s43--a02"),
+                                      ("2332862", "orb-swp--train--cifar-const--s43--a02"),
+                                      ("2332863", "orb-swp--train--cifar-cosinewarm--s43--a02"))),
+    }
+    k2_nodes = tuple(dataclasses.replace(n, jobs=occupants[n.name], jobs_at=T0) for n in (
         _node("n-31-01", "mixed", 8, 8, "nvidia_geforce_rtx_3090", (34, 30, 64), (282, 500)),
         _node("n-31-04", "mixed", 3, 4, "tesla_v100-pcie-16gb", (6, 50, 56), (72, 125)),
         _node("n-31-05", "planned", 0, 12, "nvidia_a100_3g.40gb", (0, 64, 64), (0, 503)),
         _node("n-32-03", "mixed", 8, 8, "nvidia_geforce_rtx_3090", (36, 28, 64), (368, 503), flags="-"),
         _node("n-38-01", "mixed", 4, 4, "nvidia_h200_nvl", (40, 24, 64), (400, 1007)),
         _node("n-40-01", "mixed", 3, 4, "nvidia_a100-sxm4-40gb", (24, 40, 64), (144, 503)),
-    )
+    ))
     k2 = HostSnapshot("k2", T0, _caps(ME, "login02", ("slurm", "procfs"), slurm_version="25.05.8",
                                       cluster_name="k2", gpu_tres=True,
                                       slurm_config={"PreemptMode": "REQUEUE", "MinJobAge": "300",

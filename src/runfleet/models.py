@@ -354,6 +354,39 @@ class Node:
     mem_free_mib: int | None
     gres: tuple[GresCount, ...]
     reason: str | None
+    jobs: tuple[NodeJob, ...] | None = None   # running jobs of every user (§5.2.9); None = not sampled lately
+    jobs_at: datetime | None = None           # when `jobs` was sampled
+
+    def jobs_seen(self, now: datetime) -> tuple[NodeJob, ...] | None:
+        """`jobs` while the reading is fresh (NODE_JOBS_TTL), else None: an old reading is never shown."""
+        if self.jobs is None or self.jobs_at is None or now - self.jobs_at > NODE_JOBS_TTL:
+            return None
+        return self.jobs
+
+NODE_JOBS_TTL = timedelta(minutes=3)          # every user's jobs on a node: how long a reading is shown (§5.2.9)
+
+@dataclass(frozen=True, slots=True)
+class NodeJob:
+    """A running job on one node, any user (§5.2.9: sampled while the host's detail is open)."""
+    job_id: str                  # display id (`123_4` for an array task)
+    user: str
+    real_name: str | None        # GECOS of `getent passwd` (None: unknown or not looked up yet)
+    account: str | None
+    partition: str | None
+    name: str
+    state: str                   # squeue compact state: "R" / "CG"
+    gpus: int | None             # GPUs on this node (None: unknown); a multi-node job's split when not exact
+    gpus_exact: bool             # False: an even split of a multi-node job's total
+    gpu_type: str | None
+    elapsed_s: int | None
+    limit_s: int | None          # None: UNLIMITED / unknown
+    mine: bool
+
+    @property
+    def left_s(self) -> int | None:
+        if self.limit_s is None or self.elapsed_s is None:
+            return None
+        return max(0, self.limit_s - self.elapsed_s)
 
 @dataclass(frozen=True, slots=True)
 class PartitionSummary:

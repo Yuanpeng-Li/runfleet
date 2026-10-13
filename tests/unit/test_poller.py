@@ -130,6 +130,46 @@ async def test_hidden_and_focused_factors(rig_factory: Callable[..., Rig]) -> No
     assert ws.status.tick_interval == pytest.approx(3.0)                # nvidia 5 s × 0.6
 
 
+async def test_focused_only_group_runs_while_focused_and_at_once_on_focus(rig_factory: Callable[..., Rig]) -> None:
+    rig = rig_factory()
+    await settle()
+    await run_for(rig.clock, 120)
+    assert not any("slurm.occupants" in names for names in rig.poll_names())     # never while only visible
+    n = len(rig.polls())
+    rig.p.set_visibility(Visibility.FOCUSED)
+    await run_for(rig.clock, 4)
+    assert "slurm.occupants" in rig.poll_names()[n]                             # served at once (3 s floor)
+    assert rig.status.tick_interval == 15                                      # 30 s: it does not set the tick
+    await run_for(rig.clock, 90)
+    served = [i for i, names in enumerate(rig.poll_names()) if "slurm.occupants" in names]
+    assert 3 <= len(served) <= 5                                               # ~every 30 s while focused
+    rig.p.set_visibility(Visibility.VISIBLE)
+    rig.p.set_visibility(Visibility.FOCUSED)                                   # back within the period: no extra
+    m = len(rig.polls())
+    await run_for(rig.clock, 2)
+    assert len(rig.polls()) == m
+    rig.p.set_visibility(Visibility.HIDDEN)
+    k = len(rig.polls())
+    await run_for(rig.clock, 300)
+    assert not any("slurm.occupants" in names for names in rig.poll_names()[k:])
+
+
+async def test_focus_during_a_failing_probe_keeps_the_backoff(rig_factory: Callable[..., Rig]) -> None:
+    """Regression (review): a focus wake set while a probe ran survived that probe's failure and retried at once."""
+    rig = rig_factory(latency=2.0)
+    await run_for(rig.clock, 20)
+    rig.t.fail_next(ErrorKind.REFUSED, times=50)
+    while not rig.status.in_flight:
+        await run_for(rig.clock, 0.5)
+    rig.p.set_visibility(Visibility.FOCUSED)                           # host detail opens mid-probe
+    while rig.status.in_flight:
+        await run_for(rig.clock, 0.5)
+    assert rig.status.consecutive_failures == 1
+    n, nxt = len(rig.t.probes), rig.p._next_at
+    await run_for(rig.clock, max(0.0, nxt - rig.clock.monotonic()) - 1)
+    assert len(rig.t.probes) == n                                       # nothing before the backoff deadline
+
+
 async def test_floor_clamps_multiplier(rig_factory: Callable[..., Rig]) -> None:
     rig = rig_factory()
     await settle()

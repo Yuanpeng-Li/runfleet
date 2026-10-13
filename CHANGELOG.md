@@ -5,6 +5,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-13
+
+### Added
+- **Who runs on a node**: a cluster's host detail now shows other users' jobs, not only yours. The JOBS column
+  (formerly MY JOBS) lists your job ids, then each other user with the GPUs they hold there (`bob×4 · carol×3`).
+  A new panel under the nodes lists every job on the selected node — user and real name (from `getent passwd`),
+  account, partition, GPUs, elapsed / limit, time left — and, on a full node, when the next GPU frees up at the
+  latest. Read with one `squeue -a` over the nodes shown (jobs of other partitions on shared nodes included), only
+  while the host detail is open (every 30 s, with the node list so both show the same moment); the fleet view costs
+  nothing more. Clusters with `PrivateData=jobs` show only your jobs, and the panel says so.
+
 ## [0.2.1] - 2026-10-13
 
 ### Fixed
@@ -236,7 +247,8 @@ First public release.
   opt-in with `--yes`); `scripts/gen_docs.py`; `scripts/screenshots.py`.
 - CI: lint, types and tests on Python 3.11 and 3.13, plus a packaging job that runs the demo from the built wheel.
 
-[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Yuanpeng-Li/runfleet/releases/tag/v0.1.0
