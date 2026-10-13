@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Clickable GPUs on workstations**: in a workstation's host detail, clicking a GPU row (or `[` / `]`) lists only
+  the processes on that GPU, other users' included; the same GPU again shows all processes.
+- **Header logo goes home**: clicking `RunFleet` at the top left closes detail screens and shows the Fleet view.
 - **Notifications, watch list, "since you were away"**: your jobs that fail, restart or run low on time (and, for
   jobs watched with `w`, start, complete or sit GPU-idle) raise a toast, a terminal notification (OSC 9 / OSC 777 /
   bell, tmux passthrough) and an optional local `[notify] command`; bursts become one line per host, palette ›
@@ -47,6 +50,10 @@ All notable changes to this project are documented here. The format follows
   counts only stuck or abandoned queries, not a job's own `nvidia-smi -l`.
 
 ### Fixed
+- **Attach on nodes you never ssh'ed to**: the login → node hop required the node's host key to be in the login host's
+  known_hosts already, so on clusters that ship no node keys (and run `StrictHostKeyChecking no` themselves) live
+  readings failed with "host key is not known". A node key that is recorded must still match; an unknown node is now
+  accepted without being written to any known_hosts file.
 - `s` on a **running Slurm job** opened a login-node shell. It now lands on the job's compute node inside the job
   (`srun --jobid --overlap --pty`, the job's GPUs visible; also where sshd refuses node logins). Multi-node
   jobs ask which node. Pending / finished jobs keep the login-node shell in `WorkDir`.

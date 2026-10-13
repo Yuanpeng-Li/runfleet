@@ -2,8 +2,8 @@
 
 One line. The main screen shows the scope chip, one chip per host and the totals over the scope; detail screens show
 a breadcrumb and the status of their host instead of the chips. Responsive per §7.4: full chips >= 110 columns, no
-ages < 110, dots + names < 90, dots + numbers < 70. Chips are clickable (scope / error details); the `⚙` chip at
-the right edge opens Settings.
+ages < 110, dots + names < 90, dots + numbers < 70. Chips are clickable (scope / error details); the `RunFleet`
+logo goes back to the Fleet view and the `⚙` chip at the right edge opens Settings.
 """
 
 from __future__ import annotations
@@ -181,6 +181,7 @@ class FleetHeader(Static):
         compact = width < 110
         left = Text(" ")
         left.append("RunFleet", style=f"bold {theme.ACCENT}" if not theme.no_color() else "bold")
+        left.stylize(_click("app.home"), 1)             # the logo goes home (Fleet view) from any screen
         left.append(" ")
         left.append_text(self._scope_chip(compact and not self.crumbs))
         if self.crumbs:

@@ -56,7 +56,8 @@ the Summary's right column shows an ended job's **Efficiency** box instead of it
 below).
 
 **Host detail** (`enter` on a host). Workstations: per-GPU bars, host CPU/memory, and processes (GPU holders
-of all users plus the members of your tasks; `u` toggles other users). Clusters: partitions with free GPUs by type,
+of all users plus the members of your tasks; `u` toggles other users). Click a GPU row (or step with `[` / `]`) to
+list only the processes on that GPU, whoever owns them; click it again for all processes. Clusters: partitions with free GPUs by type,
 nodes (state, CPU, memory, GPU use, which of your jobs run there) and the detected capabilities. A host that never
 connected shows only its connection panel (`c` log in, `e` details, `t` disable).
 
@@ -172,7 +173,7 @@ Every view lists its keys with `?`. The table below is generated from the same s
 | Job detail | `[` previous tab · `]` next tab · `o` stdout · `e` stderr · `F` follow on / off · `l` full log viewer · `L` log viewer at the failure line (cause chip) · `/` search the log (opens the log viewer) · `p` log in $PAGER · `r` refresh detail · `x` action menu · `^k` cancel / terminate · `s` shell · `c` connect host · `y` copy id · `Y` copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle · Y again = stdout path · `P` forward a port (TensorBoard, Jupyter …) to localhost · `w` watch / unwatch (notify on start, end, GPU idle) · `a` live readings: auto-refresh on / off (GPU / Procs tab) · `S` live readings: read this job's own GPUs with srun (asks first; one permanent sacct row) |
 | Job detail · GPU / Procs tab (running Slurm job) | `r` read the node now (srun asks first) and refresh the detail · `a` auto-refresh on / off (ssh: every attach_refresh while the tab is open) · `S` read this job's own GPUs with srun when ssh landed in another job (asks first) |
 | Host detail | `^k` terminate the selected task · `x` actions · `s` shell · `c` connect · `t` enable / disable polling · `e` error details |
-| Host detail (workstation) | `↵` open the process' task · `l` log of the selected task · `u` other users' processes · `a` copy CUDA_VISIBLE_DEVICES for N free GPUs · `o` next sort column · `O` reverse sort |
+| Host detail (workstation) | `↵` open the process' task · `l` log of the selected task · `u` other users' processes · `[` previous GPU: only its processes, all users (click a GPU too) · `]` next GPU · `a` copy CUDA_VISIBLE_DEVICES for N free GPUs · `o` next sort column · `O` reverse sort |
 | Host detail (cluster) | `↵` my job on the selected node · `f` nodes with free GPUs only · `[` previous partition · `]` next partition |
 | Log viewer | `F` follow on / off · `G` bottom + follow · `g` top of the buffer · `o` stdout · `e` stderr · `/` search the buffer · `n` next match · `N` previous match · `[` previous error / warning line · `]` next error / warning line · `p` log in $PAGER · `R` reopen the log stream · `y` copy the path of the shown stream (stdout / stderr) · `c` connect host |
 | srun confirmation (live readings) | `y` read once (one srun step, one permanent sacct row) · `a` allow srun reads for this job until RunFleet exits (each read still adds a row) · `n`/`esc` cancel · `f1` help (this dialog) |
@@ -188,7 +189,8 @@ Every view lists its keys with `?`. The table below is generated from the same s
 | Settings | `tab`/`→` next section (Hosts → General → About) · `S-tab`/`←` previous section · `↓`/`j` move down · `↑`/`k` move up · `space`/`↵` toggle host (save + poll / remove) · change value · open · `t` test the host now (read-only probe) · `a` add an ssh target that is not in ~/.ssh/config · `p` poll a saved host this run left out (its saved settings, file unchanged) · `J`/`S-↓` move host down (card order, number keys) · `K`/`S-↑` move host up · `/` filter hosts · `e` open config.toml in $EDITOR · `?`/`f1` these keys · `esc`/`q`/`,` close |
 <!-- keymap:end -->
 
-**Mouse.** Click selects rows, cards, tabs and header chips; double-click drills in; right-click opens the action menu;
+**Mouse.** Click selects rows, cards, tabs and header chips; the `RunFleet` logo at the top left goes back to the Fleet view
+from any screen; double-click drills in; right-click opens the action menu;
 clicking a column header sorts. To select text hold `Shift` while dragging (most terminals), or start with
 `--no-mouse`; `y` copies the id and `Y` opens the copy menu (below) without selecting. Copying uses OSC 52, which the
 terminal never acknowledges, so the toast says what was sent and shows the text for you to select if nothing arrived:

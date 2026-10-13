@@ -495,6 +495,10 @@ class RunFleetApp(App[None]):
         if not isinstance(screen, MainScreen) and len(self.screen_stack) > 2:
             self.pop_screen()
 
+    def action_home(self) -> None:
+        """Header logo click: close every detail screen and show the Fleet view."""
+        self.go_main("fleet")
+
     def action_settings(self, section: str = "hosts") -> None:
         """``,`` / palette › Settings / header chip: the settings overlay (``,`` again closes it)."""
         from runfleet.ui.screens.settings import SettingsScreen

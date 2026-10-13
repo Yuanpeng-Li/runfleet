@@ -74,6 +74,7 @@ FilterBar { background: $boost; }
     background: ansi_default;
 }
 .box:focus-within { border: solid $accent; }
+#gpu-panel { border-subtitle-color: $text-muted; }   /* "click a GPU …": readable on an unfocused box */
 .title-line { height: 1; padding: 0 1; }
 .note { color: $text-muted; height: auto; padding: 0 1; }
 

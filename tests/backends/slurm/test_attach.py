@@ -114,7 +114,9 @@ def test_srun_blocked_without_overlap() -> None:
 def test_ssh_command_line_golden() -> None:
     assert attach.ssh_cmd("n-37-08", B64) == (
         "timeout -k 2 12 ssh -T -a -x -o BatchMode=yes -o ControlMaster=no -o ControlPath=none "
-        "-o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ClearAllForwardings=yes -o ConnectTimeout=5 "
+        "-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "
+        "-o \"GlobalKnownHostsFile=/etc/ssh/ssh_known_hosts /etc/ssh/ssh_known_hosts2 $HOME/.ssh/known_hosts "
+        "$HOME/.ssh/known_hosts2\" -o UpdateHostKeys=no -o ClearAllForwardings=yes -o ConnectTimeout=5 "
         "-o ServerAliveInterval=5 -o ServerAliveCountMax=1 -o LogLevel=ERROR -- n-37-08 "
         "\"timeout -k 1 10 sh -c 'echo QUJD | base64 -d | sh'\"")
 
@@ -169,11 +171,14 @@ def test_nested_script_is_the_rendered_node_probe_without_temp_dir() -> None:
 
 
 def test_ssh_hop_never_writes_known_hosts_or_keeps_a_master() -> None:
+    """Known node keys must match (system + user files read as global files); an unknown node is accepted but never
+    recorded: accept-new writes only to UserKnownHostsFile, which is /dev/null."""
     cmd = attach.ssh_cmd("n1", B64)
-    for opt in ("ControlMaster=no", "ControlPath=none", "StrictHostKeyChecking=yes", "UpdateHostKeys=no",
-                "BatchMode=yes"):
+    for opt in ("ControlMaster=no", "ControlPath=none", "StrictHostKeyChecking=accept-new",
+                "UserKnownHostsFile=/dev/null", "UpdateHostKeys=no", "BatchMode=yes"):
         assert f"-o {opt}" in cmd
-    assert "accept-new" not in cmd and "StrictHostKeyChecking=no" not in cmd
+    assert '"GlobalKnownHostsFile=/etc/ssh/ssh_known_hosts /etc/ssh/ssh_known_hosts2 $HOME/.ssh/known_hosts ' in cmd
+    assert "StrictHostKeyChecking=no" not in cmd and "StrictHostKeyChecking=yes" not in cmd
 
 
 def test_plan_reads_the_users_other_jobs_on_the_node_with_sluids() -> None:

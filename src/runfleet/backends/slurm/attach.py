@@ -65,8 +65,14 @@ MAX_NODE_JOBS = 8               # own running jobs per node read by node.cg / no
 ATTACH_GPU_FIELDS: tuple[str, ...] = (*GPU_FIELDS, "pci.bus_id")
 
 # login → node hop (§7.16.4 layer 2): no mux socket or ControlPersist process on the login host, never a key written
-# to its known_hosts, no agent/X11/port forwarding, bounded connect and liveness
-SSH_OPTIONS: tuple[str, ...] = ("BatchMode=yes", "ControlMaster=no", "ControlPath=none", "StrictHostKeyChecking=yes",
+# to its known_hosts, no agent/X11/port forwarding, bounded connect and liveness. Host keys: a node already in the
+# login host's known_hosts (system or user files, read as "global" files) must match; a node never visited is
+# accepted without being recorded (UserKnownHostsFile=/dev/null), since sites commonly ship no node keys and run with
+# StrictHostKeyChecking=no themselves.
+SSH_OPTIONS: tuple[str, ...] = ("BatchMode=yes", "ControlMaster=no", "ControlPath=none",
+                                "StrictHostKeyChecking=accept-new", "UserKnownHostsFile=/dev/null",
+                                '"GlobalKnownHostsFile=/etc/ssh/ssh_known_hosts /etc/ssh/ssh_known_hosts2 '
+                                '$HOME/.ssh/known_hosts $HOME/.ssh/known_hosts2"',
                                 "UpdateHostKeys=no", "ClearAllForwardings=yes", "ConnectTimeout=5",
                                 "ServerAliveInterval=5", "ServerAliveCountMax=1", "LogLevel=ERROR")
 
@@ -316,9 +322,10 @@ def hop_error(mode: AttachMode, node: str, r: SectionResult, at: datetime) -> Ho
             return _err(ErrorKind.PERMISSION, f"no job of yours on {node} — job moved or ended?", r.stderr,
                         r.name, at)
         if _HOSTKEY.search(text):
-            advice = (f"{node}'s host key is not in the login host's known_hosts; the attach hop never adds keys "
-                      f"(StrictHostKeyChecking=yes). Run `ssh {node} true` there once and check the fingerprint.")
-            return _err(ErrorKind.HOSTKEY, f"{node}'s host key is not known on the login host",
+            advice = (f"{node}'s host key differs from the one in the login host's known_hosts, so the attach hop "
+                      f"refuses it. If the node was reinstalled, run `ssh-keygen -R {node}` on the login host and "
+                      f"`ssh {node} true` there once, checking the fingerprint.")
+            return _err(ErrorKind.HOSTKEY, f"{node}'s host key changed (login host's known_hosts)",
                         f"{advice}\n{r.stderr}", r.name, at)
         if _DNS.search(text):
             return _err(ErrorKind.DNS, f"login host cannot resolve {node}", r.stderr, r.name, at)

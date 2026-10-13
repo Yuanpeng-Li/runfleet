@@ -3005,7 +3005,7 @@ filter text, preset, sort and grouping persist in `~/.local/state/runfleet/ui.js
   the scope (like the cards and the default Jobs view; the Jobs view's `u` adds other users'),
   refresh indicator `⟳ 15s` (fastest current tick; a spinner replaces `⟳` while any probe is in flight), `R/O` in
   read-only mode, `idle ×4` when throttled, `paused (idle) — any key resumes` when paused. Clicking a host chip scopes to
-  it; clicking a red chip opens HostErrorScreen. A `⚙` chip at the right edge opens Settings (same as `,`). The
+  it; clicking a red chip opens HostErrorScreen. The `RunFleet` logo returns to the Fleet view from any screen; a `⚙` chip at the right edge opens Settings (same as `,`). The
   compact chip forms (name or number only, when the full chips do not fit) end in `:d`/`:a`/`:k` for unreachable,
   needs auth and host key (`✖lynx:a`).
 - **Stale data** (`HostState.stale(now)`: state ∉ {OK, DEGRADED}, or data older than 2 × the host's *effective* tick +
@@ -3356,7 +3356,7 @@ One login probe per sample, sections in this order:
 
 | Section (owner `slurm`) | Command (data values validated + `shlex.quote`d) | Timeout |
 |---|---|---|
-| `slurm.attach.node<i>` (ssh), `i` = index into `AttachPlan.nodes` | `timeout -k 2 12 ssh -T -a -x -o BatchMode=yes -o ControlMaster=no -o ControlPath=none -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ClearAllForwardings=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=1 -o LogLevel=ERROR -- <node> "timeout -k 1 10 sh -c 'echo <b64> \| base64 -d \| sh'"` | 14 |
+| `slurm.attach.node<i>` (ssh), `i` = index into `AttachPlan.nodes` | `timeout -k 2 12 ssh -T -a -x -o BatchMode=yes -o ControlMaster=no -o ControlPath=none -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o "GlobalKnownHostsFile=/etc/ssh/ssh_known_hosts /etc/ssh/ssh_known_hosts2 $HOME/.ssh/known_hosts $HOME/.ssh/known_hosts2" -o UpdateHostKeys=no -o ClearAllForwardings=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=1 -o LogLevel=ERROR -- <node> "timeout -k 1 10 sh -c 'echo <b64> \| base64 -d \| sh'"` | 14 |
 | `slurm.attach.node0` (srun; one node only) | `timeout -k 2 25 srun --jobid=<J> --overlap --job-name=rfprobe -N1 -n1 -w <node> --time=1 --quiet --input=none timeout -k 1 15 sh -c 'echo <b64> \| base64 -d \| sh'` | 27 |
 | `slurm.attach.audit` (late, last) | `echo @@steps; squeue -h -s -j <J> -o '%i %j' 2>&1; echo @@ssh; pgrep -u "$(id -un)" -f 'ControlPat[h]=none' \| wc -l; true` (`%T` is invalid with `-s` on all three clusters; the `[h]` keeps pgrep from matching this shell) | 10 |
 
@@ -3389,8 +3389,11 @@ Nested node sections (owner `node`, each `timeout -k 2 5` via framing; order fix
    script). The login probe (purpose `"attach"`) is rendered without a temp dir (`render` default for that purpose,
    §4.3): no `mktemp`, nothing written on the login host; each hop's stderr is captured in a variable.
 2. **login → node hop**: `ssh -T -a -x`, `BatchMode=yes`, **`ControlMaster=no ControlPath=none`** (no socket and no
-   ControlPersist process left on the login host), **`StrictHostKeyChecking=yes`** (never `accept-new`, never `no`) and
-   **`UpdateHostKeys=no`** (nothing appended to the login host's `~/.ssh/known_hosts`), `ClearAllForwardings=yes`,
+   ControlPersist process left on the login host), **`StrictHostKeyChecking=accept-new`** with
+   **`UserKnownHostsFile=/dev/null`** and the login host's system and user known_hosts files as
+   `GlobalKnownHostsFile` (a node key already recorded there must match — a changed key is refused; a node never
+   visited is accepted but recorded nowhere, since sites commonly ship no node keys and run `StrictHostKeyChecking no`
+   themselves), **`UpdateHostKeys=no`** (nothing appended to the login host's `~/.ssh/known_hosts`), `ClearAllForwardings=yes`,
    `ConnectTimeout=5`, `ServerAliveInterval=5 ServerAliveCountMax=1`, `LogLevel=ERROR`, all under `timeout -k 2 12`.
 3. **Node-side script**: read-only; no background processes, no temp dir (`render(tmp=False)`); each section `timeout
    -k 2 5`; the whole script under **`timeout -k 1 10`** on the node itself (a dropped `ssh -T` sends no SIGHUP, so a
@@ -3450,7 +3453,7 @@ Nested node sections (owner `node`, each `timeout -k 2 5` via framing; order fix
 | ssh refused before PAM (lyra) | `node_ssh="denied"`; `ssh+srun`/`srun` → NEEDS_CONSENT offer; `ssh` → BLOCKED + hint |
 | ssh lands in another own job (k2, several jobs on a node) | sample kept; GPU rows "GPUs of job 2332863 (ssh can only enter the newest job on n-40-01)"; srun offer if allowed |
 | pam_slurm_adopt "you have no active jobs on this node" | error "no job of yours on <node> — job moved or ended?"; core wakes `slurm.jobs`. With `LogLevel=ERROR` OpenSSH hides that banner and "Connection closed": a bare rc 255 without a message reads "ssh to <node> closed without a message — no job of yours there?" (kind SSH) |
-| `Host key verification failed` | error (kind HOSTKEY) "<node>'s host key is not known on the login host — run `ssh <node> true` there once"; srun offer (consent, reason = the error summary) if allowed; the same for DNS / REFUSED hop errors; ssh keeps its normal backoff / 3-failure stop |
+| `Host key verification failed` (a recorded node key changed) | error (kind HOSTKEY) "<node>'s host key changed (login host's known_hosts)" — `ssh-keygen -R <node>` there if the node was reinstalled; srun offer (consent, reason = the error summary) if allowed; the same for DNS / REFUSED hop errors; ssh keeps its normal backoff / 3-failure stop |
 | nvidia-smi hung (rc 124/125) | GPU rows missing, error "nvidia-smi hung on <node>"; audit dirty if stuck instances remain (D state on both node.self reads), inconclusive when the node timeout cut node.self |
 | srun cannot create the step | error with srun's stderr; no row counted |
 | login transport failure | JobLive without nodes + error; auto backoff; 3 failures → STOPPED |

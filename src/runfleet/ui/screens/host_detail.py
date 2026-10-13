@@ -173,6 +173,7 @@ class HostDetailScreen(FleetScreen):
         super().__init__()
         self.host = host
         self.show_others = False
+        self.gpu: int | None = None             # workstation: the GPU whose processes the table shows (all users)
         self.sort = "gpu_mem"
         self.reverse = False
         self.free_only = False
@@ -271,17 +272,25 @@ class HostDetailScreen(FleetScreen):
         ui = self.rf.service.config.ui
         me = snap.caps.remote_user if snap is not None and snap.caps is not None else None
         width = self._width()
-        self.query_one(GPUPanel).show(snap.gpus if snap else (), ui.gpu_util_thresholds, ui.gpu_mem_thresholds,
-                                      show_others=True, me=me)
+        gpus = snap.gpus if snap else ()
+        if self.gpu is not None and self.gpu not in {g.index for g in gpus}:
+            self.gpu = None                              # the GPU left the sample (driver reset, nvidia-smi hung)
+        panel = self.query_one(GPUPanel)
+        panel.show(gpus, ui.gpu_util_thresholds, ui.gpu_mem_thresholds, show_others=True, me=me, selected=self.gpu)
+        panel.border_subtitle = ("click it again or [ ] for all processes" if self.gpu is not None
+                                 else "click a GPU or [ ]: its processes" if gpus else "")
         self.query_one("#host-box", Static).update(host_metrics_line(state, width, ui.gpu_mem_thresholds))
         box = self.query_one("#procs-box")
-        box.border_title = "Processes (GPU: all users · tasks: mine)"
-        others = "others shown" if self.show_others else "others hidden"
-        box.border_subtitle = f"u: {others} · sort: {SORT_LABELS[self.sort]} {'▲' if self.reverse else '▼'}"
+        sort = f"sort: {SORT_LABELS[self.sort]} {'▲' if self.reverse else '▼'}"
+        if self.gpu is not None:
+            box.border_title = f"Processes on GPU {self.gpu} (all users)"
+            box.border_subtitle = sort
+        else:
+            box.border_title = "Processes (GPU: all users · tasks: mine)"
+            box.border_subtitle = f"u: {'others shown' if self.show_others else 'others hidden'} · {sort}"
         labels = {j.key: j.key.label for j in snap.jobs.values()} if snap else {}
-        self.query_one(ProcTable).show(snap.procs if snap else (), snap.gpus if snap else (), me=me,
-                                       show_others=self.show_others, sort=self.sort, reverse=self.reverse,
-                                       task_labels=labels)
+        self.query_one(ProcTable).show(snap.procs if snap else (), gpus, me=me, show_others=self.show_others,
+                                       sort=self.sort, reverse=self.reverse, task_labels=labels, gpu=self.gpu)
         self.query_one("#ws-conn", Static).update(Text("\n").join(connection_lines(state, now, width)))
 
     def _render_cluster(self, state: HostState, now: datetime) -> None:
@@ -383,6 +392,24 @@ class HostDetailScreen(FleetScreen):
         self.reverse = not self.reverse
         self.refresh_data(None)
 
+    def on_gpupanel_picked(self, event: GPUPanel.Picked) -> None:
+        """Click on a GPU row: the process table shows that GPU's processes (all users); the same GPU again: all."""
+        if self.cluster:
+            return
+        self.gpu = None if self.gpu == event.index else event.index
+        self.refresh_data(None)
+        self.query_one(ProcTable).focus()
+
+    def _step_gpu(self, step: int) -> None:
+        """``[`` / ``]`` on a workstation: all processes -> GPU 0 -> GPU 1 … -> all again."""
+        snap = self.state.snapshot
+        stops: list[int | None] = [None, *sorted(g.index for g in (snap.gpus if snap else ()))]
+        if len(stops) == 1:
+            return
+        idx = stops.index(self.gpu) if self.gpu in stops else 0
+        self.gpu = stops[(idx + step) % len(stops)]
+        self.refresh_data(None)
+
     def action_toggle_free(self) -> None:
         if not self.cluster:
             return
@@ -390,6 +417,10 @@ class HostDetailScreen(FleetScreen):
         self.refresh_data(None)
 
     def action_partition(self, step: int) -> None:
+        """``[`` / ``]``: the previous / next partition on a cluster, the previous / next GPU on a workstation."""
+        if not self.cluster:
+            self._step_gpu(step)
+            return
         snap = self.state.snapshot
         names = [p.name for p in snap.partitions] if snap else []
         if not names:

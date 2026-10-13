@@ -186,8 +186,9 @@ def hop(stderr: str, rc: int | None = 255, *, mode: str = "ssh", stdout: str = "
 
 
 @pytest.mark.parametrize("stderr,rc,kind,summary", [
-    ("No ED25519 host key is known for n-40-01 and you have requested strict checking.\nHost key verification "
-     "failed.", 255, ErrorKind.HOSTKEY, "n-40-01's host key is not known on the login host"),
+    ("@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key for n-40-01 has changed and you have "
+     "requested strict checking.\nHost key verification failed.", 255, ErrorKind.HOSTKEY,
+     "n-40-01's host key changed (login host's known_hosts)"),
     ("ssh: Could not resolve hostname n-40-01: Name or service not known", 255, ErrorKind.DNS,
      "login host cannot resolve n-40-01"),
     ("ssh: connect to host n-40-01 port 22: Connection timed out", 255, ErrorKind.TIMEOUT, "ssh to n-40-01 timed out"),
@@ -203,7 +204,7 @@ def test_ssh_hop_failures_are_classified(stderr: str, rc: int, kind: ErrorKind, 
     (e,) = live.errors
     assert (e.kind, e.summary, e.section) == (kind, summary, "slurm.attach.node0")
     if kind is ErrorKind.HOSTKEY:
-        assert "ssh n-40-01 true" in e.detail and "StrictHostKeyChecking=yes" in e.detail
+        assert "ssh-keygen -R n-40-01" in e.detail and "ssh n-40-01 true" in e.detail
 
 
 def test_hop_not_run_or_missing_tool() -> None:

@@ -222,6 +222,29 @@ async def test_detail_tabs_and_return(make_app: MakeApp) -> None:
         assert table(app).cursor_key == "k2:2332862"
 
 
+async def test_header_logo_goes_home(make_app: MakeApp) -> None:
+    """Clicking `RunFleet` in the header closes detail screens and shows the Fleet view."""
+    app, _svc = make_app()
+    async with app.run_test(size=BIG) as pilot:
+        await goto_jobs(pilot)
+        await move_to(pilot, app, "k2:2332862")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, JobDetailScreen)
+        app.action_open_host("k2")                             # a second level: host detail over job detail
+        await pilot.pause()
+        assert isinstance(app.screen, HostDetailScreen)
+        await pilot.click(FleetHeader, offset=(3, 0))          # " RunFleet …": the logo starts at column 1
+        await pilot.pause()
+        assert isinstance(app.screen, MainScreen) and app.screen.view == "fleet"
+        await pilot.press("tab")
+        await pilot.pause()
+        assert app.screen.view == "jobs"
+        await pilot.click(FleetHeader, offset=(3, 0))          # on the main screen too: back to Fleet
+        await pilot.pause()
+        assert app.screen.view == "fleet"
+
+
 async def test_failed_job_steps_and_explanation(make_app: MakeApp) -> None:
     app, svc = make_app()
     async with app.run_test(size=BIG) as pilot:
@@ -556,6 +579,40 @@ async def test_host_detail_processes_and_other_users(make_app: MakeApp) -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert isinstance(app.screen, JobDetailScreen) and app.screen.key.host == "labstation"
+
+
+async def test_host_detail_gpu_click_shows_its_processes(make_app: MakeApp) -> None:
+    """Workstation: a GPU row is clickable and narrows the process table to that GPU, other users included."""
+    app, svc = make_app()
+    async with app.run_test(size=BIG) as pilot:
+        app.action_open_host("labstation")
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, HostDetailScreen)
+        procs = screen.query_one(ProcTable)
+        assert 771002 not in procs.order                        # another user's process: hidden by default
+        await pilot.click("#gpu-panel", offset=(10, 3))         # border, header, GPU 0, GPU 1
+        await pilot.pause()
+        assert screen.gpu == 1 and procs.order == [771002]      # alice's eval.py on GPU 1, shown without `u`
+        assert screen.query_one("#procs-box").border_title == "Processes on GPU 1 (all users)"
+        assert "▸ 1" in str(screen.query_one("#gpu-panel").render())
+        assert app.focused is procs
+        await pilot.click("#gpu-panel", offset=(10, 3))         # the same GPU again: all processes
+        await pilot.pause()
+        assert screen.gpu is None and set(procs.order) == {363948, 363942}
+        await pilot.press("right_square_bracket")               # [ ] step all -> GPU 0 -> … -> all
+        await pilot.pause()
+        assert screen.gpu == 0 and procs.order == []
+        await pilot.press("right_square_bracket", "right_square_bracket", "right_square_bracket")
+        await pilot.pause()
+        assert screen.gpu == 3 and procs.order == [363948]
+        await pilot.press("right_square_bracket")
+        await pilot.pause()
+        assert screen.gpu is None
+        await pilot.press("left_square_bracket")
+        await pilot.pause()
+        assert screen.gpu == 3
+        assert "[/]" in [h[0] for h in __import__("runfleet.ui.keymap", fromlist=["x"]).hints(screen.help_contexts())]
 
 
 async def test_host_detail_cluster_partitions(make_app: MakeApp) -> None:

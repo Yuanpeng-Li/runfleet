@@ -124,13 +124,13 @@ async def test_srun_offer_is_shown_when_ssh_cannot_reach_the_node(make_app: Make
         await open_tab(pilot, app, K2)
         state = svc.attach_state(K2)
         assert state is not None
-        offer = AttachOffer("n-40-01", "n-40-01's host key is not known on the login host",
+        offer = AttachOffer("n-40-01", "n-40-01's host key changed (login host's known_hosts)",
                             "Read job 2332861 with srun?", "one permanent sacct row", "srun … -w n-40-01 …")
-        err = HostError(ErrorKind.HOSTKEY, "n-40-01's host key is not known on the login host")
+        err = HostError(ErrorKind.HOSTKEY, "n-40-01's host key changed (login host's known_hosts)")
         svc._attach_put(dataclasses.replace(state, status=AttachStatus.LIVE, live=None, error=err, offer=offer))
         await pilot.pause(0.4)
         box = text(app, "#attach-box")
-        assert "No reading yet" in box and "host key is not known" in box
+        assert "No reading yet" in box and "host key changed" in box
         assert "S reads job 2332861's own GPUs with srun on n-40-01" in box
 
 

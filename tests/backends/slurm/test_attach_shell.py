@@ -134,7 +134,9 @@ def test_attach_probe_through_real_shells(tmp_path: Path, shell: str, mode: str)
 
     argv = (tmp_path / "argv.log").read_text()
     if mode == "ssh":
-        assert "-o ControlMaster=no -o ControlPath=none -o StrictHostKeyChecking=yes -o UpdateHostKeys=no" in argv
+        assert ("-o ControlMaster=no -o ControlPath=none -o StrictHostKeyChecking=accept-new "
+                "-o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/etc/ssh/ssh_known_hosts "
+                f"/etc/ssh/ssh_known_hosts2 {os.environ['HOME']}/.ssh/known_hosts") in argv   # $HOME expanded there
         assert "-- n1 timeout -k 1 10 sh -c 'echo " in argv
     else:
         assert "--jobid=4242 --overlap --job-name=rfprobe -N1 -n1 -w n1 --time=1 --quiet --input=none timeout" in argv
@@ -164,7 +166,7 @@ def test_node_script_runs_alone_and_stays_within_its_timeouts(tmp_path: Path, sh
     env, environ = node_env(tmp_path, shell)
     script = attach.node_script(["4242", "999"], ["", "sNOPE00"])
     b64 = attach.encode(script)
-    remote = attach.ssh_cmd("n1", b64).split('"', 1)[1].rstrip('"')
+    remote = attach.ssh_cmd("n1", b64).split(" -- n1 ", 1)[1][1:-1]     # the double-quoted remote command
     out = subprocess.run([shell, "-c", remote], capture_output=True, env=environ, timeout=30, stdin=subprocess.DEVNULL)
     parsed = framing.parse(out.stdout, script)
     assert parsed.ended == len(attach.NODE_SECTIONS) and out.returncode == 0

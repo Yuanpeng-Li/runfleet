@@ -2,7 +2,8 @@
 
 One header line plus one row per GPU: index, model, temperature, power/limit, a utilisation bar and a memory bar
 sized to the panel width, and the processes on the GPU (``user/pid``, ``+N``). Pure rendering in
-:func:`gpu_panel_lines`; the widget only re-renders on data or size changes.
+:func:`gpu_panel_lines`; the widget only re-renders on data or size changes. A click on a GPU row posts
+:class:`GPUPanel.Picked` (host detail: show the processes on that GPU); ``selected`` marks one row.
 """
 
 from __future__ import annotations
@@ -10,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from rich.text import Text
+from textual import events
+from textual.message import Message
 from textual.widgets import Static
 
 from runfleet.models import GPU, GPUProcess
@@ -18,7 +21,8 @@ from runfleet.util import humanize
 
 
 def gpu_panel_lines(gpus: Sequence[GPU], width: int, util_t: tuple[float, float],
-                    mem_t: tuple[float, float], *, show_others: bool = True, me: str | None = None) -> list[Text]:
+                    mem_t: tuple[float, float], *, show_others: bool = True, me: str | None = None,
+                    selected: int | None = None) -> list[Text]:
     """Header + one row per GPU, fitted to ``width``: below 100 columns the power and process columns are dropped
     (the process table under the panel lists them) so the bars keep a useful length."""
     wide = width >= 100
@@ -34,7 +38,10 @@ def gpu_panel_lines(gpus: Sequence[GPU], width: int, util_t: tuple[float, float]
         head.append("   PROCS")
     lines = [render.fit(head, width)]
     for g in sorted(gpus, key=lambda x: x.index):
-        out = Text(f"{g.index:>3}  ", style=theme.muted())
+        if g.index == selected:
+            out = Text(f"▸{g.index:>2}  ", style=theme.accent())
+        else:
+            out = Text(f"{g.index:>3}  ", style=theme.muted())
         out.append(humanize.truncate(humanize.short_gpu_name(g.name), name_w - 1).ljust(name_w))
         temp = f"{g.temp_c:.0f}°C" if g.temp_c is not None else humanize.NA
         out.append(temp.rjust(5), style=theme.temp_style(g.temp_c))
@@ -86,7 +93,23 @@ class GPUPanel(Static):
     GPUPanel { height: auto; }
     """
 
+    rows: list[int] = []                       # GPU index of each row under the header, as last rendered
+
     def show(self, gpus: Sequence[GPU], util_t: tuple[float, float], mem_t: tuple[float, float], *,
-             show_others: bool, me: str | None) -> None:
+             show_others: bool, me: str | None, selected: int | None = None) -> None:
         width = self.size.width or (self.app.size.width - 4)
-        self.update(Text("\n").join(gpu_panel_lines(gpus, width, util_t, mem_t, show_others=show_others, me=me)))
+        self.rows = [g.index for g in sorted(gpus, key=lambda x: x.index)]
+        self.update(Text("\n").join(gpu_panel_lines(gpus, width, util_t, mem_t, show_others=show_others, me=me,
+                                                    selected=selected)))
+
+    class Picked(Message):
+        """A GPU row was clicked."""
+
+        def __init__(self, index: int) -> None:
+            super().__init__()
+            self.index = index
+
+    def on_click(self, event: events.Click) -> None:
+        offset = event.get_content_offset(self)
+        if offset is not None and 1 <= offset.y <= len(self.rows):      # line 0 is the column header
+            self.post_message(self.Picked(self.rows[offset.y - 1]))

@@ -125,12 +125,17 @@ class ProcTable(ClickTable):
 
     def show(self, procs: Sequence[Proc], gpus: Sequence[GPU], *, me: str | None, show_others: bool,
              sort: str, reverse: bool, task_labels: Mapping[Any, str],
-             steps: Mapping[int, str] | None = None) -> None:
-        """``steps``: a Slurm job's pid -> step map (Attach): STEP column, Slurm IDX, D / Z rows highlighted."""
+             steps: Mapping[int, str] | None = None, gpu: int | None = None) -> None:
+        """``steps``: a Slurm job's pid -> step map (Attach): STEP column, Slurm IDX, D / Z rows highlighted.
+        ``gpu``: only the processes on that GPU, whoever owns them (``show_others`` does not apply)."""
         slurm = steps is not None
         gm: dict[RowKey, tuple[list[str], float]] = {pid: v for pid, v in gpu_labels(gpus, slurm=slurm).items()}
         step_of: dict[RowKey, str] = {pid: s for pid, s in (steps or {}).items()}
-        rows: list[tuple[RowKey, Proc]] = [(p.pid, p) for p in procs if show_others or me is None or p.user == me]
+        if gpu is not None:
+            on_gpu = {p.pid for g in gpus if g.index == gpu for p in g.processes}
+            rows: list[tuple[RowKey, Proc]] = [(p.pid, p) for p in procs if p.pid in on_gpu]
+        else:
+            rows = [(p.pid, p) for p in procs if show_others or me is None or p.user == me]
         self._fill(rows, gm, step_of, {}, me=me, slurm=slurm, sort=sort, reverse=reverse, task_labels=task_labels)
 
     def show_live(self, nodes: Sequence[NodeRows], *, sort: str, reverse: bool) -> None:
