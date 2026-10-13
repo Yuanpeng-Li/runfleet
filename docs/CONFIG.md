@@ -54,7 +54,7 @@ poll_usage = "60s"             # floor 30s, never below the cluster's JobAcctGat
 poll_logstat = "2m"            # floor 60s
 sacct_window = "3d"
 log_templates = []
-attach = "ssh"                 # live GPU/process readings: ssh | ssh+srun | srun | off (see "Live readings")
+attach = "ssh+srun"            # live GPU/process readings: ssh | ssh+srun | srun | off (see "Live readings")
 attach_refresh = "15s"         # floor 10s; ssh mode only
 
 [defaults.workstation]         # every workstation
@@ -185,7 +185,7 @@ Slurm keys may be written flat in a `[[host]]` table and override `[defaults.slu
 | `sacct_window` | duration | `3d` | how far back finished jobs are listed |
 | `log_templates` | list | `[]` | where logs of finished jobs live when Slurm has forgotten them; placeholders `{workdir} {name} {jobid} {array_job} {task} {user}` (`{jobid}` is the raw job id) |
 | `protected_partitions`, `protected_qos` | list | `[]` | no action is ever offered on jobs in these partitions / QOS |
-| `attach` | `ssh` \| `ssh+srun` \| `srun` \| `off` | `ssh` | live per-GPU / per-process readings of a running job while its GPU or Procs tab is open (see *Live readings* below) |
+| `attach` | `ssh` \| `ssh+srun` \| `srun` \| `off` | `ssh+srun` | live per-GPU / per-process readings of a running job while its GPU or Procs tab is open (see *Live readings* below) |
 | `attach_refresh` | duration | `15s` | how often those readings refresh in `ssh` mode (floor 10 s); `srun` reads only when you press `r` |
 
 ### Live readings (`attach`)
@@ -196,15 +196,16 @@ holds how much GPU memory, the job's processes (with their Slurm step), and the 
 memory), OOM kills and current CPU use. It stops when you leave the tab, when RunFleet is in the background, and after
 10 minutes without a key press; only one job is read at a time.
 
-- `ssh` (default): from the login node, `ssh <node>` lands inside your job (pam_slurm_adopt). Nothing is recorded in
+- `ssh`: from the login node, `ssh <node>` lands inside your job (pam_slurm_adopt). Nothing is recorded in
   Slurm accounting. Works where the cluster runs pam_slurm_adopt (`k2` and `vega` above). If you have several jobs on
   one node, ssh can only enter the newest one; the GPU rows then belong to that job and say so.
 - `srun`: `srun --jobid <job> --overlap` runs a one-second read-only step in the job. **Every read adds one permanent
   row `<job>.N rfprobe` to `sacct`, which cannot be deleted.** RunFleet therefore never refreshes it on its own: each
   `r` asks for confirmation ("once" or "allow for this job until RunFleet exits"; there is no "never ask"). The only
   way on clusters whose compute nodes refuse ssh (`lyra` above).
-- `ssh+srun`: ssh, and the srun read is offered (with the same confirmation) when ssh is refused or lands in another
-  job.
+- `ssh+srun` (default): ssh where the cluster allows it; where compute nodes refuse ssh (learned from the first
+  refused read and remembered), the tab switches to srun and waits for `r`, with the same confirmation. The srun read
+  is also offered when ssh lands in another job or cannot reach the node. Set `ssh` to never be asked about srun.
 - `off`: never read compute nodes; the tabs show Slurm accounting (`sstat`) only.
 
 `--readonly` allows `ssh` reads but never runs `srun` (it writes accounting). Example for the fleet above:
@@ -212,7 +213,7 @@ memory), OOM kills and current CPU use. It stops when you leave the tab, when Ru
 ```toml
 [[host]]
 name = "lyra"
-attach = "srun"                # sshd refuses node logins; each read asks first and adds one sacct row
+attach = "srun"                # optional (ssh+srun finds out too): skips the first, refused ssh try
 ```
 
 Workstation keys, flat in `[[host]]` or in `[defaults.workstation]`:

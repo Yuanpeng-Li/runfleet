@@ -80,6 +80,7 @@ async def test_vega_live_rows_and_idle_flag_on_the_second_sample(make_app: MakeA
 
 async def test_k2_landed_in_another_job_says_whose_gpus(make_app: MakeApp) -> None:
     app, svc = make_app()
+    svc.attach_setting["k2"] = "ssh"
     async with app.run_test(size=BIG) as pilot:
         await open_tab(pilot, app, K2)
         box = text(app, "#attach-box")
@@ -221,10 +222,10 @@ async def test_blocked_when_attach_is_off_and_hint_when_ssh_is_refused(make_app:
         await open_tab(pilot, app, LYRA_LIVE_KEY)
         box = text(app, "#attach-box")
         assert "lyra refuses ssh to compute nodes" in box
-        assert 'add attach = "ssh+srun" to [[host]] lyra to read via srun' in box
+        assert 'use attach = "ssh+srun" (the default) for lyra to read via srun' in box
         await pilot.press("r")
         await pilot.pause(0.2)
-        assert any('add attach = "ssh+srun"' in m for m in toasts(app))
+        assert any('use attach = "ssh+srun"' in m for m in toasts(app))
 
 
 # ---------------------------------------------------------------- lifecycle

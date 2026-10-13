@@ -1260,7 +1260,7 @@ class SlurmSettings:
     log_templates: tuple[str, ...] = ()
     protected_partitions: tuple[str, ...] = ()
     protected_qos: tuple[str, ...] = ()
-    attach: AttachSetting = "ssh"    # Attach (§7.16): "ssh" | "ssh+srun" | "srun" | "off"
+    attach: AttachSetting = "ssh+srun"   # Attach (§7.16): "ssh" | "ssh+srun" | "srun" | "off"
     attach_refresh: float = 15       # floor 10; ssh auto-refresh period (srun never auto-refreshes)
 
 @dataclass(frozen=True, slots=True)
@@ -3289,11 +3289,11 @@ compute node**; Attach reads ONE job's node(s) on demand, only while the user lo
 | Mode | Path | Trace | Where |
 |---|---|---|---|
 | `ssh` | login host → `ssh <node>`; pam_slurm_adopt puts the session into the user's job on that node (the **newest** one when several: the user cannot choose) | none in accounting (session CPU counts to the adopted job's `.extern`); a login line in the node's sshd log | k2, vega |
-| `srun` | `srun --jobid=J --overlap` one-shot step on the job's node; inherits the job's GPUs | **ONE permanent sacct row** `J.N rfprobe COMPLETED` per sample, not deletable | the only path on lyra; offered on k2/vega with `ssh+srun` |
+| `srun` | `srun --jobid=J --overlap` one-shot step on the job's node; inherits the job's GPUs | **ONE permanent sacct row** `J.N rfprobe COMPLETED` per sample, not deletable | the only path on lyra (the default `ssh+srun` switches to it); offered on k2/vega as a fallback |
 | `exporter` | *future only*: one HTTP read of a node exporter (e.g. a jobstats / Prometheus exporter, where a site runs one) | none on the node | only with the site's permission; not in `AttachMode` |
 
 Config (per host, flat key or `[defaults.slurm]`, §8.2): `attach = "ssh" | "ssh+srun" | "srun" | "off"` (default
-`"ssh"`), `attach_refresh` (duration, default `15s`, floor `10s`, ssh only). Core policy, applied to the backend's
+`"ssh+srun"`), `attach_refresh` (duration, default `15s`, floor `10s`, ssh only). Core policy, applied to the backend's
 technical modes (`SchedulerCollector.attach_modes`: RUNNING job with nodes; no `ssh` when `caps.node_ssh ==
 "denied"`; no `srun` without srun/--overlap):
 
@@ -3301,9 +3301,9 @@ technical modes (`SchedulerCollector.attach_modes`: RUNNING job with nodes; no `
 |---|---|---|---|
 | `off` | – | – | BLOCKED "attach is off for <host>" |
 | `ssh` | yes | – | mode ssh: LIVE (auto) |
-| `ssh` | no (denied) | (yes) | BLOCKED "<host> refuses ssh to compute nodes" + `hint` = `add attach = "ssh+srun" to [[host]] <host> to read via srun; each read adds one permanent sacct row` |
+| `ssh` | no (denied) | (yes) | BLOCKED "<host> refuses ssh to compute nodes" + `hint` = `use attach = "ssh+srun" (the default) for <host> to read via srun; each read adds one permanent sacct row` (only an explicit `attach = "ssh"` gets here) |
 | `ssh+srun` | yes | yes | mode ssh: LIVE; `offer` (srun) appears when ssh lands in another job, or when the last ssh sample could not reach a node (HOSTKEY / DNS / REFUSED hop error; reason = that error's summary) — consent only, never run by itself |
-| `ssh+srun` / `srun` | no / – | yes | mode srun: NEEDS_CONSENT (IDLE once consent = "job") |
+| `ssh+srun` / `srun` | no / – | yes | mode srun: NEEDS_CONSENT (IDLE once consent = "job"); the refused ssh sample that led here is the offer's reason, not `error` |
 | any srun-only case under `--readonly` | | | BLOCKED "read-only mode: srun adds a permanent sacct row" (no offer) |
 | job not RUNNING / not Slurm / host not OK·DEGRADED | | | BLOCKED with that reason |
 
@@ -3537,7 +3537,7 @@ poll_usage = "60s"             # floor 30s (never below JobAcctGatherFrequency)
 poll_logstat = "2m"            # floor 60s
 sacct_window = "3d"
 log_templates = []             # e.g. ["{workdir}/logs/{name}_{jobid}.out"]
-attach = "ssh"                 # Attach (§7.16): "ssh" | "ssh+srun" | "srun" | "off"
+attach = "ssh+srun"            # Attach (§7.16): "ssh" | "ssh+srun" | "srun" | "off"
 attach_refresh = "15s"         # floor 10s; ssh auto-refresh only (srun never auto-refreshes)
 
 [defaults.workstation]         # → HostConfig.workstation
@@ -3562,7 +3562,7 @@ log_templates = ["{workdir}/logs/{name}_{jobid}.out"]
 
 [[host]]
 name = "lyra"                  # ~/.ssh/config: ControlMaster false, no ControlPath, ProxyJump jumpvm → mux "managed"
-attach = "srun"                # sshd refuses node logins; every live read asks first and adds one sacct row (§7.16)
+attach = "srun"                # sshd refuses node logins (ssh+srun learns it too); every live read asks first (§7.16)
 
 [[host]]
 name = "labstation"            # ProxyJump jumpvm, user ControlPath → mux "user"

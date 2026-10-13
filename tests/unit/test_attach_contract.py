@@ -22,7 +22,7 @@ T0 = datetime(2026, 9, 7, 10, 42, 37, tzinfo=UTC)
 # ---------------------------------------------------------------- config
 def test_attach_defaults() -> None:
     s = SlurmSettings()
-    assert s.attach == "ssh" and s.attach_refresh == 15
+    assert s.attach == "ssh+srun" and s.attach_refresh == 15
     assert ATTACH_SETTINGS == ("ssh", "ssh+srun", "srun", "off")
 
 
@@ -177,7 +177,7 @@ async def test_fleet_service_attach_placeholder_until_phase_2() -> None:
     key = m.JobKey("k2", "1")
     assert svc.attach_state(key) is None
     st = svc.attach_start(key)
-    assert st.status is m.AttachStatus.BLOCKED and st.setting == "ssh" and st.blocked
+    assert st.status is m.AttachStatus.BLOCKED and st.setting == "ssh+srun" and st.blocked
     svc.attach_stop()
     with pytest.raises(AttachBlocked):
         await svc.attach_now(key)

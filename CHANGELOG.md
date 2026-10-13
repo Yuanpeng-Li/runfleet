@@ -5,10 +5,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-13
+
 ### Added
 - **Clickable GPUs on workstations**: in a workstation's host detail, clicking a GPU row (or `[` / `]`) lists only
   the processes on that GPU, other users' included; the same GPU again shows all processes.
 - **Header logo goes home**: clicking `RunFleet` at the top left closes detail screens and shows the Fleet view.
+
+### Changed
+- **Live readings switch to srun by themselves where nodes refuse ssh**: `attach` now defaults to `ssh+srun`. On a
+  cluster whose compute nodes refuse ssh even inside your job, the first refused read switches the GPU / Procs tab to
+  srun (remembered per host) and waits for `r`; every srun read still asks first and adds one permanent sacct row.
+  In 0.1.0 such hosts stopped at "refuses ssh to compute nodes" until you set `attach = "ssh+srun"` yourself. Set
+  `attach = "ssh"` to keep that behaviour.
+
+### Fixed
+- **Attach on nodes you never ssh'ed to**: the login → node hop required the node's host key to be in the login host's
+  known_hosts already, so on clusters that ship no node keys (and run `StrictHostKeyChecking no` themselves) live
+  readings failed with "host key is not known". A node key that is recorded must still match; an unknown node is now
+  accepted without being written to any known_hosts file.
+
+## [0.1.0] - 2026-10-12
+
+First public release.
+
+### Added
 - **Notifications, watch list, "since you were away"**: your jobs that fail, restart or run low on time (and, for
   jobs watched with `w`, start, complete or sit GPU-idle) raise a toast, a terminal notification (OSC 9 / OSC 777 /
   bell, tmux passthrough) and an optional local `[notify] command`; bursts become one line per host, palette ›
@@ -50,10 +71,6 @@ All notable changes to this project are documented here. The format follows
   counts only stuck or abandoned queries, not a job's own `nvidia-smi -l`.
 
 ### Fixed
-- **Attach on nodes you never ssh'ed to**: the login → node hop required the node's host key to be in the login host's
-  known_hosts already, so on clusters that ship no node keys (and run `StrictHostKeyChecking no` themselves) live
-  readings failed with "host key is not known". A node key that is recorded must still match; an unknown node is now
-  accepted without being written to any known_hosts file.
 - `s` on a **running Slurm job** opened a login-node shell. It now lands on the job's compute node inside the job
   (`srun --jobid --overlap --pty`, the job's GPUs visible; also where sshd refuses node logins). Multi-node
   jobs ask which node. Pending / finished jobs keep the login-node shell in `WorkDir`.
@@ -204,3 +221,7 @@ All notable changes to this project are documented here. The format follows
 - `scripts/smoke_real.sh HOST …`: read-only smoke test against real hosts that counts ssh sessions per host (manual,
   opt-in with `--yes`); `scripts/gen_docs.py`; `scripts/screenshots.py`.
 - CI: lint, types and tests on Python 3.11 and 3.13, plus a packaging job that runs the demo from the built wheel.
+
+[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/Yuanpeng-Li/runfleet/releases/tag/v0.1.0

@@ -134,23 +134,25 @@ or closing the job stops it; dialogs on top (help, the srun question) do not.
  accounting (sstat, 30s ago)  Σ170% / 2 GPUs · gpumem 120G
 ```
 
-How it reads the node depends on the host's `attach` setting (`docs/CONFIG.md`, *Live readings*):
+How it reads the node depends on the host's `attach` setting (`docs/CONFIG.md`, *Live readings*). The default,
+`ssh+srun`, uses ssh where the cluster allows it and switches to srun where compute nodes refuse ssh:
 
-- **`ssh`** (default; clusters with pam_slurm_adopt, like `k2` and `vega` in the demo): `ssh <node>` from the login
+- **ssh** (clusters with pam_slurm_adopt, like `k2` and `vega` in the demo): `ssh <node>` from the login
   host. It leaves no trace in Slurm accounting and refreshes every `attach_refresh` (15 s) while the tab is open, the
   terminal has the focus and you have pressed a key in the last 10 minutes (`Paused` / `Stopped` say which rule held
   it; `r` resumes). `a` turns the auto-refresh off and on; `r` reads at once. `IDX` is Slurm's GPU number (`?` when it
   cannot be known for sure — never a guess).
 - If the node puts the ssh session into **another of your jobs** (a node runs several of them; ssh can only enter the
   newest), the tab says so: `ssh landed in job 2332863 …; GPUs shown belong to 2332863`. The cgroup and processes of
-  the job you opened are still right. With `attach = "ssh+srun"`, `S` reads the job's own GPUs with srun.
-- **`srun`** (clusters that refuse ssh to compute nodes, like `lyra` in the demo; or `ssh+srun` as fallback): a
-  one-shot `srun --overlap` step inside the job. Each read leaves **one permanent row** (`<job>.N rfprobe`) in the
-  job's `sacct` history, so it never happens by itself: `r` asks first, showing the exact command, with **Once**,
-  **Allow for this job (this session)** (no more questions for this job until RunFleet exits; every read still adds a
-  row) and **Cancel**. The status line counts the rows added this session. There is no "don't ask again".
+  the job you opened are still right. `S` reads the job's own GPUs with srun (not with `attach = "ssh"`).
+- **srun** (clusters that refuse ssh to compute nodes, like `lyra` in the demo: the first refused ssh read switches
+  the job to srun, and the host remembers it): a one-shot `srun --overlap` step inside the job. Each read leaves
+  **one permanent row** (`<job>.N rfprobe`) in the job's `sacct` history, so it never happens by itself: `r` asks
+  first, showing the exact command, with **Once**, **Allow for this job (this session)** (no more questions for this
+  job until RunFleet exits; every read still adds a row) and **Cancel**. The status line counts the rows added this
+  session. There is no "don't ask again".
 - **`off`**, or `--readonly` where srun is the only way: the tab says why (`Live readings unavailable · …`) and, when
-  a setting would help, the exact line to add and what it costs. `--readonly` still allows ssh reads.
+  a setting would help, the setting to use and what it costs. `--readonly` still allows ssh reads.
 
 `clean ✓` means the read left nothing behind (no probe step, no ssh client, no stuck `nvidia-smi`); a red
 `leftovers` badge names what remained. Hints: a GPU that held memory at < 5 % utilisation for two reads in a row

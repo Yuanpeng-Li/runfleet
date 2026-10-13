@@ -346,14 +346,17 @@ async def test_ssh_denied_is_learned_and_blocks_with_the_hint(tmp_path: Path, wo
     await cache.close()
 
 
-async def test_ssh_denied_with_ssh_srun_goes_to_the_srun_offer(world: Callable[..., World]) -> None:
-    w = await world(k2("ssh+srun")).started()
+@pytest.mark.parametrize("default", [False, True], ids=["ssh+srun", "default"])
+async def test_ssh_denied_with_ssh_srun_goes_to_the_srun_offer(world: Callable[..., World], default: bool) -> None:
+    host = HostConfig(name="k2", ssh="k2", backend="slurm") if default else k2("ssh+srun")
+    w = await world(host).started()
     w.t.set_result("slurm.attach.node0", "denied")
     w.svc.attach_start(K)
     await settle()
     st = w.state()
-    assert st.status is AttachStatus.NEEDS_CONSENT and st.mode == "srun"
+    assert st.status is AttachStatus.NEEDS_CONSENT and st.mode == "srun" and st.setting == "ssh+srun"
     assert st.offer is not None and st.offer.reason == "k2 refuses ssh to compute nodes"
+    assert st.error is None                                            # the refusal is the reason, not a failed read
     await run_for(w.clock, 60, step=1.0)
     assert len(w.attach_probes()) == 1
     w.t.set_result("slurm.attach.node0", NODE_OK)

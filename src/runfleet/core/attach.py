@@ -63,8 +63,8 @@ _F = TypeVar("_F", bound="asyncio.Future[Any]")
 
 
 def srun_hint(host: str) -> str:
-    return (f'add attach = "ssh+srun" to [[host]] {host} to read via srun; each read adds one permanent sacct '
-            "row")
+    return (f'use attach = "ssh+srun" (the default) for {host} to read via srun; each read adds one permanent '
+            "sacct row")
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,8 +466,10 @@ class AttachService:
                     next_at = None
                 action = "sample" if due <= now_m else min(due - now_m, AUTOSTOP_S - idle_for)
         blocked = status is AttachStatus.BLOCKED
+        # an ssh failure that moved the job to srun is the reason shown with the offer, not a failed read of its own
+        moot = pol.mode == "srun" and e.last is not None and e.last.mode == "ssh"
         state = AttachState(key=e.key, status=status, setting=pol.setting, mode=pol.mode, live=e.live,
-                            error=e.error, auto=e.auto, refresh_s=pol.refresh_s if pol.mode == "ssh" else None,
+                            error=None if moot else e.error, auto=e.auto, refresh_s=pol.refresh_s if pol.mode == "ssh" else None,
                             next_at=next_at, consent=e.consent, offer=pol.offer,
                             blocked=pol.blocked if blocked else None, hint=pol.hint if blocked else None,
                             stopped=stopped, srun_rows=e.srun_rows, node=e.node, failures=e.failures)

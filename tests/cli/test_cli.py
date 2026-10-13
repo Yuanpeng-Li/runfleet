@@ -115,7 +115,7 @@ def test_global_options_work_before_and_after_the_subcommand() -> None:
 def test_version_and_bad_usage(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["--version"])
-    assert exc.value.code == 0 and capsys.readouterr().out.strip() == "runfleet 0.1.0"
+    assert exc.value.code == 0 and capsys.readouterr().out.strip() == "runfleet 0.2.0"
     with pytest.raises(SystemExit) as exc:
         cli.main(["--frobnicate"])
     assert exc.value.code == 2
@@ -126,7 +126,7 @@ def test_version_and_bad_usage(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_python_m_runfleet_entry_point() -> None:
     out = subprocess.run([sys.executable, "-m", "runfleet", "--version"], capture_output=True, text=True, timeout=60)
-    assert out.returncode == 0 and out.stdout.strip() == "runfleet 0.1.0"
+    assert out.returncode == 0 and out.stdout.strip() == "runfleet 0.2.0"
 
 
 # ---------------------------------------------------------------------------------------------------- TUI start

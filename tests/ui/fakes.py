@@ -593,7 +593,7 @@ class FakeService:
         self.port_forwards: dict[int, PortForward] = {}   # forward_port / cancel_forward (no ssh)
         self.forward_blocks: dict[str, str] = {}          # host -> forward_blocker() reason
         self.cancel_error: str | None = None              # set: cancel_forward raises it (the forward stays)
-        # Attach (§7.16): per-host setting overrides (the fake world's config keeps the default "ssh") and the
+        # Attach (§7.16): per-host setting overrides (the fake world's config keeps the default "ssh+srun") and the
         # learned node_ssh capability; states/samples per job
         self.attach_setting: dict[str, Literal["ssh", "ssh+srun", "srun", "off"]] = {"lyra": "srun"}
         self.node_ssh: dict[str, str] = {"k2": "adopt", "vega": "adopt", "lyra": "denied"}
@@ -1034,7 +1034,7 @@ class FakeService:
             blocked = "read-only mode: srun adds a permanent sacct row"
         else:
             blocked = f"{key.host} refuses ssh to compute nodes"
-            hint = (f'add attach = "ssh+srun" to [[host]] {key.host} to read via srun; '
+            hint = (f'use attach = "ssh+srun" (the default) for {key.host} to read via srun; '
                     "each read adds one permanent sacct row")
         return AttachState(key, AttachStatus.BLOCKED, setting, blocked=blocked, hint=hint, **keep)
 

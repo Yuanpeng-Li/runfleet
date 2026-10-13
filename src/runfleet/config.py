@@ -35,7 +35,7 @@ class SlurmSettings:
     log_templates: tuple[str, ...] = ()
     protected_partitions: tuple[str, ...] = ()
     protected_qos: tuple[str, ...] = ()
-    attach: AttachSetting = "ssh"    # Attach (§7.16): how JobDetail's GPU/Procs tab may read a running job's node
+    attach: AttachSetting = "ssh+srun"   # Attach (§7.16): how JobDetail's GPU/Procs tab may read a running job's node
     attach_refresh: float = 15       # floor 10; ssh auto-refresh period (srun never auto-refreshes)
 
 @dataclass(frozen=True, slots=True)
