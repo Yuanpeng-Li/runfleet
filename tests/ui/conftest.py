@@ -24,6 +24,12 @@ def _deterministic_ui(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> Iterato
         monkeypatch.setenv(var, str(tmp_path / var.lower()))
     monkeypatch.setenv("TZ", "UTC")
     monkeypatch.delenv("NO_COLOR", raising=False)
+    # a truecolor terminal, whatever runs the tests: CI runners have no TERM, which Rich reads as 16 colours (and the
+    # theme then rightly picks reverse cursor rows); RUNFLEET_THEME / TEXTUAL_COLOR_SYSTEM must not leak in either
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    for var in ("RUNFLEET_THEME", "TEXTUAL_COLOR_SYSTEM", "COLORFGBG"):
+        monkeypatch.delenv(var, raising=False)
     time.tzset()
     monkeypatch.setattr(app_module, "ui_state_path", lambda: None)
     monkeypatch.setattr(JobsView, "PEEK_DWELL", 0.0)

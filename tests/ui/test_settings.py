@@ -633,13 +633,13 @@ async def test_about_theme_row_shows_the_mode_runfleet_theme_forces(make_app: Ma
             screen.selected["about"] = 0
             screen.redraw()
             await pilot.pause()
-            row = next(line for line in panel_text(app).splitlines() if "theme" in line)
+            row = next(line for line in panel_text(app).splitlines() if line.lstrip(" ▸").startswith("theme "))
             assert "light → dark" in row and "RUNFLEET_THEME" in row and "#1e1e2e" not in row
             monkeypatch.delenv("RUNFLEET_THEME")
             app.set_theme_choice("light")
             screen.redraw()
             await pilot.pause()
-            row = next(line for line in panel_text(app).splitlines() if "theme" in line)
+            row = next(line for line in panel_text(app).splitlines() if line.lstrip(" ▸").startswith("theme "))
             assert "light → " not in row and "light" in row and "RUNFLEET_THEME" not in row
     finally:
         theme.configure("dark")
