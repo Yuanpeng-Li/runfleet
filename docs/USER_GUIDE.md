@@ -16,6 +16,7 @@ Configuration keys are in [CONFIG.md](CONFIG.md); the design and its reasoning i
 | `runfleet hosts import [--all \| ALIAS …] [--write]` | Probes aliases read-only (`BatchMode`, at most `max_parallel_ssh` at a time, one line per host as it answers) and prints what each one is (Slurm version, workstation, needs auth, unreachable). `--write` saves the usable ones (including hosts that only need a login) to the config; an existing file is appended to, never rewritten, and aliases already in it are reported as "already configured". Unreachable hosts are listed with the command to add them later. |
 | `runfleet doctor [HOST …] [--reset]` | Per host: `ssh -G` summary, multiplexing mode, ProxyJump rewrite, master check, probe latency, detected profile, capabilities, missing tools, clock skew, GPU accounting. `--reset` closes RunFleet-managed ssh masters first. |
 | `runfleet snapshot [HOST …] [--json] [--timeout SEC]` | Polls every host once and prints a table (your jobs by state; your GPUs: allocated GPUs on a cluster, `in use/total` on a workstation), or with `--json` a document with schema `runfleet.snapshot/1` (status, capabilities, jobs, GPUs, processes, nodes and partitions per host). |
+| `runfleet update [--check] [--force]` | Updates RunFleet to the newest version on GitHub: finds out how it was installed (uv tool, pipx, a git clone), lists what changed since your version (from CHANGELOG.md), runs the matching command and prints the new version. `--check` only says whether a newer version exists; `--force` runs the update even when none is known (GitHub unreachable, or new commits without a new version number). A copy run with `uvx` or installed with plain pip prints the command to run instead. Exit `1` when the update failed. |
 | `runfleet wait HOST:JOBID … [--timeout SEC] [--json]` | Waits until the jobs end, for scripts and agents (`runfleet wait k2:2332861 && ./eval.sh`). Polls just those hosts like an unattended RunFleet (normal cadence, 4× slower after 10 minutes, never paused), read-only, and prints every state change (`--json`: one `runfleet.wait/1` object per line). `k2:31270818` waits for every task of that array; `lynx:p642229` names a workstation task. Exit `0` all ended COMPLETED · `1` one ended otherwise (failed, cancelled, timeout, a task's unknown exit) · `2` `--timeout` passed · `3` error (unknown host or job, a host that needs a login — run `runfleet connect` first — or is unreachable for 10 minutes). |
 
 Global options (anywhere on the command line): `-c PATH` config file, `--readonly` (every action disabled),
@@ -100,7 +101,11 @@ a tab):
   by hand shows as `custom` and stays until you change that row). `space` steps to the next value; click a value to
   pick it. Changes apply at once and are saved in `[general]` / `[notify]` (the default view takes effect at the next
   start). The notification command hook is set in config.toml only; the group heading says whether one is set.
-- *About*: the config file (`enter` or `e` opens it in `$EDITOR`), the log, the state directory, the version.
+- *About*: the config file (`enter` or `e` opens it in `$EDITOR`), the log, the state directory, the version. On the
+  version row `enter` asks GitHub for the newest version. When a newer one exists, `enter` and `enter` again quit,
+  update RunFleet (as `runfleet update` does, in the terminal) and start it again with the same arguments; a failed
+  update leaves its output on the terminal. *Update RunFleet* in the palette goes there directly. At start RunFleet
+  checks at most once a day (`general.update_check`) and announces each new version once with a toast.
 
 Your comments and formatting in `config.toml` are kept. If the file cannot be written (a read-only dotfiles
 directory, a full disk) the panel says so and nothing changes. With `--demo` nothing is saved (the panel says so).

@@ -29,7 +29,7 @@ PKG_DIR = Path(runfleet.__file__).resolve().parent
 
 # Every module of §3.2 (dotted, relative to `runfleet`).
 EXPECTED_MODULES = """
-__main__ cli export models errors config configedit sshconfig paths debugdump wait
+__main__ cli export models errors config configedit sshconfig paths debugdump wait update
 util util.shell util.slurmfmt util.humanize util.logscan util.efficiency
 probe probe.section probe.framing
 transport transport.base transport.openssh transport.mux transport.spawn transport.classify transport.local

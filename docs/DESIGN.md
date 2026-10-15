@@ -255,6 +255,7 @@ src/runfleet/
   paths.py               platformdirs locations (config, state, cache, mux dir, ssh logs) [WP1]
   debugdump.py           `--debug` raw probe dumps (wire format, rotated per host) under <state>/debug [WP1]
   wait.py                `runfleet wait HOST:JOBID …`: pollers for those hosts until the jobs end (§8.5)  [WP4]
+  update.py              `runfleet update`, the daily update check, install detection, relaunch (§8.6)  [WP4]
   util/
     shell.py             shlex helpers, id/pid/path validators                          [WP1]
     slurmfmt.py          Slurm durations/timestamps/memory/TRES/hostlist/state-suffix parsing  [WP2]
@@ -1329,6 +1330,7 @@ class GeneralSettings:
     refresh_multiplier: float = 1.0
     pager: str = ""                  # "" -> $PAGER, else "less -R +G"
     remember_hosts: bool = True      # hosts named on the command line are saved once they answer (§8.4)
+    update_check: bool = True        # once a day, ask GitHub for the newest RunFleet version (§8.6)
 
 @dataclass(frozen=True, slots=True)
 class UISettings:
@@ -3139,7 +3141,7 @@ fuzzy-matched commands — no command grammar: `Fleet view`, `Jobs view`,
 `GPUs view`, `Scope: all` / `Scope: <host>`, `Host detail: <host>`, `Connect <host>`, `Refresh <host>` / `Refresh all`,
 `Enable <host>` / `Disable <host>`, `State preset: fresh|active|queued|failed|all`, `Sort by <column>`, `Group by
 none|host|array`, `Doctor <host>` (runs `FleetAPI.doctor`, shows the report in a modal), `Settings` / `Settings:
-general` / `Settings: about`, `Action log`, `Notifications` / `Since you were away` (§7.14), `Log in to all hosts
+general` / `Settings: about`, `Update RunFleet` (§8.6), `Action log`, `Notifications` / `Since you were away` (§7.14), `Log in to all hosts
 needing auth` / `Forward a port…` / `Forwards` (§7.15), `RunFleet log`
 (`run_external(service.local_pager_argv())`: the local pager on `runfleet.log`, not LogScreen), `Help`, `Quit`.
 
@@ -3239,7 +3241,10 @@ it. Everything goes through FleetAPI (§3.7).
   the [[host]] tables and the first host's comment block) and is live because `Alerts` reads `config.notify` on every
   batch. A value not in the list shows as `custom …`. The description line explains the highlighted setting.
 - **About**: config file (`↵`/`e`: `$VISUAL`/`$EDITOR`/`vi` via `run_external`; hand edits apply at the next start),
-  log (`↵`: local pager), state dir, `~/.ssh/config` alias count, version.
+  log (`↵`: local pager), state dir, `~/.ssh/config` alias count, version. The version row's note is the update
+  state (§8.6): `↵ check for updates` / `checking …` / `<v> available · ↵ update` / `newest · ↵ check again` /
+  `check failed · ↵ retry`. `↵` checks (forced) unless a newer version is known; then it arms (`confirm = ":update"`,
+  the message names the install's update command) and `↵` again calls `app.request_update()`; `esc` disarms.
 - `--demo`: works on an in-memory host list (`config_path` None), says `demo — not saved`, writes nothing.
 - While the panel is the top screen the base screen's HintBar is hidden (app class `-settings-open`): the panel has its
   own hint line. Right-hand notes keep at least one space to the (truncated) value.
@@ -3577,6 +3582,7 @@ Nested node sections (owner `node`, each `timeout -k 2 5` via framing; order fix
 | `~/.config/runfleet/config.toml` | user config (optional) |
 | `~/.local/state/runfleet/cache.sqlite` | cache (§5.5) |
 | `~/.local/state/runfleet/ui.json` | view, sort, filter text, state preset, grouping |
+| `~/.local/state/runfleet/update.json` | update check (§8.6): newest version on main, when asked, the last version announced |
 | `~/.local/state/runfleet/runfleet.log` | rotating log (5 MB × 3); `--debug` raises the level and adds `debug/` raw dumps; `--demo` records carry `[demo]` |
 | `~/.local/state/runfleet/ssh-<host>.log` | `-E` log of master creation / connect (§4.2) |
 | `$XDG_RUNTIME_DIR/runfleet/` (else `~/.cache/runfleet/cm/`) | managed ControlMaster sockets, per-host `instance.lock.*` (0700) |
@@ -3600,6 +3606,7 @@ max_parallel_ssh = 8
 refresh_multiplier = 1.0
 pager = ""                     # default: $PAGER, else "less -R +G"
 remember_hosts = true          # `runfleet k2` saves k2 here once it answers (Settings › General)
+update_check = true            # once a day, ask GitHub for the newest RunFleet version (§8.6)
 
 [ui]
 gpu_util_thresholds = [10, 75]
@@ -3715,6 +3722,7 @@ runfleet hosts list | import [--all | ALIAS ...] [--write]
 runfleet doctor [HOST ...] [--reset]
 runfleet snapshot [HOST ...] [--json] [--timeout SEC]
 runfleet wait HOST:JOBID ... [--timeout SEC] [--json]
+runfleet update [--check] [--force]           update this install to the newest version on GitHub (§8.6)
 ```
 `wait` (`wait.py`) builds a FleetService for just the targets' hosts (named hosts enabled, `readonly`, no cache: a
 cached row is not news, `idle_pause_after` effectively infinite so an unattended wait keeps polling; the ×4 idle
@@ -3744,10 +3752,56 @@ first (`prepare_connect`) and says "already connected" when a working master is 
 `runfleet.snapshot/1`: `{"schema", "generated_at", "hosts": [{"name", "status", "caps", "jobs": [...], "gpus": [...],
 "procs": [...], "nodes": [...], "partitions": [...]}]}` with fields as in §3.3 via `models.to_json`.
 
+`runfleet update` is §8.6.
+
 `runfleet doctor` prints `FleetAPI.doctor()` per host: `ssh -G` summary (user, hostname, proxyjump, controlpath,
 controlpersist), chosen mux mode and jump rewrite, `-O check`, probe latency, profile, capabilities and missing tools,
 timezone/skew, `gpu_tres`, warnings (e.g. "lyra: no GPU accounting — job GPU util unavailable"). `--reset` closes
 managed masters.
+
+### 8.6 Updates (`update.py`, `install.sh`)
+RunFleet installs from GitHub main (no PyPI release). **Newest version** = `__version__` in main's
+`src/runfleet/__init__.py`, fetched from `raw.githubusercontent.com` (urllib, 5 s timeout, `User-Agent:
+runfleet/<version>`, nothing else sent); "what changed" = the CHANGELOG.md sections newer than this version (≤ 30
+lines). Versions compare as `X.Y.Z` integers; anything else is never "newer".
+
+**Install detection** (`detect_install`, from the files beside the interpreter; first match wins):
+| Signal | Kind | Update steps |
+|---|---|---|
+| package dir is `<root>/src/runfleet` with `<root>/.git` and `pyproject.toml` | source | `git -C <root> pull --ff-only` |
+| `sys.prefix/uv-receipt.toml`, requirement `git = URL` | uv | `uv tool upgrade runfleet` (keeps the user's `--with`/`--python`) |
+| … `git = URL?rev=X` (pinned) | uv | `uv tool install --force git+URL` (an upgrade would keep the pin; the note says it moves to main) |
+| … `directory = D` (clone) | uv | `git -C D pull --ff-only`, `uv tool install --force --reinstall D` (uv caches a directory build by version) |
+| … `editable = D` | uv | `git -C D pull --ff-only` |
+| `sys.prefix/pipx_metadata.json` | pipx | `pipx reinstall runfleet` (`upgrade` does not refetch a git URL of the same version) |
+| a prefix part `archive-v*` (uv cache) | uvx | none: `uvx --refresh --from git+URL runfleet` |
+| otherwise | pip | none: `<python> -m pip install --upgrade git+URL` |
+`uv` is found on PATH, else in `$UV_INSTALL_DIR`, `$XDG_BIN_HOME`, `~/.local/bin`, `~/.cargo/bin`; uv steps run with
+`UV_TOOL_DIR=<prefix parent>` and `UV_TOOL_BIN_DIR=<dir of the receipt's runfleet entrypoint>` (dirs chosen at install
+time; without them `install --force` would put the script in the default bin dir). A missing program empties the steps (by hand only).
+
+**`runfleet update [--check] [--force]`**: prints version + install, checks (forced), prints what changed; `--check`
+stops there (exit 1 only when GitHub could not be asked). Without a newer version it stops (exit 0), or exit 1 when
+the check failed, unless `--force`. Then each step runs in the terminal (`cli.run_step`, output visible); a failure
+prints the manual command (exit 1). Then `installed_version()` (`<relaunch argv> --version` in a subprocess: this
+process is still the old code) and "Updated: a → b".
+
+**In the TUI**: `RunFleetApp(check_updates=)` — `cli.run_tui` passes `not demo and general.update_check`. On mount a
+worker thread runs `update.check(now)`: the answer in `<state>/update.json` while younger than 24 h, else a fetch (a
+failure keeps the last answer and its error; never raises). A newer version is toasted once per version
+(`notified`). Settings › About's version row (§7.13) shows and drives it; palette › *Update RunFleet* opens Settings
+on that row and runs its `↵` (checks first when nothing is known). `--demo` never asks (the row says so). Confirming
+exits the app with `update.RESTART_CODE` (75, never a process exit code); `cmd_tui` then runs the same steps as
+`runfleet update` in the restored terminal and, when they succeed, `os.execv`s `relaunch_argv(original argv)`: the
+`runfleet` script it was started as (else `which runfleet`, else `python -m runfleet`), plus `--demo` when the
+first-run prompt chose it. A failed update returns 1 with its output on screen. RunFleet never replaces its own files
+while the TUI runs: lazily imported modules of the new version would mix with the old.
+
+**`install.sh`** (repo root, `curl -LsSf …/main/install.sh | sh`, POSIX sh): a `runfleet` on PATH or in the usual
+bin dirs with `update` → `exec runfleet update`; an older one → `uv tool upgrade runfleet` or `pipx reinstall
+runfleet`, whichever lists it. Otherwise uv is installed when missing (Astral's installer via curl or wget), then
+`uv tool install git+URL`; when `runfleet` is not on PATH afterwards, `uv tool update-shell` and "open a new
+terminal". Warns (does not fail) without `ssh`. Tested with stub programs (`tests/cli/test_install_sh.py`).
 
 ---
 

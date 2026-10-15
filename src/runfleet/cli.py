@@ -6,13 +6,15 @@
     runfleet doctor [HOST ...] [--reset]
     runfleet snapshot [HOST ...] [--json] [--timeout SEC]
     runfleet wait HOST:JOBID ... [--timeout SEC] [--json]
+    runfleet update [--check] [--force]
 
 Exit codes: 0 ok, 1 runtime error, 2 config/usage error, 3 no `ssh` client (never with --demo), 4 `snapshot` /
 `doctor`: at least one host failed. `wait` has its own (runfleet.wait): 0 completed, 1 ended otherwise, 2 timeout,
 3 error.
 
 Collaborators are module-level functions (`build_service`, `run_tui`, `open_cache`, `ssh_available`,
-`is_interactive`, `run_command`) so tests replace them with fakes; nothing here touches the network itself.
+`is_interactive`, `run_command`, `run_step`, `installed_version`, `restart`) so tests replace them with fakes; nothing
+here touches the network itself (`update` asks GitHub through `runfleet.update`).
 """
 
 from __future__ import annotations
@@ -25,14 +27,15 @@ import logging.handlers
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from runfleet import __version__, debugdump, export, paths, sshconfig
+from runfleet import __version__, debugdump, export, paths, sshconfig, update
 from runfleet.config import FleetConfig, HostConfig, host_name_for, load_config, load_config_with_warnings
 from runfleet.core.cache import Cache
 from runfleet.core.clock import Clock, RealClock
@@ -43,7 +46,7 @@ from runfleet.models import ConnState, DetectReport, DoctorReport
 log = logging.getLogger("runfleet.cli")
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_NO_SSH, EXIT_HOST_FAILED = 0, 1, 2, 3, 4
-SUBCOMMANDS = ("connect", "hosts", "doctor", "snapshot", "wait")
+SUBCOMMANDS = ("connect", "hosts", "doctor", "snapshot", "wait", "update")
 _VALUE_OPTIONS = frozenset({"-c", "--config", "--demo-seed", "--timeout"})
 _WRITABLE = frozenset({ConnState.OK, ConnState.DEGRADED, ConnState.NEEDS_AUTH, ConnState.HOSTKEY})
 
@@ -65,9 +68,10 @@ def run_tui(service: FleetAPI, clock: Clock, *, demo: bool = False, settings: bo
     if demo:                                    # a watched job and a last visit, so alerts and `D` show at once
         from runfleet.demo.world import demo_ui_state
         initial = demo_ui_state(clock.now())
-    app = RunFleetApp(service, clock=clock, persist_state=not demo, open_settings=settings, initial_state=initial)
+    app = RunFleetApp(service, clock=clock, persist_state=not demo, open_settings=settings, initial_state=initial,
+                      check_updates=not demo and service.config.general.update_check)
     app.run()
-    return int(app.return_code or 0)
+    return int(app.return_code or 0)     # update.RESTART_CODE: "update and restart" (Settings › About)
 
 
 def open_cache(disabled: bool) -> Cache | None:
@@ -103,6 +107,37 @@ def ask(prompt: str) -> str:
     return input(prompt)
 
 
+def run_step(argv: Sequence[str], env: Mapping[str, str]) -> int:
+    """One update command in this terminal (its output shows as it runs)."""
+    try:
+        return subprocess.run(list(argv), check=False, env={**os.environ, **env}).returncode
+    except OSError as exc:
+        print(f"runfleet: cannot run {argv[0]}: {exc}", file=sys.stderr, flush=True)
+        return 127
+
+
+def installed_version() -> str | None:
+    """The version a fresh start would run (after an update this process still is the old one)."""
+    try:
+        done = subprocess.run(update.relaunch_argv(["--version"]), capture_output=True, text=True, timeout=60,
+                              check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.fullmatch(r"runfleet (\S+)", done.stdout.strip())
+    return m.group(1) if done.returncode == 0 and m else None
+
+
+def restart(argv: Sequence[str]) -> int:
+    """Replace this process with a fresh RunFleet (returns only when that is impossible)."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        os.execv(argv[0], list(argv))
+    except OSError as exc:
+        print(f"runfleet: cannot start {argv[0]}: {exc}", file=sys.stderr, flush=True)
+    return EXIT_ERROR
+
+
 # ====================================================================================================== parsing
 def _common(parser: argparse.ArgumentParser, *, suppress: bool) -> None:
     """Global options, accepted before and after a subcommand. Subcommand copies default to SUPPRESS so they do
@@ -136,7 +171,7 @@ def _positive_seconds(text: str) -> float:
 def main_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="runfleet", description="Jobs, GPUs and hosts of your Slurm clusters and GPU "
                                 "workstations in one terminal UI.",
-                                epilog="subcommands: connect, hosts, doctor, snapshot, wait (runfleet <cmd> -h)",
+                                epilog="subcommands: connect, hosts, doctor, snapshot, wait, update (runfleet <cmd> -h)",
                                 allow_abbrev=False)
     p.add_argument("--version", action="version", version=f"runfleet {__version__}")
     _common(p, suppress=False)
@@ -178,6 +213,10 @@ def command_parser() -> argparse.ArgumentParser:
     w.add_argument("hosts", nargs="+", metavar="HOST:JOBID", help="k2:2332861, k2:31270818 (whole array), lynx:p642229")
     w.add_argument("--timeout", type=_positive_seconds, default=None, metavar="SEC", help="give up after SEC (exit 2)")
     w.add_argument("--json", action="store_true", help='one JSON object per line, schema "runfleet.wait/1"')
+    u = sub.add_parser("update", allow_abbrev=False, help="update RunFleet to the newest version on GitHub")
+    _common(u, suppress=True)
+    u.add_argument("--check", action="store_true", help="only say whether a newer version exists")
+    u.add_argument("--force", action="store_true", help="update even when no newer version is known")
     return p
 
 
@@ -558,7 +597,8 @@ def cmd_tui(args: argparse.Namespace, clock: Clock, out: Callable[[str], None]) 
     notice = config_notice(fleet.warnings)
     if notice is not None:
         service.notices.append(notice)
-    return run_tui(service, clock, demo=args.demo, settings=not fleet.config.hosts)
+    rc = run_tui(service, clock, demo=args.demo, settings=not fleet.config.hosts)
+    return update_and_restart(args, out) if rc == update.RESTART_CODE else rc
 
 
 def cmd_connect(args: argparse.Namespace, clock: Clock, out: Callable[[str], None]) -> int:
@@ -753,13 +793,83 @@ def cmd_wait(args: argparse.Namespace, clock: Clock, out: Callable[[str], None])
         return failed(f"internal error: {exc!r} (details in runfleet.log)")
 
 
+# ====================================================================================================== update
+def run_update(install: update.Install, out: Callable[[str], None]) -> int:
+    """Run the install's update commands, then say which version a fresh start runs."""
+    if install.note:
+        out(f"Note: {install.note}.")
+    if not install.steps:
+        out(f"This copy cannot update itself; run:\n  {install.manual}")
+        return EXIT_ERROR
+    for argv in install.steps:
+        out("$ " + shlex.join([Path(argv[0]).name, *argv[1:]]))
+        rc = run_step(argv, install.env)
+        if rc != 0:
+            out(f"Update failed ({Path(argv[0]).name} exited with {rc}). To update by hand: {install.manual}")
+            return EXIT_ERROR
+    new = installed_version()
+    if new is None:
+        out("Updated (could not read the new version: `runfleet --version`).")
+    elif new == __version__:
+        out(f"Done: still {new} (no newer code).")
+    else:
+        out(f"Updated: {__version__} → {new}.")
+    return EXIT_OK
+
+
+def cmd_update(args: argparse.Namespace, clock: Clock, out: Callable[[str], None]) -> int:
+    install = update.detect_install()
+    out(f"RunFleet {__version__}, {install.describe()}.")
+    status = update.check(clock.now(), force=True)
+    if status.error is not None:
+        out(f"Could not ask GitHub for the newest version: {status.error}")
+    elif status.available:
+        out(f"Version {status.latest} is available.")
+        try:
+            notes = update.changes_since(update.fetch_text("CHANGELOG.md"), __version__)
+        except Exception:                      # what changed is a nicety: the update itself does not need it
+            notes = []
+        if notes:
+            out("\n" + "\n".join(f"  {line}" if line else "" for line in notes) + "\n")
+    else:
+        out(f"This is the newest version (GitHub main: {status.latest}).")
+    if args.check:
+        if status.available:
+            out("Update with `runfleet update`" + (f" (or by hand: {install.manual})" if not install.steps else "")
+                + ".")
+        return EXIT_ERROR if status.error is not None else EXIT_OK
+    if not status.available and not args.force:
+        if status.error is not None:
+            out("`runfleet update --force` runs the update anyway.")
+            return EXIT_ERROR
+        return EXIT_OK
+    rc = run_update(install, out)
+    if rc == EXIT_OK:
+        out("If RunFleet is open in another terminal, quit it (q) and start it again.")
+    return rc
+
+
+def update_and_restart(args: argparse.Namespace, out: Callable[[str], None]) -> int:
+    """Settings › About › update: the TUI has quit; update this install, then start RunFleet again as it was."""
+    out("RunFleet → updating; it starts again when done …")
+    rc = run_update(update.detect_install(), out)
+    if rc != EXIT_OK:
+        return rc
+    argv = list(getattr(args, "argv", []))
+    if args.demo and "--demo" not in argv:     # the first-run prompt's `d`
+        argv.append("--demo")
+    return restart(update.relaunch_argv(argv))
+
+
 COMMANDS: dict[str, Callable[[argparse.Namespace, Clock, Callable[[str], None]], int]] = {
-    "connect": cmd_connect, "doctor": cmd_doctor, "snapshot": cmd_snapshot, "wait": cmd_wait,
+    "connect": cmd_connect, "doctor": cmd_doctor, "snapshot": cmd_snapshot, "wait": cmd_wait, "update": cmd_update,
 }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = parse_args(sys.argv[1:] if argv is None else argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    args = parse_args(argv)
+    args.argv = argv                                 # an update started in the TUI restarts with the same arguments
     setup_logging(args.debug, demo=bool(getattr(args, "demo", False)))
     clock: Clock = RealClock()
 

@@ -16,7 +16,9 @@ pills and buttons are clickable; the wheel moves the selection. Keys come from `
 * **General** — the [general] settings that make sense to flip here, then a *notifications* group ([notify]:
   enabled, terminal channel, an events preset; the command hook stays config.toml-only and is only reported);
   applied live where possible, persisted.
-* **About** — config file (``↵`` opens it in ``$EDITOR``), log, state dir, version.
+* **About** — config file (``↵`` opens it in ``$EDITOR``), log, state dir, version. On the version row ``↵`` asks
+  GitHub for the newest version; when one is newer, ``↵`` and ``↵`` again quit, update this install and start
+  RunFleet again (palette › Update RunFleet lands here, §8.6).
 
 Everything goes through :class:`~runfleet.core.service.FleetAPI`; with ``config_path`` None (``--demo``) changes
 last for this run only and the panel says so.
@@ -146,7 +148,8 @@ _BEGIN_EDIT = _keys_for("filter", "add")     # handled in on_key, synchronously 
 
 ABOUT_ROWS: tuple[tuple[str, str], ...] = (("config", "config file"), ("log", "log"), ("state", "state dir"),
                                            ("ssh", "ssh config"), ("version", "version"))
-_ABOUT_ACTIONS = frozenset({"config", "log"})
+_ABOUT_ACTIONS = frozenset({"config", "log", "version"})
+_UPDATE = ":update"                # `confirm` while ↵ again updates (no host name has a colon)
 
 
 class SettingsPanel(Static, can_focus=True):
@@ -197,10 +200,14 @@ class SettingsScreen(ModalScreen[None]):
     }
     """
 
-    def __init__(self, section: str = "hosts") -> None:
+    def __init__(self, section: str = "hosts", *, update: bool = False) -> None:
         super().__init__()
-        self.section = section if section in dict(SECTIONS) else "hosts"
+        self.section = "about" if update else section if section in dict(SECTIONS) else "hosts"
         self.selected: dict[str, int] = {"hosts": 0, "general": 0, "about": 0}
+        if update:
+            self.selected["about"] = [k for k, _l in ABOUT_ROWS].index("version")
+        self._open_update = update             # palette › Update RunFleet: start on the version row's ↵
+        self._asked = False                    # this panel asked GitHub: say the answer on the message line
         self.scroll = 0
         self.rows: list[HostRow] = []
         self.aliases: list[str] = []
@@ -248,6 +255,8 @@ class SettingsScreen(ModalScreen[None]):
         self.reload()
         self._fit()
         self.query_one(SettingsPanel).focus()
+        if self._open_update:
+            self.open_about("version")
 
     def on_resize(self) -> None:
         self._fit()
@@ -579,6 +588,47 @@ class SettingsScreen(ModalScreen[None]):
                 self._say(f"edited {display_path(path)} — changes made by hand apply at the next start")
         elif key == "log":
             self.rf.open_runfleet_log()
+        elif key == "version":
+            self._version_enter()
+
+    def _version_enter(self) -> None:
+        """↵ on the version row: check (no newer version known) → arm → ↵ again quits, updates and restarts."""
+        app = self.rf
+        status = app.update_status
+        if self.confirm == _UPDATE:
+            app.request_update()
+            return
+        if self.in_memory:
+            self._say("demo — no network; `runfleet update` updates RunFleet", theme.warn())
+            return
+        if app.update_checking:
+            self._asked = True
+            self._say("asking GitHub for the newest version …")
+            return
+        if status is None or not status.available:
+            self._asked = True
+            app.check_for_update(force=True)
+            self._say("asking GitHub for the newest version …")
+            return
+        from runfleet import update
+
+        self.confirm = _UPDATE
+        manual = update.detect_install().manual
+        self._say(f"↵ again: quit, update to {status.latest} ({manual}) and start again · esc: not now", theme.warn())
+
+    def update_changed(self, answer: Any) -> None:
+        """The app's update check started or ended (`answer`: the Status of a check this panel may have asked)."""
+        if answer is not None and self._asked:
+            self._asked = False
+            if answer.available:
+                self._version_enter() if self._open_update else self._say(
+                    f"RunFleet {answer.latest} is available — ↵ updates and restarts", theme.ok())
+            elif answer.error is not None:
+                self._error(f"cannot ask GitHub: {answer.error}")
+            else:
+                self._say(f"this is the newest version ({answer.latest})", theme.ok())
+            self._open_update = False
+        self.redraw()
 
     # ------------------------------------------------------------------ input line (filter / add)
     def _begin_edit(self, mode: str, text: str = "") -> None:
@@ -794,7 +844,12 @@ class SettingsScreen(ModalScreen[None]):
             return " ↵ remove " if row is not None and row.saved else " ↵ save "
         if self.section == "general":
             return " ↵ change "
-        return " ↵ open " if ABOUT_ROWS[self.selected["about"]][0] in _ABOUT_ACTIONS else ""
+        key = ABOUT_ROWS[self.selected["about"]][0]
+        if key == "version":
+            status = self.rf.update_status
+            return (" ↵ update now " if self.confirm == _UPDATE else
+                    " ↵ update " if status is not None and status.available else " ↵ check ")
+        return " ↵ open " if key in _ABOUT_ACTIONS else ""
 
     def _buttons(self, width: int) -> Text:
         label = self._primary_label()
@@ -945,6 +1000,19 @@ class SettingsScreen(ModalScreen[None]):
             note = "command hook: set in config.toml" if hook else "command hook: none (config.toml only)"
         return _spread(Text("   " + GROUPS.get(table, table), style="bold"), Text(note + " ", style=theme.dim()), width)
 
+    def _version_note(self) -> str:
+        app = self.rf
+        status = app.update_status
+        if app.update_checking:
+            return "checking …"
+        if status is None:
+            return "↵ check for updates"
+        if status.available:
+            return f"{status.latest} available · ↵ update"
+        if status.error is not None and status.latest is None:
+            return "check failed · ↵ retry"
+        return "newest · ↵ check again"
+
     def _about_lines(self, width: int) -> list[Text]:
         from runfleet import __version__, paths
 
@@ -959,7 +1027,7 @@ class SettingsScreen(ModalScreen[None]):
             "log": (display_path(log_file), "↵ view"),
             "state": (display_path(state_dir) + "/" if state_dir else "", "cache, ui.json, ssh logs"),
             "ssh": ("~/.ssh/config", f"{len(self.aliases)} host alias{'es' if len(self.aliases) != 1 else ''}"),
-            "version": (f"runfleet {__version__}", ", settings · ? help"),
+            "version": (f"runfleet {__version__}", self._version_note()),
         }
         out: list[Text] = []
         sel = self.selected["about"]

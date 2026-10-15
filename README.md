@@ -74,7 +74,17 @@ Workstation GPUs live, cluster GPUs of your running jobs from Slurm accounting, 
 
 ## Install
 
-You need Python 3.11+ and the system `ssh` client. Linux and macOS work; on Windows use WSL.
+One line, on Linux, macOS or WSL (it needs only the system `ssh` client):
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.sh | sh
+```
+
+The [script](install.sh) installs [uv](https://docs.astral.sh/uv/) if you do not have it (uv brings its own Python
+3.11+ when the system has none), then RunFleet with `uv tool install`. If RunFleet is already installed, it updates it
+instead, so the same line works for both.
+
+Or by hand, with Python 3.11+:
 
 ```sh
 uv tool install git+https://github.com/Yuanpeng-Li/runfleet     # recommended
@@ -87,13 +97,21 @@ There is no PyPI release yet, so installs come straight from GitHub.
 ## Update
 
 ```sh
-uv tool upgrade runfleet       # if you installed with uv
-pipx reinstall runfleet        # if you installed with pipx
+runfleet update                # --check only looks
 ```
 
-Both fetch the latest `main` and rebuild. Your config (`~/.config/runfleet/config.toml`), saved hosts and cache are
-left alone. If RunFleet is open, quit and start it again to pick up the new version. What changed is listed in
+It works out how RunFleet was installed (uv, pipx or a git clone), shows what changed since your version, runs the
+matching command (`uv tool upgrade runfleet`, `pipx reinstall runfleet`, `git pull`) and prints the new version.
+Your config (`~/.config/runfleet/config.toml`), saved hosts and cache are left alone. What changed is listed in
 [CHANGELOG.md](CHANGELOG.md).
+
+Inside RunFleet, a toast says when a new version is out. *Update RunFleet* in the palette (`ctrl+p`), or `↵` on the
+version row in Settings › About, quits, updates and starts RunFleet again where you were. To check, RunFleet fetches
+the version number from this repository on GitHub at most once a day; nothing else is sent. Turn it off with
+`update_check = false` under `[general]`. `--demo` never checks.
+
+Versions before 0.4 have no `runfleet update`; update them once with `uv tool upgrade runfleet` or
+`pipx reinstall runfleet`, or with the install line above.
 
 For `uvx`, add `--refresh` once to bypass its cache:
 `uvx --refresh --from git+https://github.com/Yuanpeng-Li/runfleet runfleet`.

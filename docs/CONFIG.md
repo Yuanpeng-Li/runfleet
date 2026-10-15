@@ -40,6 +40,7 @@ max_parallel_ssh = 8
 refresh_multiplier = 1.0
 pager = ""                     # default: $PAGER, else "less -R +G"
 remember_hosts = true          # `runfleet k2` saves k2 here once it answers
+update_check = true            # once a day, ask GitHub for the newest RunFleet version
 
 [ui]
 gpu_util_thresholds = [10, 75]
@@ -107,6 +108,7 @@ name = "lynx"
 | `refresh_multiplier` | float | `1.0` | scales every interval (`+`/`-` change it at runtime, 0.5–4); Settings › refresh speed writes `2.0` (slow), `1.0` (normal) or `0.5` (fast) and applies it at once — per-command floors still apply |
 | `pager` | string | `""` | pager for local log copies; empty = `$PAGER`, else `less -R +G` |
 | `remember_hosts` | bool | `true` | hosts named on the command line (`runfleet k2 vega`) that are not configured yet are saved (a minimal `[[host]]` table) as soon as they answer or need a login; one notice "saved k2, vega — manage in Settings (,)". That run still shows only the named hosts. |
+| `update_check` | bool | `true` | at start, at most once a day, fetch the version number of RunFleet's main branch from raw.githubusercontent.com (a plain GET; nothing about you or your hosts is sent) and say once per new version that it is out. Settings › About shows the answer and updates. `false`: no request at start; `runfleet update` and the About row still ask when you use them. `--demo` never asks. |
 
 Settings › General changes `default_view` (used at the next start), `refresh_multiplier`, `readonly`, `mouse`,
 `idle_pause_after` and `remember_hosts`; all but `default_view` take effect immediately.

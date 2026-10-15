@@ -141,7 +141,7 @@ class RunFleetApp(App[None]):
 
     def __init__(self, service: FleetAPI, *, clock: Clock | None = None, animations: bool = True,
                  persist_state: bool = True, open_settings: bool = False,
-                 initial_state: dict[str, Any] | None = None) -> None:
+                 initial_state: dict[str, Any] | None = None, check_updates: bool = False) -> None:
         # mouse comes from service.config.general.mouse (cli applies --no-mouse/--readonly to the FleetConfig
         # with dataclasses.replace before building FleetService); clock None -> RealClock
         if os.environ.get("NO_COLOR") == "":
@@ -179,6 +179,9 @@ class RunFleetApp(App[None]):
         self._doctor_held: dict[str, tuple[float, Any]] = {}   # host -> (monotonic, DoctorReport) held back
         self._connecting: set[str] = set()
         self.alerts = Alerts(self)              # notifications, watch list, "since you were away" (§7.14)
+        self.check_updates = check_updates      # ask GitHub for a newer RunFleet at start (§8.6; never --demo/tests)
+        self.update_status: Any = None          # update.Status of the last check this run (None: not asked yet)
+        self.update_checking = False
 
     # ------------------------------------------------------------------ lifecycle
     def get_driver_class(self) -> type[Driver]:
@@ -219,6 +222,8 @@ class RunFleetApp(App[None]):
         if self.animations:
             self.set_interval(1.0, self._tick)
         self.check_size()
+        if self.check_updates:
+            self.check_for_update()
 
     async def on_unmount(self) -> None:
         if self._unsubscribe is not None:
@@ -507,6 +512,55 @@ class RunFleetApp(App[None]):
             self.screen.dismiss(None)
             return
         self.push_screen(SettingsScreen(section), lambda _result: self._forget_removed_hosts())
+
+    def open_update(self) -> None:
+        """Palette › Update RunFleet: Settings › About on the version row, ready to update (or to check first)."""
+        from runfleet.ui.screens.settings import SettingsScreen
+
+        if isinstance(self.screen, SettingsScreen):
+            self.screen.dismiss(None)
+        self.push_screen(SettingsScreen("about", update=True), lambda _result: self._forget_removed_hosts())
+
+    # ------------------------------------------------------------------ updates (§8.6)
+    def check_for_update(self, *, force: bool = False) -> None:
+        """Ask GitHub for the newest version in a thread (the saved answer while younger than a day, unless
+        `force`); a newer one is announced once per version. Settings › About shows the result either way."""
+        if self.update_checking:
+            return
+        self.update_checking = True
+        self._update_changed()
+        self.run_worker(lambda: self._check_update_thread(force), thread=True, group="update-check",
+                        exit_on_error=False)
+
+    def _check_update_thread(self, force: bool) -> None:
+        from runfleet import update
+
+        status = update.check(self.clock.now(), force=force)
+        self.call_from_thread(self._update_checked, status, force)
+
+    def _update_checked(self, status: Any, force: bool) -> None:
+        from runfleet import update
+
+        self.update_checking = False
+        self.update_status = status
+        self._update_changed(status if force else None)
+        if not force and update.should_notify(status):
+            update.mark_notified(status.latest)
+            self.toast(f"RunFleet {status.latest} is out (this is {status.current}) — Update RunFleet in the palette "
+                       "(ctrl+p) updates and restarts", timeout=12.0)
+
+    def _update_changed(self, answer: Any = None) -> None:
+        from runfleet.ui.screens.settings import SettingsScreen
+
+        for screen in self.screen_stack:
+            if isinstance(screen, SettingsScreen):
+                screen.update_changed(answer)
+
+    def request_update(self) -> None:
+        """Quit; the CLI updates this install in the plain terminal and starts RunFleet again (same arguments)."""
+        from runfleet import update
+
+        self.exit(return_code=update.RESTART_CODE)
 
     def set_mouse(self, enabled: bool) -> None:
         """Settings › mouse: switch mouse reporting now (the driver keeps it across suspend / resume)."""

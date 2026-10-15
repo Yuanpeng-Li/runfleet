@@ -5,6 +5,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-15
+
+### Added
+- **One-line install and update**: `curl -LsSf https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.sh | sh`
+  installs uv when missing (with its own Python if needed), then RunFleet; run again, it updates.
+- **`runfleet update`** works out how RunFleet was installed (uv tool, pipx, a git clone), shows what changed since
+  your version, runs the matching command and prints the new version. `--check` only looks; `--force` updates
+  anyway.
+- **Update from inside RunFleet**: at start it asks GitHub for the newest version at most once a day and says once
+  when a new one is out. *Update RunFleet* in the palette (or `↵` on the version row in Settings › About) quits,
+  updates and starts RunFleet again with the same arguments. Only the version number is fetched; turn the check off
+  with `update_check = false` under `[general]`. `--demo` never checks.
+
 ## [0.3.0] - 2026-10-13
 
 ### Added
@@ -247,7 +260,8 @@ First public release.
   opt-in with `--yes`); `scripts/gen_docs.py`; `scripts/screenshots.py`.
 - CI: lint, types and tests on Python 3.11 and 3.13, plus a packaging job that runs the demo from the built wheel.
 
-[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.1.0...v0.2.0

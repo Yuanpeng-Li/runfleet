@@ -77,6 +77,7 @@ class GeneralSettings:
     refresh_multiplier: float = 1.0
     pager: str = ""                  # "" -> $PAGER, else "less -R +G"
     remember_hosts: bool = True      # hosts named on the command line are saved here once they answer (§8.4)
+    update_check: bool = True        # once a day, ask GitHub for the newest RunFleet version (§8.6)
 
 @dataclass(frozen=True, slots=True)
 class UISettings:
@@ -253,6 +254,7 @@ GENERAL_SCHEMA: Mapping[str, Reader] = {
     "recent_window": parse_duration, "stall_after": parse_duration, "idle_after": parse_duration,
     "idle_pause_after": parse_duration, "max_parallel_ssh": _int(1),
     "refresh_multiplier": _float(0.0, exclusive=True), "pager": _str, "remember_hosts": _bool,
+    "update_check": _bool,
 }
 UI_SCHEMA: Mapping[str, Reader] = {
     "gpu_util_thresholds": _pair, "gpu_mem_thresholds": _pair, "jobs_columns": _str_list(),
