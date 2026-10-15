@@ -205,16 +205,16 @@ def distinct_starts(names: Sequence[str]) -> dict[str, int]:
     Sweep siblings ``orb-swp--train--cifar-{warmup,const,cosinewarm}--s43--a02`` -> the index of ``warmup`` /
     ``const`` / ``cosinewarm``. Names without a sibling sharing a prefix map to 0."""
     uniq = sorted(set(names))
+    pair = [0] * max(0, len(uniq) - 1)          # common prefix of each sorted neighbour pair, measured once
+    for i in range(len(pair)):
+        a, b = uniq[i], uniq[i + 1]
+        n, end = 0, min(len(a), len(b))
+        while n < end and a[n] == b[n]:
+            n += 1
+        pair[i] = n
     out: dict[str, int] = {}
     for i, name in enumerate(uniq):
-        lcp = 0
-        for j in (i - 1, i + 1):
-            if 0 <= j < len(uniq):
-                other = uniq[j]
-                n = 0
-                while n < min(len(name), len(other)) and name[n] == other[n]:
-                    n += 1
-                lcp = max(lcp, n)
+        lcp = max(pair[i - 1] if i > 0 else 0, pair[i] if i < len(pair) else 0)
         while lcp > 0 and name[lcp - 1] not in _SEPS:
             lcp -= 1
         out[name] = lcp if lcp < len(name) else 0
@@ -238,7 +238,29 @@ def truncate_name(name: str, width: int, start: int = 0) -> str:
     return _head(name, head) + ELLIPSIS + truncate(region, rest, keep_tail=rest >= 16)
 
 
+def _graphemes(text: str) -> list[tuple[int, int, int]] | None:
+    """(start, end, cells) per grapheme where code points do not add up to what is drawn — an emoji variation
+    selector (``❤️`` is 2 cells, ``❤`` 1) or a ZWJ sequence of emoji (one 2-cell glyph) — else None (ASCII, CJK,
+    combining accents: measured per code point)."""
+    if "\ufe0f" not in text and not any(
+            ch == "\u200d" and 0 < k < len(text) - 1 and cell_len(text[k - 1]) == 2 == cell_len(text[k + 1])
+            for k, ch in enumerate(text)):
+        return None
+    from rich.cells import split_graphemes
+
+    return split_graphemes(text)[0]
+
+
 def _head(text: str, cells: int) -> str:
+    """The longest start of `text` in `cells` cells, never cutting an emoji sequence apart."""
+    spans = _graphemes(text)
+    if spans is not None:
+        end = used = 0
+        for _start, stop, w in spans:
+            if used + w > cells:
+                break
+            end, used = stop, used + w
+        return text[:end]
     out, used = [], 0
     for ch in text:
         w = cell_len(ch)
@@ -250,8 +272,18 @@ def _head(text: str, cells: int) -> str:
 
 
 def _tail(text: str, cells: int) -> str:
-    """The last `cells` cells; never starting with a zero-width mark (a combining accent, ZWJ) cut off its base."""
-    out = _head(text[::-1], cells)[::-1]
+    """The last `cells` cells; never starting with a zero-width mark (a combining accent, ZWJ) cut off its base, never
+    cutting an emoji sequence apart."""
+    spans = _graphemes(text)
+    if spans is not None:
+        begin, used = len(text), 0
+        for start, _stop, w in reversed(spans):
+            if used + w > cells:
+                break
+            begin, used = start, used + w
+        out = text[begin:]
+    else:
+        out = _head(text[::-1], cells)[::-1]
     i = 0
     while i < len(out) and cell_len(out[i]) == 0:
         i += 1
@@ -281,6 +313,33 @@ def command_label(args: str) -> str:
         if _INTERPRETERS.match(exe) or len(words) == 1:
             words[0] = exe
     return " ".join(words)
+
+
+LAUNCHERS = frozenset({"torchrun", "accelerate", "deepspeed", "mpirun"})
+
+
+def task_label(args: str) -> str:
+    """Short workstation task label (§5.3.2): `-m pkg.mod` → `pkg.mod`; first `*.py`/`*.sh` argument → basename;
+    torchrun/accelerate/deepspeed/mpirun prefix kept; else basename(argv0). Shared by the process collector (task
+    names) and the Fleet card's GPU owner column."""
+    tokens = args.split()
+    if not tokens:
+        return "?"
+    argv0 = tokens[0].rsplit("/", 1)[-1]
+    prefix = f"{argv0} " if argv0 in LAUNCHERS else ""
+    for i, tok in enumerate(tokens[1:], 1):
+        if tok == "-m" and i + 1 < len(tokens):
+            return prefix + tokens[i + 1]
+        if tok.endswith((".py", ".sh")) and not tok.startswith("-"):
+            return prefix + tok.rsplit("/", 1)[-1]
+    return argv0
+
+
+def gpu_type_from_name(name: str) -> str:
+    """nvidia-smi `name` → the lower-case Slurm gres spelling AutoDetect=nvml produces (`NVIDIA H200 NVL` →
+    `nvidia_h200_nvl`, `NVIDIA A100-SXM4-40GB` → `nvidia_a100-sxm4-40gb`), so gpu_types.mem_mib and gpu_label
+    treat it like any gres type."""
+    return "_".join(name.strip().lower().split())
 
 
 def short_gpu_name(name: str | None) -> str:

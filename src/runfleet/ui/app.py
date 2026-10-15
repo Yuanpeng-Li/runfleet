@@ -56,6 +56,17 @@ _PAST = {"cancel": "Cancelled", "hold": "Held", "release": "Released", "requeue"
          "terminate": "Terminated", "interrupt": "Interrupted", "kill": "Killed"}
 
 
+def saved_theme_choice() -> str:
+    """The theme picked in Settings › About (ui.json `theme`): auto | dark | light | ansi."""
+    path = ui_state_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path is not None and path.is_file() else {}
+    except (OSError, ValueError):
+        return "auto"
+    choice = data.get("theme") if isinstance(data, dict) else None
+    return choice if choice in theme.CHOICES else "auto"
+
+
 def ui_state_path() -> Path | None:
     """``~/.local/state/runfleet/ui.json`` (filter, preset, sort, grouping); None if paths are unavailable."""
     try:
@@ -184,6 +195,10 @@ class RunFleetApp(App[None]):
         self.update_checking = False
 
     # ------------------------------------------------------------------ lifecycle
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        """$rf-* exist under every theme (the stylesheet is parsed before ours is set)."""
+        return {**super().get_theme_variable_defaults(), **theme.TEXTUAL_THEME.variables}
+
     def get_driver_class(self) -> type[Driver]:
         return _cell_mouse_driver(super().get_driver_class())
 
@@ -212,6 +227,7 @@ class RunFleetApp(App[None]):
         from runfleet.ui.screens.main import MainScreen
 
         self.set_class(theme.no_color(), "-no-color")     # tcss: attribute-only cursor rows (§7.11)
+        self.set_class(theme.PLAIN_CURSOR, "-plain-cursor")   # tcss: reverse cursor rows (ansi / 16 colours)
         self._host_states = {h: s.status.state for h, s in self.store.hosts.items()}
         self._unsubscribe = self.store.subscribe(self._on_store_change)
         self.alerts.mount()
@@ -468,14 +484,17 @@ class RunFleetApp(App[None]):
 
         screen = self.base_screen()
         contexts = screen.help_contexts() if screen is not None else ["global"]
+        glyphs = screen.legend_contexts() if screen is not None else contexts
         title = screen.help_title() if screen is not None else "RunFleet"
         dialog = getattr(self.screen, "HELP_CONTEXT", None)
         if isinstance(self.screen, SettingsScreen):
             contexts, title = ["settings", "global"], "Settings"
+            glyphs = contexts
         elif isinstance(self.screen, ModalScreen) and isinstance(dialog, str):
             # a dialog's keys only: app bindings (palette, scope, refresh …) stop at a modal screen
             contexts, title = [dialog], keymap.CONTEXT_TITLES[dialog]
-        self.push_screen(HelpScreen(contexts, title))
+            glyphs = contexts
+        self.push_screen(HelpScreen(contexts, title, glyphs))
 
     def action_back_or_quit(self) -> None:
         """``q``: back one screen; quit on the main screen. A `q` that arrives right after a screen was pushed was
@@ -512,6 +531,34 @@ class RunFleetApp(App[None]):
             self.screen.dismiss(None)
             return
         self.push_screen(SettingsScreen(section), lambda _result: self._forget_removed_hosts())
+
+    def set_theme_choice(self, choice: str) -> Any:
+        """Settings › About › theme / palette › Theme: switch the palette now and keep the choice (ui.json)."""
+        resolved = theme.setup(choice, theme.BACKGROUND)
+        self.register_theme(theme.TEXTUAL_THEME)
+        self.theme = theme.TEXTUAL_THEME.name
+        self.set_class(theme.PLAIN_CURSOR, "-plain-cursor")
+        self.save_ui_state(theme=choice)
+        for screen in self.screen_stack:          # every cached Rich text is rebuilt with the new colours
+            for node in (screen, *screen.walk_children()):
+                forget = getattr(node, "forget_rendered", None)
+                if callable(forget):
+                    forget()
+            if isinstance(screen, FleetScreen) and not self._host_gone(screen):   # a removed host's detail screen
+                screen.refresh_data(None)                                         # under Settings has no state
+            screen.refresh(repaint=True)
+        self.refresh_headers()
+        return resolved
+
+    def set_fleet_layout(self, choice: str) -> None:
+        """Palette › Fleet: roomy / compact cards: ``auto`` grows the Fleet cards into a tall terminal (§7.4),
+        ``compact`` keeps them at their summary size. Applied now and kept in ui.json ``fleet_layout``."""
+        self.save_ui_state(fleet_layout=choice if choice in ("auto", "compact") else "auto")
+        for screen in self.screen_stack:
+            if isinstance(screen, FleetScreen) and not self._host_gone(screen):
+                screen.refresh_data(None)
+        self.toast("Fleet: roomy cards when the terminal has room" if choice != "compact" else "Fleet: compact cards",
+                   timeout=3)
 
     def open_update(self) -> None:
         """Palette › Update RunFleet: Settings › About on the version row, ready to update (or to check first)."""

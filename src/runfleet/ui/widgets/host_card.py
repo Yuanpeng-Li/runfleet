@@ -4,12 +4,16 @@ A card is a bordered box: the title carries number, name, kind and connection st
 for a Slurm host (my jobs, my GPUs, job util, free GPUs, next pending job, login node) or one line per GPU plus
 host and task lines for a workstation. A host with a problem keeps its last data and swaps the bottom lines for the
 classified error and the key that fixes it.
+
+In a roomy Fleet view (tier T1, :mod:`runfleet.ui.fleet_layout`) the same summary keeps fixed slots and a list of the
+jobs that need the user fills the rest of the card; a workstation's GPU lines then say who holds each GPU.
 """
 
 from __future__ import annotations
 
 import dataclasses
 from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -19,7 +23,8 @@ from textual.widgets import Static
 
 from runfleet.core.store import HostState
 from runfleet.models import ConnState, ErrorKind, HostSnapshot, HostStatus, Job, JobKind, StateGroup
-from runfleet.ui import render, theme
+from runfleet.ui import fleet_layout, render, theme
+from runfleet.ui.fleet_layout import Ranked
 from runfleet.ui.query import ended_at
 from runfleet.ui.widgets.gpus_view import sample_age
 from runfleet.util import humanize
@@ -124,9 +129,11 @@ def _error_lines(state: HostState, now: datetime, width: int) -> list[Text]:
 
 
 # ---------------------------------------------------------------- Slurm
-def _free_lines(snap: HostSnapshot, width: int) -> list[Text]:
+def _free_lines(snap: HostSnapshot, width: int, max_rows: int = 2) -> list[Text]:
     """Free GPUs per partition in `width` cells: one line in full, else one line without the "(N planned)" notes, else
-    two lines (full, then short), the second ending in "+N more" when even that does not fit (host detail lists all)."""
+    two lines (full, then short), the last ending in "+N more" when even that does not fit (host detail lists all).
+    ``max_rows`` (1 or 2): never more lines than that; a partition that does not fit is counted in "+N more", never
+    dropped."""
     if not snap.partitions:
         return [Text(humanize.NA, style=theme.dim())]
     sep = Text(" · ", style=theme.dim())
@@ -150,20 +157,24 @@ def _free_lines(snap: HostSnapshot, width: int) -> list[Text]:
                 return None
         return out
 
+    max_rows = max(1, min(2, max_rows))
     for rows, short in ((1, False), (1, True), (2, False), (2, True)):
+        if rows > max_rows:
+            break
         packed = pack([item(p, short) for p in snap.partitions], rows)
         if packed is not None:
             return packed
     items = [item(p, True) for p in snap.partitions]
     for keep in range(len(items) - 1, -1, -1):         # as many as fit, then "+N more"
-        packed = pack([*items[:keep], Text(f"+{len(items) - keep} more", style=theme.dim())], 2)
+        packed = pack([*items[:keep], Text(f"+{len(items) - keep} more", style=theme.dim())], max_rows)
         if packed is not None:
             return packed
     return [Text(f"{len(items)} partitions", style=theme.dim())]
 
 
-def _slurm_lines(state: HostState, snap: HostSnapshot, now: datetime, width: int, window: float,
-                 thresholds: tuple[float, float]) -> list[Text]:
+def _slurm_summary(snap: HostSnapshot, now: datetime, width: int, window: float,
+                   thresholds: tuple[float, float], free_rows: int = 2) -> list[Text]:
+    """my jobs, my GPUs, job util, then the free-GPU lines (unfitted; at most ``free_rows``)."""
     jobs = [j for j in snap.jobs.values() if j.is_mine]
     lines: list[Text] = []
 
@@ -200,9 +211,27 @@ def _slurm_lines(state: HostState, snap: HostSnapshot, now: datetime, width: int
         util.append(mem, style=theme.muted())
     lines.append(render.label_value("job util", util, width=LABEL_W))
 
-    free = _free_lines(snap, width - LABEL_W)
+    free = _free_lines(snap, width - LABEL_W, free_rows)
     lines.append(render.label_value("free GPUs", free[0], width=LABEL_W))
     lines += [render.label_value("", more, width=LABEL_W) for more in free[1:]]
+    return lines
+
+
+def _login_line(state: HostState, snap: HostSnapshot) -> Text:
+    login = Text(snap.caps.login_host if snap.caps is not None else "?")
+    m = snap.metrics
+    note = busy_note(state.status)
+    if note:                                   # the controller's trouble matters more than the login node's load
+        login.append(f"  {note}", style=theme.warn())
+    elif m is not None and m.load is not None:
+        login.append(f"  load {m.load[0]:.1f}/{m.ncpu or '?'}", style=theme.muted())
+    return render.label_value("login", login, width=LABEL_W)
+
+
+def _slurm_lines(state: HostState, snap: HostSnapshot, now: datetime, width: int, window: float,
+                 thresholds: tuple[float, float]) -> list[Text]:
+    jobs = [j for j in snap.jobs.values() if j.is_mine]
+    lines = _slurm_summary(snap, now, width, window, thresholds)
 
     errors = _error_lines(state, now, width)
     if errors:
@@ -230,15 +259,26 @@ def _slurm_lines(state: HostState, snap: HostSnapshot, now: datetime, width: int
     else:
         lines.append(render.label_value("next", Text("nothing queued", style=theme.dim()), width=LABEL_W))
 
-    login = Text(snap.caps.login_host if snap.caps is not None else "?")
-    m = snap.metrics
-    note = busy_note(state.status)
-    if note:                                   # the controller's trouble matters more than the login node's load
-        login.append(f"  {note}", style=theme.warn())
-    elif m is not None and m.load is not None:
-        login.append(f"  load {m.load[0]:.1f}/{m.ncpu or '?'}", style=theme.muted())
-    lines.append(render.label_value("login", login, width=LABEL_W))
+    lines.append(_login_line(state, snap))
     return [render.fit(x, width) for x in lines]
+
+
+def _slurm_roomy(state: HostState, snap: HostSnapshot, now: datetime, width: int, window: float,
+                 thresholds: tuple[float, float], list_rows: int, wide: bool, fixed: int,
+                 ranked: Sequence[Ranked] | None, watched: Callable[[Job], bool] | None,
+                 starts: Mapping[str, int] | None = None) -> list[Text]:
+    """T1 (§7.4): the summary with the free block padded to ``fixed`` lines, ``login`` (or the first error line),
+    then exactly ``list_rows`` rows of ranked jobs (the second error line takes the first of them)."""
+    lines = _slurm_summary(snap, now, width, window, thresholds, free_rows=fixed)[:3 + fixed]
+    lines += [Text("")] * max(0, 3 + fixed - len(lines))
+    errors = _error_lines(state, now, width)
+    lines.append(errors[0] if errors else _login_line(state, snap))
+    area = errors[1:]
+    if ranked is None:
+        ranked = fleet_layout.rank_slurm(snap.jobs.values(), now, window)
+    area += fleet_layout.list_lines(ranked, list_rows - len(area), now, inner=width, wide=wide, watched=watched,
+                                    util_t=thresholds, starts=starts)
+    return [render.fit(x, width) for x in lines] + area[:max(0, list_rows)]
 
 
 # ---------------------------------------------------------------- workstation
@@ -327,9 +367,54 @@ def _ws_lines(state: HostState, snap: HostSnapshot, now: datetime, width: int,
     return lines + errors
 
 
+def _ws_roomy(state: HostState, snap: HostSnapshot, now: datetime, width: int, window: float,
+              util_t: tuple[float, float], mem_t: tuple[float, float], list_rows: int, wide: bool, fixed: int,
+              ranked: Sequence[Ranked] | None, watched: Callable[[Job], bool] | None,
+              starts: Mapping[str, int] | None = None) -> list[Text]:
+    """T1 (§7.4): GPU lines with an owner column (padded to ``fixed``), the host line (or the first error line),
+    then exactly ``list_rows`` rows: the second error line or ``host2`` (from 8 rows), then the ranked tasks."""
+    gpus = sorted(snap.gpus, key=lambda g: g.index)
+    ow = fleet_layout.OWNER_WIDE if wide else fleet_layout.OWNER_NARROW
+    lines: list[Text] = []
+    for g in gpus[:MAX_GPU_LINES]:
+        old = old_reading(state, g, now)
+        line = gpu_line(g, width - ow - 1, util_t, mem_t) + Text(" ") + owner_text(snap, g, old=old, wide=wide)
+        if old:
+            line.stylize(theme.dim())
+        lines.append(line)
+    if len(gpus) > MAX_GPU_LINES:
+        lines.append(Text(f"+{len(gpus) - MAX_GPU_LINES} more GPUs · ↵ host detail", style=theme.dim()))
+    if not gpus:
+        lines.append(Text("no GPUs reported (nvidia-smi missing or not sampled yet)", style=theme.dim()))
+    lines += [Text("")] * max(0, fixed - len(lines))
+    errors = _error_lines(state, now, width)
+    lines.append(errors[0] if errors else host_line(snap, width, mem_t))
+    area = errors[1:]
+    if not errors and list_rows >= fleet_layout.HOST2_MIN_LIST:
+        extra = fleet_layout.host2_line(snap, width - (LABEL_W if wide else 0))
+        if extra is not None:
+            area.append(Text(" " * LABEL_W) + extra if wide else extra)
+    if ranked is None:
+        ranked = fleet_layout.rank_ws(snap.jobs.values(), now, window)
+    area += fleet_layout.list_lines(ranked, list_rows - len(area), now, inner=width, wide=wide, watched=watched,
+                                    util_t=util_t, starts=starts)
+    return [render.fit(x, width) for x in lines] + area[:max(0, list_rows)]
+
+
+def owner_text(snap: HostSnapshot, gpu: Any, *, old: bool, wide: bool) -> Text:
+    """The owner column of a workstation GPU line at T1 (see :func:`fleet_layout.owner_text`)."""
+    return fleet_layout.owner_text(snap, gpu, old=old, wide=wide)
+
+
 def card_lines(state: HostState, now: datetime, *, width: int, window: float = 86400,
                util_t: tuple[float, float] = theme.DEFAULT_UTIL_THRESHOLDS,
-               mem_t: tuple[float, float] = theme.DEFAULT_MEM_THRESHOLDS) -> list[Text]:
+               mem_t: tuple[float, float] = theme.DEFAULT_MEM_THRESHOLDS,
+               list_rows: int | None = None, wide: bool = False, fixed: int = 0,
+               ranked: Sequence[Ranked] | None = None, starts: Mapping[str, int] | None = None,
+               watched: Callable[[Job], bool] | None = None) -> list[Text]:
+    """A card's body. ``list_rows`` None: today's card (T0); else the T1 card of ``fixed`` + 1 summary lines (see
+    :func:`fleet_layout.shape_of`) and a list region of exactly ``list_rows`` rows (``ranked``: a cached ranking,
+    ``starts``: its cached :func:`fleet_layout.ranked_starts`)."""
     snap = state.snapshot
     if snap is None:
         if state.status.state is ConnState.DISABLED:
@@ -338,6 +423,12 @@ def card_lines(state: HostState, now: datetime, *, width: int, window: float = 8
         if errors:                   # probed and failed: the error explains the empty card
             return [Text("no data yet", style=theme.dim())] + errors
         return [Text("waiting for the first probe…", style=theme.dim())]
+    if list_rows is not None:
+        if is_cluster(state):
+            return _slurm_roomy(state, snap, now, width, window, util_t, list_rows, wide, fixed, ranked, watched,
+                                starts)
+        return _ws_roomy(state, snap, now, width, window, util_t, mem_t, list_rows, wide, fixed, ranked, watched,
+                         starts)
     if is_cluster(state):
         return _slurm_lines(state, snap, now, width, window, util_t)
     return _ws_lines(state, snap, now, width, util_t, mem_t)
@@ -367,6 +458,7 @@ class HostCard(Static, can_focus=True):
     def set_lines(self, title: Text, lines: list[Text], pad_to: int, *, stale: bool, problem: bool) -> None:
         """Replace the content; rows of a grid are padded to the same height so borders line up."""
         self.border_title = title
+        self.lines = lines
         self.update(Text("\n").join(lines + [Text("")] * max(0, pad_to - len(lines))))
         self.set_class(stale, "-stale")
         self.set_class(problem, "-problem")

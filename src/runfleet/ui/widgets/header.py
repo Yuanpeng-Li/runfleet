@@ -29,6 +29,14 @@ def _click(action: str) -> Style:
 
 class FleetHeader(Static):
     """The first line of every full screen."""
+    @property
+    def link_style(self) -> Any:      # chips keep their own colours (theme.link_style)
+        return theme.link_style()
+
+    @property
+    def link_style_hover(self) -> Any:
+        return theme.link_style(hover=True)
+
 
     DEFAULT_CSS = """
     FleetHeader { height: 1; width: 1fr; }

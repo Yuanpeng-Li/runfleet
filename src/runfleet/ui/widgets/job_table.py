@@ -372,9 +372,18 @@ class ClickTable(DataTable[Any]):
     def __init__(self, **kwargs: Any) -> None:
         kwargs.setdefault("cursor_type", "row")
         kwargs.setdefault("show_row_labels", False)
+        # the cursor row keeps each cell's own colours (bars, states, hosts); only its background marks the row
+        kwargs.setdefault("cursor_foreground_priority", "renderable")
         super().__init__(**kwargs)
         self._from_click = False
         self._click_chain = 1
+
+    def forget_rendered(self) -> None:
+        """The palette changed (§7.11): drop every "unchanged, skip it" cache — Rich's Text == compares plain text and
+        spans, not the base style, so a recoloured cell would look unchanged and keep its old colour."""
+        for attr, empty in (("_cells", {}), ("_signature", ())):
+            if hasattr(self, attr):
+                setattr(self, attr, empty)
 
     @property
     def cursor_key(self) -> str | None:

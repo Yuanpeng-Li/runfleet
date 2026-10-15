@@ -1,7 +1,8 @@
 """[WP3] Command palette Provider with RunFleet commands (§7.10).
 
 Fuzzy-matched commands only, no grammar: views, scope, host detail / connect / refresh / enable / disable per host,
-state presets, sort, grouping, doctor, settings, update, action log, RunFleet log, help, quit. ``:`` opens the same palette.
+state presets, sort, grouping, doctor, settings, update, theme, Fleet card size, action log, RunFleet log, help,
+quit. ``:`` opens the same palette.
 """
 
 from __future__ import annotations
@@ -54,6 +55,12 @@ class RunFleetCommands(Provider):
         yield "Settings: general", partial(app.action_settings, "general"), "default view, refresh speed, read-only"
         yield "Settings: about", partial(app.action_settings, "about"), "config file, log, version"
         yield "Update RunFleet", app.open_update, "newest version from GitHub: update and restart"
+        for choice, what in (("auto", "follow the terminal's background"), ("dark", "dark palette"),
+                             ("light", "light palette"), ("ansi", "the terminal's own 16 colours")):
+            yield f"Theme: {choice}", partial(app.set_theme_choice, choice), what
+        yield "Fleet: roomy cards", partial(app.set_fleet_layout, "auto"), \
+            "cards grow into a tall terminal: ranked jobs, GPU owners, free GPUs (ui.json)"
+        yield "Fleet: compact cards", partial(app.set_fleet_layout, "compact"), "cards keep their summary size (ui.json)"
         yield "Action log", app.show_action_log, "results of this session's actions"
         yield "Notifications", app.show_notifications, "this session's job alerts (failures, restarts, time low …)"
         yield "Since you were away", app.action_digest, "what ended since your last visit (key D)"

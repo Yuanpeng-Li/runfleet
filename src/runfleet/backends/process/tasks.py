@@ -13,7 +13,6 @@ Everything here is pure; `ProcessCollector` owns the state between ticks.
 
 from __future__ import annotations
 
-import posixpath
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -22,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from runfleet.backends.common import StatInfo, with_stat
 from runfleet.backends.process.parse_ps import FdInfo, is_regular_log
 from runfleet.models import (GPU, Job, JobGpuUsage, JobKey, JobKind, JobState, LogRef, NodeAlloc, Proc, ResourceAlloc)
+from runfleet.util.humanize import task_label as label
 from runfleet.util.logscan import EXIT_PATTERN, EXIT_SCAN_LINES   # shared with job detail's "Why it ended"
 
 START_TOLERANCE_S = 5
@@ -38,7 +38,6 @@ NOISE_DEFAULT: tuple[str, ...] = (
     r"python\S* (-m )?\S*(nvitop|gpustat)",
 )
 
-LAUNCHERS = frozenset({"torchrun", "accelerate", "deepspeed", "mpirun"})
 
 
 GPU_NOTE = "GPU-level utilisation; shared GPUs count other processes too"
@@ -53,24 +52,6 @@ class NoiseFilter:
 
     def __call__(self, args: str) -> bool:
         return any(p.search(args) for p in self._patterns)
-
-
-def label(args: str) -> str:
-    """Short task label: `-m pkg.mod` → `pkg.mod`; first `*.py`/`*.sh` argument → basename; torchrun/accelerate/
-    deepspeed/mpirun prefix kept; else basename(argv0)."""
-    tokens = args.split()
-    if not tokens:
-        return "?"
-    argv0 = posixpath.basename(tokens[0])
-    prefix = f"{argv0} " if argv0 in LAUNCHERS else ""
-    for i, tok in enumerate(tokens[1:], 1):
-        if tok == "-m" and i + 1 < len(tokens):
-            return prefix + tokens[i + 1]
-        if tok.endswith((".py", ".sh")) and not tok.startswith("-"):
-            return prefix + posixpath.basename(tok)
-    if argv0.endswith((".py", ".sh")):
-        return argv0
-    return argv0
 
 
 def task_id(pid: int, start: int) -> str:

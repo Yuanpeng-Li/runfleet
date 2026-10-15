@@ -1,7 +1,9 @@
 """[WP3] Log view widget (RichLog with live line).
 
 ``LogView`` = ``RichLog(max_lines=20000, wrap=True, markup=False)`` fed ``Text.from_ansi`` per completed line, plus a
-one-line footer showing the current unterminated line (tqdm ``\\r`` progress, §4.7) and the follow state.
+one-line footer showing the current unterminated line (tqdm ``\\r`` progress, §4.7) and the follow state. The raw lines
+are kept too (as many as the RichLog holds), so a theme switch can draw them again in the new colours
+(:meth:`LogView.forget_rendered`: the RichLog stores rendered strips).
 ``LogFollower`` owns one ``LogSession`` and fans its updates out to one or more views (the job detail Summary pane
 and its Logs tab share a single stream). It tracks whether the stream is alive, so a dead stream never reads as
 "following" and the owning screen can reopen it (:meth:`LogFollower.reconnect_due`, bounded backoff).
@@ -10,6 +12,7 @@ and its Logs tab share a single stream). It tracks whether the stream is alive, 
 from __future__ import annotations
 
 import re
+from collections import deque
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -33,7 +36,7 @@ class LogView(Widget):
     LogView { height: 1fr; }
     LogView.box { height: 1fr; }
     LogView > RichLog { height: 1fr; background: ansi_default; scrollbar-size-vertical: 1; }
-    LogView > #live { height: 1; color: $text-muted; }
+    LogView > #live { height: 1; color: $rf-muted; }
     """
 
     def __init__(self, *, id: str | None = None, classes: str | None = None) -> None:
@@ -49,6 +52,8 @@ class LogView(Widget):
         self._hit = -1
         self._scroll_paused = False        # follow was paused by scrolling up (scrolling back down resumes it)
         self._err_hit = -1                 # display line of the last `]` / `[` jump
+        self._raw: deque[str] = deque(maxlen=MAX_LINES)   # the lines as received, for forget_rendered
+        self._redrawing = False            # forget_rendered: the RichLog's scroll moves are not the user's
 
     def compose(self) -> ComposeResult:
         yield RichLog(max_lines=MAX_LINES, wrap=True, markup=False, highlight=False, min_width=20,
@@ -64,6 +69,7 @@ class LogView(Widget):
 
     def reset(self) -> None:
         self.richlog.clear()
+        self._raw.clear()
         self.count = 0
         self._err_hit = -1
         self.live = None
@@ -75,6 +81,7 @@ class LogView(Widget):
         log = self.richlog
         for line in update.lines:
             log.write(_highlight(line), scroll_end=self.follow)
+        self._raw.extend(update.lines)
         self.count += len(update.lines)
         if update.lines or update.live is not None:
             self.live = update.live
@@ -85,9 +92,31 @@ class LogView(Widget):
             self.stream_ended = True
         self._render_live()
 
+    def forget_rendered(self) -> None:
+        """The palette changed: draw the kept lines and the status line again in the new colours, at the same scroll
+        position and follow state."""
+        if not self.is_mounted:
+            return
+        log = self.richlog
+        y = log.scroll_y
+        self._redrawing = True
+        try:
+            log.clear()
+            for line in self._raw:
+                log.write(_highlight(line), scroll_end=False)
+            if self.follow:
+                log.scroll_end(animate=False, immediate=True)
+            else:
+                log.scroll_to(y=y, animate=False, immediate=True)
+        finally:
+            self._redrawing = False
+        self._render_live()
+
     def _scrolled(self, old: float, new: float) -> None:
         """Scrolling up while following pauses (a new line must not yank the view back to the bottom); scrolling
         back to the bottom resumes a pause that scrolling caused. Auto-scroll only ever moves down."""
+        if self._redrawing:
+            return
         at_bottom = new >= self.richlog.max_scroll_y - 1
         if self.follow and new < old and not at_bottom:
             self.set_follow(False)

@@ -36,6 +36,26 @@ slices, which are not whole GPUs; nodes planned by the backfill scheduler includ
 CPU/memory/load and your tasks. Below 100 columns the cards become one table row per host. A card's footer explains a
 problem and the key that fixes it.
 
+In a tall, wide enough terminal (at least 32 rows for the cards, room for three more rows per row of cards, and cards
+at least 52 columns inside, which takes 113 columns with two cards per row; e.g. 120×40 or 172×62) the cards grow into the empty space and stay that size: their height follows the terminal, never the data, so
+nothing jumps when jobs come and go. Each card keeps its summary at the top and then lists your jobs by how much they
+need you: fresh failures (last 4 h) with why they ended, running jobs that look stalled (`log idle 51m`) or are short on
+time, pending jobs that will never run or are held, then the rest of the running jobs by time left and the pending ones
+by estimated start. When they do not all fit, the last row says how many more there are and when the next one ends;
+`tab` shows them all in the Jobs view. A workstation's GPU lines say who holds each GPU (`free`, `mine orb.launch`,
+`carol sample.py`, `in use · no process` when memory is held but no process is visible, `?` for an old reading,
+`no reading` when nvidia-smi gave neither utilisation nor memory), and
+its list shows your tasks and other users'. The empty cell after the last card becomes the *fleet panel*: free GPUs
+right now by type across the whole fleet, your GPU types first (`H200  9  vega h200 6 (5 planned) · k2 gpu-preempt
+3`), and what changed since your last visit: failures and completions from the store (they survive a restart), plus
+jobs that ran low on time, restarted or left a GPU idle, which come from this session's alerts and so only appear
+for the events selected in `[notify]`. "Free" is what
+`sinfo` and `nvidia-smi` last reported (up to a few minutes old, `sinfo 2m ago`), not your quota: a partition limit,
+a QOS or someone faster may still take them. A cluster whose last `sinfo` failed or is much older than its polling
+pace is listed as `k2 ?` instead of counted, like a host that is down. Rows older than 20 h show their day
+(`Mon 11:00`), and events of a host you removed in Settings disappear from the panel. None of this polls anything new. Palette › *Fleet: compact cards* keeps
+the cards at their summary size; *Fleet: roomy cards* brings the roomy layout back (remembered in `ui.json`).
+
 **Jobs view** (`tab`). Every job of every host in one table. By default it shows the *fresh* preset: active and queued
 jobs plus anything that ended in the last 24 h (failed, cancelled and "ended" tasks stay visible). Long names keep the
 part that tells sweep siblings apart (`orb-swp--tr…warmup--s43--a02` next to `orb-swp--tra…const--s43--a02`);
@@ -78,7 +98,7 @@ faults, NaN losses, disk quota), which are shown in red (warnings in yellow) her
 
 **Command palette** (`ctrl+p` or `:`). Fuzzy commands: switch views and scope, open a host, connect, refresh,
 enable/disable hosts, state presets, sort/group, *Doctor &lt;host&gt;*, *Settings*, *Action log*, *RunFleet log*,
-*Log in to all hosts needing auth*, *Forward a port…*, *Forwards*.
+*Log in to all hosts needing auth*, *Forward a port…*, *Forwards*, *Fleet: roomy cards* / *Fleet: compact cards*.
 
 **Settings** (`,`, the `⚙` at the top right, or the palette). A panel with three sections (`tab` or `←`/`→`, or click
 a tab):
@@ -101,7 +121,8 @@ a tab):
   by hand shows as `custom` and stays until you change that row). `space` steps to the next value; click a value to
   pick it. Changes apply at once and are saved in `[general]` / `[notify]` (the default view takes effect at the next
   start). The notification command hook is set in config.toml only; the group heading says whether one is set.
-- *About*: the config file (`enter` or `e` opens it in `$EDITOR`), the log, the state directory, the version. On the
+- *About*: the config file (`enter` or `e` opens it in `$EDITOR`), the log, the state directory, the version, the
+  theme (`enter` cycles auto / dark / light / ansi; see *Colours* below). On the
   version row `enter` asks GitHub for the newest version. When a newer one exists, `enter` and `enter` again quit,
   update RunFleet (as `runfleet update` does, in the terminal) and start it again with the same arguments; a failed
   update leaves its output on the terminal. *Update RunFleet* in the palette goes there directly. At start RunFleet
@@ -373,9 +394,35 @@ In a narrow terminal the header shortens chips to `✖lynx:a` or `✖5:a`: `:a` 
 the state reads without colour too. A new notice appears whenever a host moves to a state that needs you (an
 unreachable host that comes back asking for a login says so).
 
-**Colours.** RunFleet picks a light palette when `COLORFGBG` reports a light background; terminals that do not set it
-(macOS Terminal, many others) get the dark one, so on a white profile start it with `RUNFLEET_THEME=light` (or `dark`
-to force the opposite). `NO_COLOR=1` drops colour for attributes (bold, reverse); an empty `NO_COLOR` counts as unset.
+**Colours.** At start RunFleet asks the terminal for its background colour (most terminals, tmux and ssh sessions
+answer; one round trip). A light background (one where black text reads better than white, mid greys included) gets
+the light palette, a dark one the dark palette, and every grey, panel,
+frame and cursor row is mixed from that background, so they sit in your colour scheme's own hue (Solarized, Dracula,
+Catppuccin …) instead of being grey boxes. A terminal that does not answer falls back to `COLORFGBG`, then dark.
+
+Settings › About › *theme* (`↵` cycles, or palette › *Theme: …*) switches at once and is remembered:
+
+| theme | what you get |
+|---|---|
+| `auto` (default) | dark or light from the terminal's background |
+| `dark` / `light` | that palette, whatever the terminal reports |
+| `ansi` | only the terminal's own 16 colours: RunFleet looks like your colour scheme (picked automatically when the terminal has only 16 colours) |
+
+`RUNFLEET_THEME=dark|light|ansi` overrides the setting for one run; the About row then shows both (`light → dark`,
+`RUNFLEET_THEME`). Keys typed while RunFleet waits for the terminal's answer are kept where the system allows it
+(not on hardened Linux kernels, where `dev.tty.legacy_tiocsti` is 0). `NO_COLOR=1` drops colour for attributes (bold,
+reverse); an empty `NO_COLOR` counts as unset. `runfleet doctor` starts with a *terminal* block: `TERM`, `COLORTERM`,
+the colour depth Textual will use, the reported background and the theme it leads to.
+
+If colours still look wrong:
+- **Washed-out or 256-colour look over ssh:** `COLORTERM` is not forwarded by ssh, so the remote side assumes 256
+  colours. Add `SendEnv COLORTERM` to your ssh config (and `AcceptEnv COLORTERM` on the server), or
+  `export COLORTERM=truecolor` in the remote shell's rc.
+- **iTerm2:** *Settings › Profiles › Colors › Minimum contrast* above 0 pushes dim text towards black or white, and
+  *Faint text opacity* fades dimmed text; *Settings › Advanced › Use P3 as default color space* (on by default) shows
+  RunFleet's reds and greens more saturated than intended — turn it off for sRGB colours. *Dim inactive split panes*
+  greys out RunFleet in an unfocused pane.
+- **Still unhappy:** try `ansi`, which hands every colour choice to your terminal's colour scheme.
 
 `runfleet doctor HOST` prints the full diagnosis in a plain terminal. `e` on a host opens the same information in the
 TUI, with *Connect*, *Retry now* and *Disable host*.
@@ -397,7 +444,7 @@ up again after a few healthy rounds; the host card and `e` say `controller busy 
 |---|---|
 | `~/.config/runfleet/config.toml` | your configuration (optional); Settings (`,`) edits it, keeping your comments |
 | `~/.local/state/runfleet/cache.sqlite` | warm start: last snapshots, capabilities, job metadata (`--no-cache` to skip) |
-| `~/.local/state/runfleet/ui.json` | view, sort, filter, preset, grouping; watched jobs and the last visit |
+| `~/.local/state/runfleet/ui.json` | view, sort, filter, preset, grouping, theme, Fleet card size; watched jobs and the last visit |
 | `~/.local/state/runfleet/runfleet.log` | log (5 MB × 3); `--debug` adds `debug/` raw dumps; lines from `--demo` carry `[demo]` |
 | `~/.local/state/runfleet/bundles/` | support bundles from the copy menu (`HOST-ID.md`, secrets scrubbed) |
 | `~/.local/state/runfleet/ssh-HOST.log` | ssh's own messages when making a connection |

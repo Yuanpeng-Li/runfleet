@@ -15,6 +15,7 @@ from runfleet.backends.common import ParseResult
 from runfleet.backends.common.cgroup import parse_cgroup_block
 from runfleet.backends.process.parse_ps import OWN_COLUMNS, parse_ps_rows
 from runfleet.models import CgroupStats, Proc
+from runfleet.util.humanize import gpu_type_from_name as gpu_type_from_name   # lives in util: the UI reads it too
 from runfleet.util.slurmfmt import split_rows
 
 # `0::/system.slice/n-40-01_slurmstepd.scope/job_2332863/step_extern/user/task_0` (k2/vega) or
@@ -249,13 +250,6 @@ def parse_self(text: str) -> SelfCheck | None:
     last = reads[-1]
     stuck = tuple(sorted(first & {pid for pid, stat in last if stat.startswith("D")}))
     return SelfCheck(stuck=stuck, other=len({pid for pid, _ in last} - set(stuck)))
-
-
-def gpu_type_from_name(name: str) -> str:
-    """nvidia-smi `name` → the lower-case Slurm gres spelling AutoDetect=nvml produces (`NVIDIA H200 NVL` →
-    `nvidia_h200_nvl`, `NVIDIA A100-SXM4-40GB` → `nvidia_a100-sxm4-40gb`), so gpu_types.mem_mib and gpu_label
-    treat it like any gres type."""
-    return "_".join(name.strip().lower().split())
 
 
 # ---------------------------------------------------------------- audit

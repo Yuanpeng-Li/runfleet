@@ -41,6 +41,7 @@ class Harness:
         monkeypatch.setattr(cli, "has_terminal", lambda: True)
         monkeypatch.setattr(cli, "ask", self._ask)
         monkeypatch.setattr(cli, "run_command", self._run_command)
+        monkeypatch.setattr(cli, "terminal_report", lambda **kw: ["terminal", "  (test)"])   # never queries /dev/tty
         monkeypatch.setattr(cli.paths, "config_file", lambda: self.config_path)
         monkeypatch.setattr(cli.paths, "log_file", lambda: self.log_path)
         monkeypatch.setattr(cli.paths, "cache_file", lambda: tmp_path / "cache.sqlite")
@@ -115,7 +116,7 @@ def test_global_options_work_before_and_after_the_subcommand() -> None:
 def test_version_and_bad_usage(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["--version"])
-    assert exc.value.code == 0 and capsys.readouterr().out.strip() == "runfleet 0.4.0"
+    assert exc.value.code == 0 and capsys.readouterr().out.strip() == "runfleet 0.5.0"
     with pytest.raises(SystemExit) as exc:
         cli.main(["--frobnicate"])
     assert exc.value.code == 2
@@ -126,7 +127,7 @@ def test_version_and_bad_usage(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_python_m_runfleet_entry_point() -> None:
     out = subprocess.run([sys.executable, "-m", "runfleet", "--version"], capture_output=True, text=True, timeout=60)
-    assert out.returncode == 0 and out.stdout.strip() == "runfleet 0.4.0"
+    assert out.returncode == 0 and out.stdout.strip() == "runfleet 0.5.0"
 
 
 # ---------------------------------------------------------------------------------------------------- TUI start
@@ -408,7 +409,7 @@ def test_doctor_output_and_exit_codes(h: Harness, capsys: pytest.CaptureFixture[
     h.script = script
     rc, out, _ = run(["doctor", "--demo", "k2"], capsys)
     assert rc == 0
-    assert out.splitlines() == ["k2", "  ✓ ssh -G  user alice0001", "  · mux     user"]
+    assert out.splitlines() == ["terminal", "  (test)", "k2", "  ✓ ssh -G  user alice0001", "  · mux     user"]
     rc, out, _ = run(["doctor", "--demo", "--reset", "k2", "lyra", "vega"], capsys)
     assert rc == 4
     assert "  ✗ gpu_tres  no gres/gpuutil" in out and "  ! lyra: no GPU accounting" in out
@@ -569,6 +570,47 @@ def test_terminal_check_uses_the_streams_textual_uses(monkeypatch: pytest.Monkey
     assert not setup(False, True, True, "xterm-256color")          # `runfleet < /dev/null`: no keyboard
     assert not setup(True, True, False, "xterm-256color")          # `runfleet 2> log`: escapes into the file
     assert not setup(True, True, True, "dumb") and not setup(True, True, True, None)
+
+
+@pytest.mark.parametrize(("stdout_tty", "terminal", "queried"), [
+    (True, True, True),
+    (False, True, False),            # `runfleet doctor | less`: the pager would read the reply
+    (True, False, False),            # no keyboard / no terminal for Textual's streams
+])
+def test_terminal_report_asks_the_terminal_only_when_both_ends_are_it(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stdout_tty: bool, terminal: bool, queried: bool) -> None:
+    """The real terminal_report (the CLI harness replaces it): the OSC 11 query, the saved choice and the result."""
+    import runfleet.ui.app as app_module
+    from runfleet.ui import termbg, theme
+
+    asked: list[float] = []
+
+    def query(timeout: float = termbg.TIMEOUT, **_kw: Any) -> str:
+        asked.append(timeout)
+        return "#fdf6e3"
+
+    class Out:
+        def isatty(self) -> bool:
+            return stdout_tty
+
+    state = tmp_path / "ui.json"
+    state.write_text(json.dumps({"theme": "auto"}), encoding="utf-8")
+    monkeypatch.setattr(termbg, "query_background", query)
+    monkeypatch.setattr(cli, "has_terminal", lambda: terminal)
+    monkeypatch.setattr(sys, "stdout", Out())
+    monkeypatch.setattr(app_module, "ui_state_path", lambda: state)
+    monkeypatch.setattr(theme, "color_system", lambda env=None: "truecolor")
+    for var in ("RUNFLEET_THEME", "COLORFGBG", "TERM_PROGRAM", "LC_TERMINAL"):
+        monkeypatch.delenv(var, raising=False)
+    lines = cli.terminal_report()
+    assert len(asked) == int(queried) and lines[0] == "terminal"
+    if queried:
+        assert "background #fdf6e3 · theme auto → light (terminal background)" in lines[2]
+    else:
+        assert "background not reported · theme auto → dark (default)" in lines[2]
+    state.write_text(json.dumps({"theme": "ansi"}), encoding="utf-8")
+    assert "theme ansi → ansi (setting)" in cli.terminal_report()[2]
+    assert "theme auto → " in cli.terminal_report(demo=True)[2]         # --demo keeps no UI state
 
 
 def test_connect_by_ssh_alias_uses_the_configured_name(h: Harness, capsys: pytest.CaptureFixture[str]) -> None:

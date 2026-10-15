@@ -3,6 +3,10 @@
 Cards (mockup A) when the view is >= 100 columns wide (2 per row, 3 per row >= 180), a one-row-per-host table
 (mockup B) below that. Selection survives refreshes and the cards/table switch; ``space``/click scopes the app to
 the selected host, ``enter``/double-click opens its host screen.
+
+A tall view gets roomy cards (tier T1, :mod:`runfleet.ui.fleet_layout`): the row heights follow from the view size and
+each card's shape only (never from the data), each card lists the jobs that need the user, and the fleet panel fills
+the empty grid cell. ui.json ``fleet_layout = "compact"`` keeps today's cards. Nothing here polls anything.
 """
 
 from __future__ import annotations
@@ -18,13 +22,17 @@ from textual.widgets import DataTable, Static
 
 from runfleet.core.store import HostState
 from runfleet.models import ConnState, JobKind, StateGroup
-from runfleet.ui import keymap, render, theme
+from runfleet.ui import fleet_layout, keymap, render, theme
+from runfleet.ui.fleet_layout import CARDS_MIN_WIDTH, HighWater, Ranked, columns_for, inner_width
+from runfleet.ui.widgets.fleet_panel import FleetPanel, panel_lines
 from runfleet.ui.widgets.job_table import ClickTable
 from runfleet.ui.widgets.host_card import HostCard, card_lines, card_title, is_cluster, old_reading
 from runfleet.ui.query import ended_at
 from runfleet.util import humanize
 
-CARDS_MIN_WIDTH = 100
+__all__ = ["CARDS_MIN_WIDTH", "FleetView", "columns_for", "host_row", "fleet_layout_choice"]
+
+LAYOUT_CHOICES = ("auto", "compact")
 
 TABLE_COLUMNS: tuple[tuple[str, str, int], ...] = (
     ("mark", "", 1), ("num", "#", 1), ("host", "HOST", 11), ("kind", "KIND", 5), ("state", "STATE", 8),
@@ -32,12 +40,29 @@ TABLE_COLUMNS: tuple[tuple[str, str, int], ...] = (
 )
 
 
-def columns_for(width: int) -> int:
-    return 3 if width >= 180 else 2
+def fleet_layout_choice(ui_state: Any) -> str:
+    """ui.json ``fleet_layout``: ``auto`` (roomy cards when the view has room) or ``compact`` (always today's)."""
+    choice = ui_state.get("fleet_layout") if isinstance(ui_state, dict) else None
+    return choice if choice in LAYOUT_CHOICES else "auto"
 
 
 class FleetTable(ClickTable):
     """Narrow-terminal host table; enter / double-click opens the host."""
+
+
+class FleetCards(VerticalScroll):
+    """The scrolling grid of cards. A click on what is not a card (the fleet panel, a gap) leaves the focus on the
+    selected card: only the cards take focus from the mouse."""
+
+    FOCUS_ON_CLICK = False
+
+
+def empty_text() -> Text:
+    """The empty-fleet message, in the current palette (rebuilt after a theme switch)."""
+    return Text.assemble(
+        ("No hosts in the fleet.\n\n", "bold"),
+        ("Press ", theme.muted()), (",", "bold"), (" (Settings) to pick hosts from ~/.ssh/config or add an ssh "
+                                                  "target; they are saved and polled at once.", theme.muted()))
 
 
 class FleetView(Widget, can_focus=False):
@@ -52,21 +77,23 @@ class FleetView(Widget, can_focus=False):
         self.selected: str | None = None
         self.mode = "cards"
         self._syncing = False
+        self.plan: fleet_layout.Plan | None = None
+        self._hw: dict[str, HighWater] = {}               # shape high-water marks, per host, this session
+        # host -> (jobs, minute, window, expiry, ranked list, its distinct name starts)
+        self._ranks: dict[str, tuple[object, int, float, Any, list[Ranked], dict[str, int]]] = {}
+        self._memo = fleet_layout.Memo()                   # the fleet panel's fleet-wide scans
 
     @property
     def rf(self) -> Any:
         return self.app
 
     def compose(self) -> ComposeResult:
-        yield Static(Text.assemble(
-            ("No hosts in the fleet.\n\n", "bold"),
-            ("Press ", theme.muted()), (",", "bold"), (" (Settings) to pick hosts from ~/.ssh/config or add an ssh "
-                                                      "target; they are saved and polled at once.", theme.muted())),
-            id="fleet-empty")
-        with VerticalScroll(id="fleet-cards"):
+        yield Static(empty_text(), id="fleet-empty")
+        with FleetCards(id="fleet-cards"):
             with Grid(id="fleet-grid"):
                 for i, name in enumerate(self.rf.host_names(), start=1):
                     yield HostCard(name, i)
+                yield FleetPanel()
         table = FleetTable(id="fleet-table")
         yield table
 
@@ -78,6 +105,10 @@ class FleetView(Widget, can_focus=False):
         self.selected = self.rf.scope or (names[0] if names else None)
         self._apply_mode(force=True)
         self.refresh_data()
+
+    def forget_rendered(self) -> None:
+        """The palette changed: rebuild the empty-fleet message (the cards and the panel follow refresh_data)."""
+        self.query_one("#fleet-empty", Static).update(empty_text())
 
     def on_resize(self, event: events.Resize) -> None:
         self._apply_mode()
@@ -147,7 +178,10 @@ class FleetView(Widget, can_focus=False):
         names = self.rf.host_names()
         grid = self.query_one("#fleet-grid", Grid)
         await grid.remove_children()
-        await grid.mount_all([HostCard(n, i) for i, n in enumerate(names, start=1)])
+        await grid.mount_all([*(HostCard(n, i) for i, n in enumerate(names, start=1)), FleetPanel()])
+        self._hw.clear()                         # shapes are re-learnt for the new host set / order
+        self._ranks.clear()
+        self._memo.clear()
         self.query_one(FleetTable).clear()
         if self.selected not in names:
             self.selected = names[0] if names else None
@@ -170,13 +204,43 @@ class FleetView(Widget, can_focus=False):
         else:
             self._refresh_table(hosts, now)
 
+    def roomy_enabled(self) -> bool:
+        return fleet_layout_choice(self.rf.ui_state) != "compact"
+
+    def _ranked(self, state: HostState, now: Any, window: float) -> tuple[list[Ranked], dict[str, int]] | None:
+        """The card's ranked list and its names' distinct starts, recomputed when its jobs change, a minute passes
+        (time cells move per minute) or a failure crosses the 4 h / ``window`` line (:func:`fleet_layout.rank_expiry`:
+        to the second, like the card's ``my jobs`` counts)."""
+        snap = state.snapshot
+        if snap is None:
+            return None
+        minute = int(now.timestamp() // 60)
+        hit = self._ranks.get(state.config.name)
+        if (hit is not None and hit[0] is snap.jobs and hit[1] == minute and hit[2] == window
+                and (hit[3] is None or now < hit[3])):
+            return hit[4], hit[5]
+        rank = fleet_layout.rank_slurm if is_cluster(state) else fleet_layout.rank_ws
+        ranked = rank(snap.jobs.values(), now, window)
+        starts = fleet_layout.ranked_starts(ranked)
+        self._ranks[state.config.name] = (snap.jobs, minute, window, fleet_layout.rank_expiry(ranked, window), ranked,
+                                          starts)
+        return ranked, starts
+
     def _refresh_cards(self, hosts: dict[str, HostState], now: Any) -> None:
         width = self.size.width or 120
         cols = columns_for(width)
-        inner = max(30, width // cols - 4)
+        inner = inner_width(width, cols)              # the scrollbar gutter (always reserved) takes one column
         general = self.rf.service.config.general
         ui = self.rf.service.config.ui
         cards = list(self.query(HostCard))
+        shapes = [fleet_layout.shape_of(hosts[c.host], inner, self._hw.setdefault(c.host, HighWater()))
+                  for c in cards]
+        plan = self.plan = fleet_layout.plan(width, self.size.height, shapes,
+                                             self.roomy_enabled())
+        if plan.tier >= 1:
+            self._refresh_roomy(hosts, now, cards, shapes, plan)
+            return
+        self._show_panel(None, hosts, now)
         rendered = []
         for card in cards:
             state = hosts[card.host]
@@ -192,6 +256,45 @@ class FleetView(Widget, can_focus=False):
                                stale=state.stale(now), problem=problem)
         for card in cards:
             card.set_class(card.host == self.rf.scope, "-scoped")
+
+    def _refresh_roomy(self, hosts: dict[str, HostState], now: Any, cards: list[HostCard],
+                       shapes: list[fleet_layout.Shape], plan: fleet_layout.Plan) -> None:
+        """T1: every card padded to its row height; the list region of each card fills what its fixed part leaves."""
+        general = self.rf.service.config.general
+        ui = self.rf.service.config.ui
+        watched = self.rf.alerts.is_watched
+        for i, (card, shape) in enumerate(zip(cards, shapes, strict=True)):
+            height = plan.heights[i // plan.cols]
+            state = hosts[card.host]
+            ranked, starts = self._ranked(state, now, general.recent_window) or (None, None)
+            lines = card_lines(state, now, width=plan.inner, window=general.recent_window,
+                               util_t=ui.gpu_util_thresholds, mem_t=ui.gpu_mem_thresholds,
+                               list_rows=height - shape.t1 if shape.cap else None, wide=plan.wide,
+                               fixed=shape.fixed, ranked=ranked, starts=starts, watched=watched)
+            problem = state.status.state in (ConnState.NEEDS_AUTH, ConnState.HOSTKEY, ConnState.UNREACHABLE)
+            card.set_lines(card_title(state, card.index, now, width=plan.inner), lines[:height], height,
+                           stale=state.stale(now), problem=problem)
+            card.set_class(card.host == self.rf.scope, "-scoped")
+        self._show_panel(plan, hosts, now)
+
+    def _show_panel(self, plan: fleet_layout.Plan | None, hosts: dict[str, HostState], now: Any) -> None:
+        try:
+            panel = self.query_one(FleetPanel)
+        except Exception:        # rebuilding (sync_hosts)
+            return
+        spec = plan.panel if plan is not None else None
+        if spec is None or plan is None:
+            panel.display = False
+            return
+        width = self.size.width or 120
+        inner = max(30, ((width - 1) * spec.span) // plan.cols - 4)
+        alerts = self.rf.alerts
+        lines = panel_lines(hosts, now, rows=spec.rows, width=inner, wide=inner >= fleet_layout.WIDE_INNER,
+                            window=self.rf.service.config.general.recent_window, history=alerts.history,
+                            digest_since=alerts.digest_since, memo=self._memo,
+                            rate=getattr(self.rf, "multiplier", 1.0))
+        panel.set_lines(lines, spec.span, spec.rows)
+        panel.display = True
 
     def _refresh_table(self, hosts: dict[str, HostState], now: Any) -> None:
         table = self.query_one(FleetTable)

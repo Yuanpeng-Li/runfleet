@@ -44,13 +44,14 @@ backends.process backends.process.collector backends.process.parse_ps backends.p
 backends.process.actions
 core core.service core.store core.clock core.poller core.actions core.logs core.cache core.doctor
 core.forwards core.events core.attach
-ui ui.app ui.messages ui.keymap ui.render ui.theme ui.commands ui.query ui.everyday
+ui ui.app ui.messages ui.keymap ui.render ui.theme ui.commands ui.query ui.everyday ui.fleet_layout
 ui.screens ui.screens.main ui.screens.job_detail ui.screens.host_detail ui.screens.log_viewer ui.screens.help
 ui.screens.confirm ui.screens.action_menu ui.screens.host_error ui.screens.settings ui.screens.forwards
-ui.notify ui.screens.notifications
+ui.notify ui.screens.notifications ui.termbg
 ui.widgets ui.widgets.header ui.widgets.hintbar ui.widgets.tabs ui.widgets.fleet_view ui.widgets.host_card
 ui.widgets.jobs_view ui.widgets.job_table ui.widgets.job_preview ui.widgets.gpus_view ui.widgets.gpu_panel
 ui.widgets.proc_table ui.widgets.node_table ui.widgets.log_view ui.widgets.filter_bar ui.widgets.attach_panel
+ui.widgets.fleet_panel
 demo demo.world demo.render demo.transport
 """.split()
 
@@ -131,6 +132,41 @@ def test_backends_are_sans_io() -> None:
         if bad:
             offenders.append(f"{path.relative_to(PKG_DIR)}: {sorted(bad)}")
     assert not offenders, f"backends/ must not import asyncio/subprocess/textual: {offenders}"
+
+
+def _backend_imports(path: Path) -> set[str]:
+    """``runfleet.backends`` modules a file imports anywhere (incl. function-local imports), dotted."""
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+        if isinstance(node, ast.Import):
+            found.update(a.name for a in node.names if a.name.startswith("runfleet.backends"))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            if node.module == "runfleet.backends":
+                found.update(f"runfleet.backends.{a.name}" for a in node.names)
+            elif node.module.startswith("runfleet.backends."):
+                found.add(node.module)
+        elif (isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant)
+              and isinstance(node.args[0].value, str) and node.args[0].value.startswith("runfleet.backends")):
+            found.add(node.args[0].value)          # importlib.import_module / __import__
+    return found
+
+
+def test_ui_imports_only_the_backend_contract() -> None:
+    """§11.5 / DESIGN §5.2.5: the UI must not import backends; only the contract types of ``backends.base``."""
+    offenders = []
+    for path in (PKG_DIR / "ui").rglob("*.py"):
+        bad = {m for m in _backend_imports(path) if m != "runfleet.backends.base"}
+        if bad:
+            offenders.append(f"{path.relative_to(PKG_DIR)}: {sorted(bad)}")
+    assert not offenders, f"ui/ imports backends beyond backends.base: {offenders}"
+
+
+def test_backend_import_checker_detects_violations(tmp_path: Path) -> None:
+    probe = tmp_path / "x.py"
+    probe.write_text("from runfleet.backends.base import Cadence\nfrom runfleet.backends import base, registry\n"
+                     "def f():\n    from runfleet.backends.slurm.parse_sinfo import node_free\n", encoding="utf-8")
+    assert _backend_imports(probe) == {"runfleet.backends.base", "runfleet.backends.registry",
+                                       "runfleet.backends.slurm.parse_sinfo"}
 
 
 def test_boundary_checker_detects_violations(tmp_path: Path) -> None:

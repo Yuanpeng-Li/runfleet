@@ -537,6 +537,10 @@ class JobDetailScreen(FleetScreen):
         self._reload_pending = False
         self._attached = False                                   # attach_start called, attach_stop not yet
 
+    def forget_rendered(self) -> None:
+        """The palette changed: rebuild the Steps rows (see ClickTable.forget_rendered)."""
+        self._steps_shown = ()
+
     def compose(self) -> ComposeResult:
         job = self.rf.store.job(self.key)
         self.job = job
@@ -569,7 +573,8 @@ class JobDetailScreen(FleetScreen):
                 yield LogView(id="logs-log", classes="box")
             with TabPane("Steps", id="steps"):
                 with Vertical():
-                    yield DataTable(id="steps-table", cursor_type="row", show_row_labels=False, cell_padding=0)
+                    yield DataTable(id="steps-table", cursor_type="row", show_row_labels=False, cell_padding=0,
+                                    cursor_foreground_priority="renderable")
                     yield Static("", id="why", classes="box")
             with TabPane("Procs", id="procs"):
                 with Vertical():

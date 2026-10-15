@@ -112,10 +112,11 @@ class GpuTable(ClickTable):
 
 
 class GPUsView(Widget):
+
     BINDINGS = keymap.bindings("gpus")
     DEFAULT_CSS = """
     GPUsView { height: 1fr; }
-    GPUsView > #gpus-note { height: 1; color: $text-muted; padding: 0 1; }
+    GPUsView > #gpus-note { height: 1; color: $rf-muted; padding: 0 1; }
     """
 
     def __init__(self, *, id: str | None = None) -> None:
@@ -126,6 +127,11 @@ class GPUsView(Widget):
         self._cols: tuple[str, ...] = ()
         self._cols_sig: tuple[object, ...] = ()
         self._cells: dict[str, tuple[Text, ...]] = {}
+
+    def forget_rendered(self) -> None:
+        """The palette changed: rebuild every row (see ClickTable.forget_rendered)."""
+        self._cells = {}
+        self._cols_sig = ()
 
     @property
     def rf(self) -> Any:

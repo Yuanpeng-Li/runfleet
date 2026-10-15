@@ -615,3 +615,31 @@ def test_spread_keeps_a_gap_between_a_long_value_and_its_note() -> None:
     line = _spread(Text("   config file   /tmp/rf-set/config/runfleet/config.toml"), Text("↵ edit in $EDITOR "), 72)
     assert line.cell_len == 72 and "… ↵ edit" in line.plain
     assert _spread(Text("abc"), Text("de"), 5).plain == "a… de" and _spread(Text("abc"), Text("de"), 6).plain == "abc de"
+
+
+async def test_about_theme_row_shows_the_mode_runfleet_theme_forces(make_app: MakeApp,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """The row showed the stored choice ("light") while RUNFLEET_THEME kept the palette dark."""
+    from runfleet.ui import theme
+
+    app, _svc = make_app()
+    try:
+        async with app.run_test(size=BIG) as pilot:
+            theme.configure("dark", "#1e1e2e", source="terminal background")
+            monkeypatch.setenv("RUNFLEET_THEME", "dark")
+            app.set_theme_choice("light")
+            screen = await open_settings(pilot)
+            screen.section = "about"
+            screen.selected["about"] = 0
+            screen.redraw()
+            await pilot.pause()
+            row = next(line for line in panel_text(app).splitlines() if "theme" in line)
+            assert "light → dark" in row and "RUNFLEET_THEME" in row and "#1e1e2e" not in row
+            monkeypatch.delenv("RUNFLEET_THEME")
+            app.set_theme_choice("light")
+            screen.redraw()
+            await pilot.pause()
+            row = next(line for line in panel_text(app).splitlines() if "theme" in line)
+            assert "light → " not in row and "light" in row and "RUNFLEET_THEME" not in row
+    finally:
+        theme.configure("dark")

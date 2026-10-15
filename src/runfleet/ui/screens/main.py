@@ -114,6 +114,12 @@ class MainScreen(FleetScreen):
     def help_contexts(self) -> list[str]:
         return [self.view, "main", "global"]
 
+    def legend_contexts(self) -> list[str]:
+        """The fleet panel's glyphs only while the Fleet view shows the panel (not in table mode or compact cards)."""
+        plan = self.fleet.plan
+        shown = self.view == "fleet" and self.fleet.mode == "cards" and plan is not None and plan.panel is not None
+        return [*self.help_contexts(), *(["fleet_panel"] if shown else [])]
+
     def help_title(self) -> str:
         return TITLES[self.view]
 

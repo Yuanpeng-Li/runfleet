@@ -16,12 +16,12 @@ from runfleet.backends.common import ParseResult
 from runfleet.backends.slurm.commands import SEP, SINFO_FIELDS
 from runfleet.backends.slurm.parse_squeue import split_row
 from runfleet.models import GresCount, Node, PartitionSummary
-from runfleet.util.slurmfmt import nullish, parse_int, split_outside, split_state
+from runfleet.util.slurmfmt import is_planned as is_planned
+from runfleet.util.slurmfmt import node_free, nullish, parse_int, split_outside, split_state
 from runfleet.util.slurmfmt import split_rows
 
 USABLE_STATES = frozenset({"idle", "mixed", "allocated", "completing", "planned"})
 UNUSABLE_FLAGS = frozenset("*~#!%$@^")
-PLANNED_FLAG = "-"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,10 +80,6 @@ def is_usable(base: str, flags: Iterable[str]) -> bool:
     """Counts free GPUs: base in {idle, mixed, allocated, completing, planned} and none of `* ~ # ! % $ @ ^`. The `-`
     flag (planned by backfill, vega `mixed-`) stays usable."""
     return base in USABLE_STATES and not (set(flags) & UNUSABLE_FLAGS)
-
-
-def is_planned(node: Node) -> bool:
-    return node.state == "planned" or PLANNED_FLAG in node.flags
 
 
 def parse_sinfo(text: str, *, sep: str = SEP, fields: Sequence[str] = SINFO_FIELDS) -> ParseResult[Node]:
@@ -151,18 +147,13 @@ def summarize(nodes: Iterable[Node], partitions: Sequence[str] | None = None) ->
         states: Counter[str] = Counter()
         for node in members:
             states[node.state] += 1
-            for g in node.gres:
-                if g.name != "gpu":
-                    continue
-                # GPUs on a node whose CPUs are all allocated cannot be scheduled (sinfo state "allocated")
-                node_free = g.total - g.used if node.usable and node.cpus_idle != 0 else 0
-                total += g.total
-                free += node_free
-                if is_planned(node):
-                    planned += node_free
-                t = types.setdefault(g.type or "gpu", [0, 0])
-                t[0] += node_free
-                t[1] += g.total
+            for gtype, node_free_n, node_total, node_planned in node_free(node):
+                total += node_total
+                free += node_free_n
+                planned += node_planned
+                t = types.setdefault(gtype, [0, 0])
+                t[0] += node_free_n
+                t[1] += node_total
         out.append(PartitionSummary(name=p, nodes=len(members), gpus_total=total, gpus_free=free,
                                     gpus_free_planned=planned, gpu_types={k: (v[0], v[1]) for k, v in types.items()},
                                     states=dict(states)))

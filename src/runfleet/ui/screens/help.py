@@ -49,6 +49,9 @@ def _column_widths(columns: Sequence[tuple[str, list[tuple[str, str]]]], key_ws:
 
 LEGEND: tuple[tuple[str, str, str], ...] = (
     ("jobs", "▸ + ! ~", "cursor row · marked · host has a problem · host data is stale"),
+    ("fleet_panel", "✖ ✓ ■ ◷ ↻ ◌", "what changed: bad end · completed · other end · low on time · restarted · "
+                                   "GPU idle"),
+    ("fleet_panel", "free GPUs", "fleet panel: what sinfo / nvidia-smi saw minutes ago, not your quota"),
     ("gpus", "*  ~", "per-job aggregate from Slurm accounting (not one GPU's reading) · stale"),
     ("global", "⟳ 15s", "tick interval of the hosts in scope (spinner while a probe is in flight)"),
     ("global", "F 5/{window}", "jobs that ended within the recent window (header)"),
@@ -57,16 +60,17 @@ LEGEND: tuple[tuple[str, str, str], ...] = (
 
 
 def legend(contexts: Sequence[str], width: int, window: str = "24h") -> Text:
-    """Glyph legend for the overlay (rows relevant to these contexts plus the global ones); ``window`` is
-    general.recent_window as the header shows it (``F 5/24h``)."""
+    """Glyph legend for the overlay (rows relevant to these contexts plus the global ones; ``fleet_panel`` only while
+    the Fleet view shows its panel); ``window`` is general.recent_window as the header shows it (``F 5/24h``)."""
     out = Text("Legend", style=f"bold {theme.muted()}")
-    for ctx, glyphs, text in LEGEND:
-        if ctx in contexts or ctx == "global":
-            line = Text("\n")
-            line.append(glyphs.format(window=window).ljust(9), style=theme.accent())
-            line.append(" " + text)
-            line.truncate(width, overflow="ellipsis")
-            out.append_text(line)
+    rows = [(g.format(window=window), text) for ctx, g, text in LEGEND if ctx in contexts or ctx == "global"]
+    key_w = max([9, *(len(g) for g, _t in rows)])      # one key column: every description starts in the same cell
+    for glyphs, text in rows:
+        line = Text("\n")
+        line.append(glyphs.ljust(key_w), style=theme.accent())
+        line.append(" " + text)
+        line.truncate(width, overflow="ellipsis")
+        out.append_text(line)
     return out
 
 
@@ -104,13 +108,14 @@ def render_help(contexts: Sequence[str], needle: str, width: int) -> Text:
 class HelpScreen(ModalScreen[None]):
     BINDINGS = keymap.bindings("help")
     DEFAULT_CSS = """
-    HelpScreen Input { border: none; height: 1; padding: 0; margin-bottom: 1; background: $boost; dock: top; }
+    HelpScreen Input { border: none; height: 1; padding: 0; margin-bottom: 1; background: $rf-hover; dock: top; }
     HelpScreen #help-scroll { height: auto; max-height: 1fr; }
     """
 
-    def __init__(self, contexts: Sequence[str], title: str) -> None:
+    def __init__(self, contexts: Sequence[str], title: str, legend_contexts: Sequence[str] | None = None) -> None:
         super().__init__()
         self.contexts = list(contexts)
+        self.legend_contexts = list(legend_contexts) if legend_contexts is not None else self.contexts
         self.title_text = title
 
     def compose(self) -> ComposeResult:
@@ -147,7 +152,7 @@ class HelpScreen(ModalScreen[None]):
         if not needle:
             service = getattr(self.app, "service", None)
             recent = service.config.general.recent_window if service is not None else 86400
-            body = Text("\n").join([body, Text(""), legend(self.contexts, width, humanize.window(recent))])
+            body = Text("\n").join([body, Text(""), legend(self.legend_contexts, width, humanize.window(recent))])
         self.query_one("#help-body", Static).update(body)
 
     def action_close(self) -> None:

@@ -5,6 +5,42 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-15
+
+### Added
+- **Roomy Fleet view**: in a tall terminal (e.g. 120×40 or 172×62) the Fleet cards grow into the empty space instead
+  of leaving it blank, and keep a fixed height so nothing jumps. Each card lists your jobs by how much they need you:
+  fresh failures with why they ended, stalled or short-on-time jobs, pending jobs that will never run, then the rest
+  by time left. Workstation GPU lines say who holds each GPU. The empty cell after the last card shows free GPUs by
+  type across the fleet (your types first) and what changed since your last visit. Nothing new is polled. Palette ›
+  *Fleet: compact cards* keeps today's cards (remembered).
+
+### Changed
+- **Colours follow your terminal**: RunFleet asks the terminal for its background colour at start and mixes every grey,
+  panel, frame, track and cursor row from it, so they sit in your colour scheme's hue instead of being grey boxes on
+  Solarized, Dracula, Catppuccin or a tinted iTerm2 profile; a light background gets the light palette even over ssh
+  (where `COLORFGBG` is missing).
+- **Theme setting**: Settings › About › *theme* (or palette › *Theme: …*) switches live between `auto`, `dark`,
+  `light` and `ansi` (only the terminal's own 16 colours, chosen automatically on 16-colour terminals) and is
+  remembered. `RUNFLEET_THEME=ansi` works too.
+- `runfleet doctor` starts with a *terminal* block (colour depth, reported background, chosen theme, hints for ssh
+  without `COLORTERM` and iTerm2's colour settings).
+
+### Fixed
+- At 100×30 the Fleet cards could wrap a long line and grow one card of a row taller than its neighbour: the cards'
+  scrollbar column is now always reserved and lines are cut with `…`.
+- The active view tab was light grey on blue (1.5:1) and the header's host chips lost their state colours: Textual's
+  link colour repainted every clickable span. They keep their own colours now.
+- Card frames, table cursor rows, hover and the problem-host frame were blended against black whatever the terminal
+  showed: near-invisible frames on non-black backgrounds, a dark navy cursor bar on light ones. Opening a dialog no
+  longer paints the whole screen near-black.
+- The selected table row kept its background but lost the colours of its cells (GPU bars, states, host names).
+- Table text and the colours of cancelled jobs and inactive tabs no longer rely on faint (SGR 2) text, which iTerm2
+  draws half-transparent.
+- The highlighted entry of the action menu, the digest and the forwards dialog sits on the cursor tint, so its dimmed
+  and coloured text stays readable.
+- Job names with emoji (`❤️`, ZWJ sequences) are cut to the right width instead of overflowing with a second `…`.
+
 ## [0.4.0] - 2026-10-15
 
 ### Added
@@ -260,7 +296,8 @@ First public release.
   opt-in with `--yes`); `scripts/gen_docs.py`; `scripts/screenshots.py`.
 - CI: lint, types and tests on Python 3.11 and 3.13, plus a packaging job that runs the demo from the built wheel.
 
-[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.2.0...v0.2.1

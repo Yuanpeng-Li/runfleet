@@ -6,94 +6,108 @@ Screen {
     layers: base overlay;
 }
 
-/* clickable chips / hints / tabs: no link underline, a hover tint instead */
-FleetHeader, HintBar, ViewTabs, .title-line {
-    link-style: none;
-    link-color: $foreground;
-    link-background: transparent;
-    link-style-hover: bold;
-    link-color-hover: $foreground;
-    link-background-hover: $accent 25%;
-}
+/* Colours: $rf-* are solid colours mixed from the terminal's real background (theme.configure). Never `$x N%` on a
+   transparent (ansi_default) background: Textual blends it against black, whatever the terminal shows (§7.11).
+   Clickable chips keep their own colours: FleetHeader, HintBar and ViewTabs override Widget.link_style. */
 
 /* ---- main screen ---------------------------------------------------------------------- */
-#header, FleetHeader { background: $panel; color: $foreground; }
+#header, FleetHeader { background: $rf-panel; color: $rf-foreground; }
 #tabs { background: ansi_default; }
-#hints, HintBar { background: $panel; color: $foreground; dock: bottom; }
+#hints, HintBar { background: $rf-panel; color: $rf-foreground; dock: bottom; }
 App.-settings-open HintBar { visibility: hidden; }   /* the Settings panel has its own hint line */
 #views { height: 1fr; }
 
 /* ---- fleet cards ---------------------------------------------------------------------- */
-#fleet-cards { height: 1fr; scrollbar-size-vertical: 1; }
+#fleet-cards { height: 1fr; scrollbar-size-vertical: 1; scrollbar-gutter: stable; }   /* card widths never jump */
 #fleet-grid { grid-size: 2; grid-rows: auto; grid-gutter: 0 0; height: auto; padding: 0 0; }
 HostCard {
-    border: solid $foreground 25%;
-    border-title-color: $foreground;
+    border: solid $rf-border;
+    border-title-color: $rf-foreground;
     border-title-align: left;
     padding: 0 1;
     height: auto;
     background: ansi_default;
+    text-wrap: nowrap;          /* a line wider than the card is cut with an ellipsis, never wrapped */
+    text-overflow: ellipsis;
 }
-HostCard:focus { border: heavy $accent; background: $boost; }
-HostCard.-scoped { border: solid $accent 70%; }
+HostCard:focus { border: heavy $accent; background: $rf-hover; }
+HostCard.-scoped { border: solid $accent; }
 HostCard.-scoped:focus { border: heavy $accent; }
-HostCard.-problem { border: solid $error 60%; }
+HostCard.-problem { border: solid $rf-border-problem; }
 HostCard.-problem:focus { border: heavy $error; }
-HostCard.-stale { color: $text-muted; }
+HostCard.-stale { color: $rf-muted; }
+FleetPanel {                /* roomy Fleet view: free GPUs by type + what changed (not a card: never focused) */
+    border: solid $rf-rule;
+    border-title-color: $rf-muted;
+    border-title-align: left;
+    padding: 0 1;
+    background: ansi_default;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
 
 /* ---- tables --------------------------------------------------------------------------- */
 DataTable {
     background: ansi_default;
+    color: ansi_default;     /* the terminal's own foreground (Textual's default is the theme's) */
     scrollbar-size-vertical: 1;
     height: 1fr;
 }
-DataTable > .datatable--header { background: ansi_default; color: $text-muted; text-style: bold; }
-DataTable > .datatable--cursor { background: $accent 30%; text-style: none; }
-DataTable:blur > .datatable--cursor { background: $accent 15%; }
-/* NO_COLOR strips backgrounds: the cursor row needs an attribute (tables without a ▸ marker) */
-.-no-color DataTable > .datatable--cursor { text-style: reverse; }
-.-no-color DataTable:blur > .datatable--cursor { text-style: underline; }
-DataTable > .datatable--hover { background: $boost; }
-DataTable > .datatable--header-hover { background: $boost; }
+DataTable > .datatable--header { background: ansi_default; color: $rf-muted; text-style: bold; }
+DataTable > .datatable--cursor { background: $rf-cursor; color: ansi_default; text-style: none; }
+DataTable:blur > .datatable--cursor { background: $rf-cursor-blur; }
+/* NO_COLOR strips backgrounds, and ansi / 16 colours have no tint to spare: the cursor row needs an attribute */
+.-no-color DataTable > .datatable--cursor, .-plain-cursor DataTable > .datatable--cursor { text-style: reverse; }
+.-no-color DataTable:blur > .datatable--cursor, .-plain-cursor DataTable:blur > .datatable--cursor {
+    text-style: underline;
+}
+DataTable > .datatable--hover { background: $rf-hover; }
+DataTable > .datatable--header-hover { background: $rf-hover; }
 
 /* ---- jobs view ------------------------------------------------------------------------ */
 #jobs-body { height: 1fr; layout: vertical; }
 JobsView.-side #jobs-body { layout: horizontal; }
 JobsView.-side #jobs-table { width: 62%; }
-JobsView.-side #preview { width: 1fr; height: 1fr; border-left: solid $foreground 20%; padding: 0 1; }
+JobsView.-side #preview { width: 1fr; height: 1fr; border-left: solid $rf-border; padding: 0 1; }
 #preview { height: 8; background: ansi_default; }
-FilterBar { background: $boost; }
+FilterBar { background: $rf-hover; }
 
 /* ---- detail screens ------------------------------------------------------------------- */
 .box {
-    border: solid $foreground 25%;
+    border: solid $rf-border;
     border-title-align: left;
-    border-title-color: $foreground;
+    border-title-color: $rf-foreground;
     padding: 0 1;
     height: auto;
     background: ansi_default;
 }
 .box:focus-within { border: solid $accent; }
-#gpu-panel { border-subtitle-color: $text-muted; }   /* "click a GPU …": readable on an unfocused box */
+#gpu-panel { border-subtitle-color: $rf-muted; }   /* "click a GPU …": readable on an unfocused box */
 .title-line { height: 1; padding: 0 1; }
-.note { color: $text-muted; height: auto; padding: 0 1; }
+.note { color: $rf-muted; height: auto; padding: 0 1; }
 
 TabbedContent { height: 1fr; }
 TabbedContent ContentSwitcher { height: 1fr; }
 TabPane { padding: 0; }
 Tabs { height: 2; }
+Tabs Tab { text-style: none; color: $rf-muted; }            /* not faint (SGR 2): iTerm2 draws it half-transparent */
+Tabs Tab.-active { text-style: bold; color: $rf-foreground; }
+Tabs:focus Tab.-active { color: $rf-surface; background: $accent; }   /* Textual paints the accent behind it */
+/* ansi / 16 colours: "default on blue" is the terminal's foreground on its blue (unreadable on some profiles); reverse
+   video draws the terminal's own background on the accent instead */
+.-plain-cursor Tabs:focus Tab.-active { color: $accent; background: ansi_default; text-style: bold reverse; }
 
 /* ---- modals --------------------------------------------------------------------------- */
-ModalScreen { background: $background 60%; align: center middle; }
+ModalScreen { background: transparent; align: center middle; }   /* no backdrop: a tint would be blended on black */
 .dialog {
     border: solid $accent;
     border-title-align: left;
     border-title-color: $accent;
     border-title-style: bold;
     border-subtitle-align: right;
-    border-subtitle-color: $text-muted;
-    background: $surface;
-    color: $foreground;      /* explicit surface: explicit theme foreground, whatever the terminal's */
+    border-subtitle-color: $rf-muted;
+    background: $rf-surface;
+    color: $rf-foreground;   /* explicit surface: explicit theme foreground, whatever the terminal's */
     padding: 0 1;
     width: 80;
     max-width: 96%;
@@ -107,6 +121,14 @@ ModalScreen { background: $background 60%; align: center middle; }
 #err-box, #log-box { width: 100; }
 #doctor-box, #manual-box { width: 92; }
 .dialog-buttons { height: auto; align-horizontal: right; padding-top: 1; }
+/* menus in dialogs (action menu, digest, forwards): the highlighted option on the cursor tint, not the accent — the
+   prompts keep their own colours (dim, orange, muted), which sit at 1.0-1.6:1 on the accent */
+.dialog OptionList > .option-list--option-highlighted, .dialog OptionList:focus > .option-list--option-highlighted {
+    color: $rf-foreground;
+    background: $rf-cursor;
+}
+.-plain-cursor .dialog OptionList > .option-list--option-highlighted,
+.-no-color .dialog OptionList > .option-list--option-highlighted { text-style: reverse; }
 .dialog-buttons Button { margin-left: 2; }
 
 /* ---- notifications -------------------------------------------------------------------- */
@@ -137,13 +159,13 @@ JobDetailScreen.-compact #summary-top { display: none; }
 .box { text-wrap: nowrap; text-overflow: ellipsis; }
 DataTable, RichLog, VerticalScroll {
     scrollbar-size-horizontal: 1;
-    scrollbar-color: $accent 45%;
-    scrollbar-color-hover: $accent 70%;
+    scrollbar-color: $rf-scrollbar;
+    scrollbar-color-hover: $accent;
     scrollbar-color-active: $accent;
-    scrollbar-background: $panel;
-    scrollbar-background-hover: $panel;
-    scrollbar-background-active: $panel;
-    scrollbar-corner-color: $panel;
+    scrollbar-background: $rf-panel;
+    scrollbar-background-hover: $rf-panel;
+    scrollbar-background-active: $rf-panel;
+    scrollbar-corner-color: $rf-panel;
 }
 PartitionTable, NodeTable, ProcTable, #steps-table { overflow-x: hidden; }
 JobDetailScreen.-narrow #summary-top { layout: vertical; }

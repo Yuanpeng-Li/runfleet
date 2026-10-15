@@ -10,6 +10,10 @@ import math
 import re
 from datetime import UTC, datetime, timedelta, timezone
 from itertools import islice
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from runfleet.models import Node
 
 NULLISH = frozenset({"", "N/A", "n/a", "(null)", "None", "None assigned", "Unknown", "[N/A]", "[Not Supported]",
                      "[Unknown Error]"})
@@ -310,3 +314,26 @@ def split_rows(text: str) -> list[str]:
     """Rows of command output: split on "\\n" only (a trailing "\\r" dropped). `str.splitlines()` also breaks on
     \\x0b, \\x0c, \\x1c-\\x1e, \\x85, U+2028/2029, which job names, commands and paths may contain."""
     return [line.removesuffix("\r") for line in text.split("\n")]
+
+
+# ---------------------------------------------------------------- free GPUs of one sinfo node (§5.2.3)
+PLANNED_FLAG = "-"
+
+
+def is_planned(node: Node) -> bool:
+    """Backfill has planned the node for a pending job (state ``planned`` or the ``-`` flag, vega ``mixed-``)."""
+    return node.state == "planned" or PLANNED_FLAG in node.flags
+
+
+def node_free(node: Node) -> list[tuple[str, int, int, int]]:
+    """Per GPU gres of one node: (type, free, total, planned). Free = total − used on a usable node with an idle CPU
+    (GPUs on a node whose CPUs are all allocated cannot be scheduled: sinfo state "allocated"), else 0; planned = the
+    free ones when backfill has planned the node for a pending job. The type is "gpu" when the gres names none.
+    Shared by ``parse_sinfo.summarize`` and the Fleet panel (the UI never imports a backend)."""
+    out: list[tuple[str, int, int, int]] = []
+    for g in node.gres:
+        if g.name != "gpu":
+            continue
+        free = g.total - g.used if node.usable and node.cpus_idle != 0 else 0
+        out.append((g.type or "gpu", free, g.total, free if is_planned(node) else 0))
+    return out

@@ -1,0 +1,119 @@
+{
+ "k2@45": [
+  "my jobs   R 4   PD 2   F 0   CD 7            ",
+  "my GPUs   5   A100-40G ×3 · H200 ×2          ",
+  "job util  ▕███████████▏▏  93%   mem 166/401G ",
+  "free GPUs gpu-preempt 31/164 · labpi 2/16    ",
+  "next      PD smoke-test · priority           ",
+  "login     login02  load 2.3/32               "
+ ],
+ "k2@55": [
+  "my jobs   R 4   PD 2   F 0   CD 7            (last 24h)",
+  "my GPUs   5   A100-40G ×3 · H200 ×2                    ",
+  "job util  ▕████████████████████▌ ▏  93%   mem 166/401G ",
+  "free GPUs gpu-preempt 31/164 (4 planned) · labpi 2/16  ",
+  "next      PD smoke-test · priority                     ",
+  "login     login02  load 2.3/32                         "
+ ],
+ "k2@81": [
+  "my jobs   R 4   PD 2   F 0   CD 7                                      (last 24h)",
+  "my GPUs   5   A100-40G ×3 · H200 ×2                                              ",
+  "job util  ▕████████████████████████████████████████████▋   ▏  93%   mem 166/401G ",
+  "free GPUs gpu-preempt 31/164 (4 planned) · labpi 2/16                            ",
+  "next      PD smoke-test · priority                                               ",
+  "login     login02  load 2.3/32                                                   "
+ ],
+ "vega@45": [
+  "my jobs   R 4   PD 1   F 0   CD 3            ",
+  "my GPUs   6   H200 ×6                        ",
+  "job util  ▕██████████  ▏  84%   mem 332/846G ",
+  "free GPUs h200 2/40 · h100 0/9 · a30 3/24    ",
+  "next      PD lmft-x07-trainer-s0 · per-user …",
+  "login     login-v01  load 5.1/64             "
+ ],
+ "vega@55": [
+  "my jobs   R 4   PD 1   F 0   CD 3            (last 24h)",
+  "my GPUs   6   H200 ×6                                  ",
+  "job util  ▕██████████████████▌   ▏  84%   mem 332/846G ",
+  "free GPUs h200 2/40 (2 planned) · h100 0/9 · a30 3/24  ",
+  "next      PD lmft-x07-trainer-s0 · per-user job cap (Q…",
+  "login     login-v01  load 5.1/64                       "
+ ],
+ "vega@81": [
+  "my jobs   R 4   PD 1   F 0   CD 3                                      (last 24h)",
+  "my GPUs   6   H200 ×6                                                            ",
+  "job util  ▕████████████████████████████████████████▎       ▏  84%   mem 332/846G ",
+  "free GPUs h200 2/40 (2 planned) · h100 0/9 · a30 3/24                            ",
+  "next      PD lmft-x07-trainer-s0 · per-user job cap (QOS)                        ",
+  "login     login-v01  load 5.1/64                                                 "
+ ],
+ "lyra@45": [
+  "my jobs   R 0   PD 0   F 2   CD 3            ",
+  "my GPUs   0                                  ",
+  "job util  n/a — no GPU accounting on this cl…",
+  "free GPUs free-gpu 9/120 · free-gpuxl 4/36   ",
+  "! ssh: Connection timed out during banner ex…",
+  "  (via jump host) · next retry in 38s · e in…"
+ ],
+ "lyra@55": [
+  "my jobs   R 0   PD 0   F 2   CD 3            (last 24h)",
+  "my GPUs   0                                            ",
+  "job util  n/a — no GPU accounting on this cluster      ",
+  "free GPUs free-gpu 9/120 · free-gpuxl 4/36             ",
+  "! ssh: Connection timed out during banner exchange     ",
+  "  (via jump host) · next retry in 38s · e info         "
+ ],
+ "lyra@81": [
+  "my jobs   R 0   PD 0   F 2   CD 3                                      (last 24h)",
+  "my GPUs   0                                                                      ",
+  "job util  n/a — no GPU accounting on this cluster                                ",
+  "free GPUs free-gpu 9/120 · free-gpuxl 4/36                                       ",
+  "! ssh: Connection timed out during banner exchange                               ",
+  "  (via jump host) · next retry in 38s · e info                                   "
+ ],
+ "labstation@45": [
+  "0 A6000     ▕   ▏   0%  ▕   ▏  0.0/48.0G 30°C",
+  "1 A6000     ▕   ▏   0%  ▕▏  ▏  2.1/48.0G 31°C",
+  "2 A6000     ▕   ▏   0%  ▕   ▏  0.0/48.0G 29°C",
+  "3 A6000     ▕██▏▏  70%  ▕█▍ ▏ 21.0/48.0G 78°C",
+  "cpu ▕▏   ▏  3%  mem ▕▌     ▏  9% of 503G  lo…",
+  "tasks  mine 1 (orb.launch, 1 GPU) · others 1 "
+ ],
+ "labstation@55": [
+  "0 A6000     ▕        ▏   0%  ▕        ▏  0.0/48.0G 30°C",
+  "1 A6000     ▕        ▏   0%  ▕▍       ▏  2.1/48.0G 31°C",
+  "2 A6000     ▕        ▏   0%  ▕        ▏  0.0/48.0G 29°C",
+  "3 A6000     ▕█████▋  ▏  70%  ▕███▌    ▏ 21.0/48.0G 78°C",
+  "cpu ▕▏   ▏  3%  mem ▕▌     ▏  9% of 503G  load 2.1/64  ",
+  "tasks  mine 1 (orb.launch, 1 GPU) · others 1           "
+ ],
+ "labstation@81": [
+  "0 A6000     ▕                     ▏   0%  ▕                     ▏  0.0/48.0G 30°C",
+  "1 A6000     ▕                     ▏   0%  ▕▉                    ▏  2.1/48.0G 31°C",
+  "2 A6000     ▕                     ▏   0%  ▕                     ▏  0.0/48.0G 29°C",
+  "3 A6000     ▕██████████████▊      ▏  70%  ▕█████████▎           ▏ 21.0/48.0G 78°C",
+  "cpu ▕▏   ▏  3%  mem ▕▉         ▏  9% of 503G  load 2.1/64                        ",
+  "tasks  mine 1 (orb.launch, 1 GPU) · others 1                                     "
+ ],
+ "lynx@45": [
+  "0 PRO6000   ▕██▉▏  97%  ▕▌  ▏ 14.9/95.6G 55°C",
+  "1 PRO6000   ▕███▏ 100%  ▕▌  ▏ 14.9/95.6G 57°C",
+  "tasks  mine 1 (orb.launch ×2, 2 GPUs) · othe…",
+  "✖ Permission denied (publickey,keyboard-inte…",
+  "  press c to log in (Duo / password prompts …"
+ ],
+ "lynx@55": [
+  "0 PRO6000   ▕███████▊▏  97%  ▕█▎      ▏ 14.9/95.6G 55°C",
+  "1 PRO6000   ▕████████▏ 100%  ▕█▎      ▏ 14.9/95.6G 57°C",
+  "tasks  mine 1 (orb.launch ×2, 2 GPUs) · others 0       ",
+  "✖ Permission denied (publickey,keyboard-interactive)   ",
+  "  press c to log in (Duo / password prompts appear)    "
+ ],
+ "lynx@81": [
+  "0 PRO6000   ▕████████████████████▍▏  97%  ▕███▎                 ▏ 14.9/95.6G 55°C",
+  "1 PRO6000   ▕█████████████████████▏ 100%  ▕███▎                 ▏ 14.9/95.6G 57°C",
+  "tasks  mine 1 (orb.launch ×2, 2 GPUs) · others 0                                 ",
+  "✖ Permission denied (publickey,keyboard-interactive)                             ",
+  "  press c to log in (Duo / password prompts appear)                              "
+ ]
+}

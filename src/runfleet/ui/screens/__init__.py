@@ -32,6 +32,10 @@ class FleetScreen(Screen[Any]):
     def help_contexts(self) -> list[str]:
         return list(self.HELP_CONTEXTS)
 
+    def legend_contexts(self) -> list[str]:
+        """Contexts of the help overlay's glyph legend (the key contexts, unless a screen shows more glyphs)."""
+        return self.help_contexts()
+
     def help_title(self) -> str:
         return self.HELP_TITLE
 

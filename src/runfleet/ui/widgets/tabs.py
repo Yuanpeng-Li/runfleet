@@ -6,6 +6,8 @@ supplied by the active view (scope, filter/sort summary, row counts).
 
 from __future__ import annotations
 
+from typing import Any
+
 from collections.abc import Sequence
 
 from rich.style import Style
@@ -22,7 +24,7 @@ def tab_strip(items: Sequence[tuple[str, str]], active: str, action: str) -> Tex
     out = Text()
     for ident, label in items:
         if ident == active:
-            part = Text(f" {label} ", style=f"bold {'#ffffff' if theme.LIGHT else '#121212'} on {theme.ACCENT}" if not theme.no_color() else "bold reverse")
+            part = Text(f" {label} ", style=theme.pill())
         else:
             part = Text(f" {label} ", style=theme.muted())
         part.stylize(Style(meta={"@click": f"{action}({ident!r})"}))
@@ -32,6 +34,14 @@ def tab_strip(items: Sequence[tuple[str, str]], active: str, action: str) -> Tex
 
 
 class ViewTabs(Static):
+    @property
+    def link_style(self) -> Any:      # chips keep their own colours (theme.link_style)
+        return theme.link_style()
+
+    @property
+    def link_style_hover(self) -> Any:
+        return theme.link_style(hover=True)
+
     DEFAULT_CSS = """
     ViewTabs { height: 1; width: 1fr; }
     """

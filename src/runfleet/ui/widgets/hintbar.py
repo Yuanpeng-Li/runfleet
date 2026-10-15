@@ -9,6 +9,8 @@ from the end.
 
 from __future__ import annotations
 
+from typing import Any
+
 from collections.abc import Mapping, Sequence
 
 from rich.style import Style
@@ -19,6 +21,14 @@ from runfleet.ui import keymap, theme
 
 
 class HintBar(Static):
+    @property
+    def link_style(self) -> Any:      # chips keep their own colours (theme.link_style)
+        return theme.link_style()
+
+    @property
+    def link_style_hover(self) -> Any:
+        return theme.link_style(hover=True)
+
     DEFAULT_CSS = """
     HintBar { height: 1; width: 1fr; }
     """

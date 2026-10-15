@@ -1,4 +1,5 @@
-"""[WP3] SVG snapshots (DESIGN.md §10.5): the main screens at 120×35, fleet, jobs, job detail and settings at 80×24.
+"""[WP3] SVG snapshots (DESIGN.md §10.5): the main screens at 120×35, fleet, jobs, job detail and settings at 80×24, the
+Fleet view at 100×30 (compact cards), 120×40 and 172×62 (roomy cards, §7.4).
 
 Accept intended changes with ``uv run pytest tests/ui/test_snapshots.py --snapshot-update`` and review the SVG diff.
 """
@@ -17,6 +18,7 @@ from tests.ui.fakes import T0, FakeService
 
 BIG = (120, 35)
 SMALL = (80, 24)
+ROOMY = (172, 62)
 
 
 def _app() -> RunFleetApp:
@@ -42,6 +44,13 @@ def call(fn: Callable[[RunFleetApp], None], settle: float = 0.4) -> Callable[[An
     return run
 
 
+async def _vega_needs_auth(pilot: Any) -> None:
+    """vega asks for a login while its cached data stays: the error lines take the login slot and one list row."""
+    await pilot.pause(0.1)
+    pilot.app.service.inject("vega", "auth")
+    await pilot.pause(0.4)
+
+
 async def _failed_steps(pilot: Any) -> None:
     await pilot.pause(0.1)
     pilot.app.open_job(JobKey("k2", "2330539"))
@@ -64,6 +73,10 @@ CASES: Sequence[tuple[str, tuple[int, int], Callable[[Any], Awaitable[None]]]] =
     ("settings", BIG, keys("comma")),
     ("settings_general", BIG, keys("comma", "tab", "down")),
     ("fleet_80x24", SMALL, keys()),
+    ("fleet_100x30", (100, 30), keys()),
+    ("fleet_120x40", (120, 40), keys()),
+    ("fleet_172x62", ROOMY, keys()),
+    ("fleet_172x62_auth", ROOMY, _vega_needs_auth),
     ("jobs_80x24", SMALL, keys("tab")),
     ("job_detail_80x24", SMALL, call(lambda app: app.open_job(JobKey("k2", "2332861")))),
     ("settings_80x24", SMALL, keys("comma", "down", "down", "down", "down", "down")),

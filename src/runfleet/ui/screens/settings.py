@@ -16,7 +16,8 @@ pills and buttons are clickable; the wheel moves the selection. Keys come from `
 * **General** — the [general] settings that make sense to flip here, then a *notifications* group ([notify]:
   enabled, terminal channel, an events preset; the command hook stays config.toml-only and is only reported);
   applied live where possible, persisted.
-* **About** — config file (``↵`` opens it in ``$EDITOR``), log, state dir, version. On the version row ``↵`` asks
+* **About** — config file (``↵`` opens it in ``$EDITOR``), log, state dir, version, theme (``↵`` cycles
+  auto / dark / light / ansi, live, kept in ui.json). On the version row ``↵`` asks
   GitHub for the newest version; when one is newer, ``↵`` and ``↵`` again quit, update this install and start
   RunFleet again (palette › Update RunFleet lands here, §8.6).
 
@@ -147,8 +148,8 @@ def _keys_for(*actions: str) -> dict[str, str]:
 _BEGIN_EDIT = _keys_for("filter", "add")     # handled in on_key, synchronously (see the module docstring)
 
 ABOUT_ROWS: tuple[tuple[str, str], ...] = (("config", "config file"), ("log", "log"), ("state", "state dir"),
-                                           ("ssh", "ssh config"), ("version", "version"))
-_ABOUT_ACTIONS = frozenset({"config", "log", "version"})
+                                           ("ssh", "ssh config"), ("version", "version"), ("theme", "theme"))
+_ABOUT_ACTIONS = frozenset({"config", "log", "version", "theme"})
 _UPDATE = ":update"                # `confirm` while ↵ again updates (no host name has a colon)
 
 
@@ -156,7 +157,7 @@ class SettingsPanel(Static, can_focus=True):
     """The whole panel as one renderable; the screen holds the state."""
 
     DEFAULT_CSS = """
-    SettingsPanel { width: 1fr; height: 1fr; background: $surface; color: $foreground; padding: 0; }
+    SettingsPanel { width: 1fr; height: 1fr; background: $rf-surface; color: $rf-foreground; padding: 0; }
     """
 
     def on_resize(self) -> None:
@@ -195,7 +196,7 @@ class SettingsScreen(ModalScreen[None]):
     #settings-box {
         width: 76; height: 22;
         border: solid $accent;
-        background: $surface;
+        background: $rf-surface;
         padding: 0;
     }
     """
@@ -590,6 +591,13 @@ class SettingsScreen(ModalScreen[None]):
             self.rf.open_runfleet_log()
         elif key == "version":
             self._version_enter()
+        elif key == "theme":
+            choices = list(theme.CHOICES)
+            current = self.rf.ui_state.get("theme", "auto")
+            nxt = choices[(choices.index(current) + 1) % len(choices)] if current in choices else "auto"
+            resolved = self.rf.set_theme_choice(nxt)
+            kept = " — saved for the next start" if self.rf._state_path is not None else " (this run only — demo)"
+            self._say(f"theme: {nxt} → {resolved.mode} ({resolved.source}){kept}", theme.ok())
 
     def _version_enter(self) -> None:
         """↵ on the version row: check (no newer version known) → arm → ↵ again quits, updates and restarts."""
@@ -849,6 +857,8 @@ class SettingsScreen(ModalScreen[None]):
             status = self.rf.update_status
             return (" ↵ update now " if self.confirm == _UPDATE else
                     " ↵ update " if status is not None and status.available else " ↵ check ")
+        if key == "theme":
+            return " ↵ change "
         return " ↵ open " if key in _ABOUT_ACTIONS else ""
 
     def _buttons(self, width: int) -> Text:
@@ -1000,6 +1010,16 @@ class SettingsScreen(ModalScreen[None]):
             note = "command hook: set in config.toml" if hook else "command hook: none (config.toml only)"
         return _spread(Text("   " + GROUPS.get(table, table), style="bold"), Text(note + " ", style=theme.dim()), width)
 
+    def _theme_value(self) -> tuple[str, str]:
+        choice = self.rf.ui_state.get("theme", "auto")
+        choice = choice if choice in theme.CHOICES else "auto"      # a hand-edited ui.json: what is in effect
+        # the mode in effect whenever it is not the choice (auto, or RUNFLEET_THEME overriding the setting)
+        value = f"{choice} → {theme.MODE}" if choice == "auto" or theme.MODE != choice else choice
+        where = ("RUNFLEET_THEME" if theme.SOURCE == "RUNFLEET_THEME" else
+                 f"background {theme.BACKGROUND}" if theme.BACKGROUND else
+                 "background unknown" if theme.SOURCE in ("default", "COLORFGBG") else theme.SOURCE)
+        return value, f"{where} · ↵ auto/dark/light/ansi"
+
     def _version_note(self) -> str:
         app = self.rf
         status = app.update_status
@@ -1028,6 +1048,7 @@ class SettingsScreen(ModalScreen[None]):
             "state": (display_path(state_dir) + "/" if state_dir else "", "cache, ui.json, ssh logs"),
             "ssh": ("~/.ssh/config", f"{len(self.aliases)} host alias{'es' if len(self.aliases) != 1 else ''}"),
             "version": (f"runfleet {__version__}", self._version_note()),
+            "theme": self._theme_value(),
         }
         out: list[Text] = []
         sel = self.selected["about"]

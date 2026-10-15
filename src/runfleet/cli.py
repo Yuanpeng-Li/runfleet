@@ -62,8 +62,12 @@ def build_service(config: FleetConfig, transports: TransportFactory, clock: Cloc
 
 def run_tui(service: FleetAPI, clock: Clock, *, demo: bool = False, settings: bool = False) -> int:
     """`settings`: open the Settings overlay on its Hosts tab at once (a config without hosts)."""
-    from runfleet.ui.app import RunFleetApp     # Textual is imported only when the TUI really starts
+    from runfleet.ui import termbg, theme
+    from runfleet.ui.app import RunFleetApp, saved_theme_choice  # Textual is imported only when the TUI starts
 
+    # the palette follows the terminal's real background (OSC 11, asked before Textual owns the terminal) and the
+    # theme picked in Settings › About; --demo keeps no UI state, so it is "auto"
+    theme.setup("auto" if demo else saved_theme_choice(), termbg.query_background())
     initial = None
     if demo:                                    # a watched job and a last visit, so alerts and `D` show at once
         from runfleet.demo.world import demo_ui_state
@@ -96,6 +100,30 @@ def is_interactive() -> bool:
 def has_terminal() -> bool:
     """The TUI can run: Textual reads keys from stdin and draws on stderr (not stdout), and needs a real TERM."""
     return sys.stdin.isatty() and sys.stderr.isatty() and os.environ.get("TERM", "") not in ("", "dumb")
+
+
+def terminal_report(*, demo: bool = False) -> list[str]:
+    """`doctor`'s terminal block: what decides RunFleet's colours here (§7.11). Asks the terminal for its background
+    (OSC 11) only when both ends are the terminal: never for `doctor | less` (the pager would read the reply)."""
+    from runfleet.ui import termbg, theme
+    from runfleet.ui.app import saved_theme_choice
+
+    env = os.environ
+    background = termbg.query_background() if has_terminal() and sys.stdout.isatty() else None
+    system = theme.color_system()
+    choice = "auto" if demo else saved_theme_choice()      # as run_tui: --demo keeps no UI state
+    chosen = theme.resolve(choice, background=background, color_system=system)
+    shown = " ".join(f"{k}={env.get(k, '') or '—'}" for k in ("TERM", "COLORTERM", "TERM_PROGRAM", "COLORFGBG"))
+    lines = ["terminal", f"  {shown}",
+             f"  colours {system or '—'} · background {background or 'not reported'} · theme {choice} → "
+             f"{chosen.mode} ({chosen.source})"]
+    if system in ("256", "standard"):
+        lines.append("  ! not truecolor: over ssh set COLORTERM=truecolor (SendEnv/AcceptEnv or the remote shell rc); "
+                     "16 colours use the terminal's own palette (theme ansi)")
+    if env.get("TERM_PROGRAM") == "iTerm.app" or env.get("LC_TERMINAL") == "iTerm2":
+        lines.append("  i iTerm2 recolours apps: Profiles › Colors › Minimum contrast, Faint text opacity; "
+                     "Advanced › Use P3 color space (vivid reds/greens)")
+    return lines
 
 
 def run_command(argv: Sequence[str]) -> int:
@@ -717,6 +745,7 @@ def cmd_doctor(args: argparse.Namespace, clock: Clock, out: Callable[[str], None
     # the cache keeps the capabilities doctor detects, so a following `snapshot` needs no detect probe (M3 budget)
     service = build_service(fleet.config, fleet.transports, clock, open_cache(args.no_cache or args.demo))
     names = probed_names(fleet.config, args)
+    out("\n".join(terminal_report(demo=args.demo)))
 
     async def run_all() -> list[DoctorReport | BaseException]:
         return list(await asyncio.gather(*(service.doctor(n, reset=args.reset) for n in names),

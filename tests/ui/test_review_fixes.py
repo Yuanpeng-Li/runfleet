@@ -507,8 +507,11 @@ def test_light_host_palette_is_readable_on_white(monkeypatch: pytest.MonkeyPatch
         return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
 
     assert all(1.05 / (luminance(c) + 0.05) >= 4.5 for c in theme.HOST_PALETTE_LIGHT)
-    monkeypatch.setattr(theme, "LIGHT", True)
-    assert theme.host_color(None, 2) == theme.HOST_PALETTE_LIGHT[2]
+    theme.configure("light")
+    try:
+        assert theme.host_color(None, 2) == theme.HOST_PALETTE_LIGHT[2]
+    finally:
+        theme.configure("dark")
 
 
 async def test_empty_no_color_means_unset_for_textual_too(make_app: MakeApp, monkeypatch: pytest.MonkeyPatch) -> None:

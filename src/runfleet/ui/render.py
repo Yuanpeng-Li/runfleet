@@ -231,6 +231,14 @@ def known_reason(reason: str) -> bool:
 HintLevel = Literal["red", "warn", "info"]
 
 
+def reason_red(reason: str | None) -> bool:
+    """The pending reason means the job will never run (shown red)."""
+    if not reason:
+        return False
+    entry = _REASONS.get(reason.split(",")[0].strip("()"))
+    return bool(entry and entry[2])
+
+
 def hint_level(hint: str) -> HintLevel:
     """Backend hints: "will never run …" and exit-scan "log: …" lines are errors, stall hints warnings."""
     if hint.startswith(("will never", "log:", "exited (log")) or "never run" in hint:
@@ -257,7 +265,8 @@ def reason_text(reason: str | None, *, short: bool = True) -> Text:
     return Text(text, style=theme.hint_style(True) if entry[2] else theme.muted())
 
 
-_CHIP_COLOR = {"CANCELLED": theme.MAGENTA, "PREEMPTED": theme.ORANGE, "TIMEOUT": theme.ORANGE}
+def _chip_color(code: str) -> str:
+    return {"CANCELLED": theme.MAGENTA, "PREEMPTED": theme.ORANGE, "TIMEOUT": theme.ORANGE}.get(code, theme.RED)
 
 
 def cause_chip(code: str, *, pending: bool = False) -> Text:
@@ -265,8 +274,8 @@ def cause_chip(code: str, *, pending: bool = False) -> Text:
     in panel colour on red (orange for time-outs and preemption, magenta for cancellations, yellow when pending)."""
     if theme.no_color():
         return Text(f" {code} ", style="bold reverse")
-    color = theme.YELLOW if pending else _CHIP_COLOR.get(code, theme.RED)
-    return Text(f" {code} ", style=f"bold {theme.SURFACE} on {color}")
+    color = theme.YELLOW if pending else _chip_color(code)
+    return Text(f" {code} ", style=theme.on_color(color))
 
 
 def free_gpus(p: PartitionSummary, *, sep: str = "/") -> Text:

@@ -315,17 +315,20 @@ src/runfleet/
     messages.py          FleetChanged, HostStatusChanged, ActionFinished, …             [WP3]
     keymap.py            single source of bindings + help text (§7.8)                   [WP3]
     render.py            pure Rich renderables: gpu_bar, state_badge, host_chip, mini_util  [WP3]
-    theme.py             colours, thresholds, NO_COLOR handling                         [WP3]
+    theme.py             colours mixed from the terminal background, dark/light/ansi modes, thresholds, NO_COLOR  [WP3]
+    termbg.py            OSC 11 query of the terminal background before the TUI starts (§7.11)  [WP3]
     runfleet.tcss
     commands.py          command palette Provider (§7.10)                               [WP3]
     query.py             filter language (§7.6): parse + match Job → bool (pure)        [WP3]
+    fleet_layout.py      roomy Fleet view (§7.4): row-height plan, ranked card lists, row templates, fleet panel data (pure)  [WP3]
     everyday.py          copy menu + support bundle, forwards, log in to all, free GPUs (§7.15)  [WP3]
     notify.py            Alerts: notification delivery (toast, OSC 9/777, hook), watch list, away digest (§7.14)  [WP3]
     screens/  main.py job_detail.py host_detail.py log_viewer.py help.py confirm.py action_menu.py host_error.py
               settings.py forwards.py notifications.py  [WP3]
     widgets/  header.py hintbar.py tabs.py fleet_view.py host_card.py jobs_view.py job_table.py job_preview.py
               gpus_view.py gpu_panel.py proc_table.py node_table.py log_view.py filter_bar.py
-              attach_panel.py (Attach status line + live GPU rows, §7.16)  [WP3]
+              attach_panel.py (Attach status line + live GPU rows, §7.16)
+              fleet_panel.py (roomy Fleet view: free GPUs by type + what changed, §7.4)  [WP3]
   demo/
     world.py             simulated fleet ("default" scenario) + fault-injection hooks for tests  [WP4]
     render.py            world → byte-exact command outputs                             [WP4]
@@ -2524,6 +2527,9 @@ after the floor (so the tick follows), is published as `HostStatus.controller_sl
 — slowed 4×` on the host card (instead of the login load), in host detail and in the host error screen. A plain
 section failure or timeout stays with the per-group backoff (§9 row 10); no extra remote command is involved.
 
+The Fleet view, roomy or compact (§7.4), adds no section and changes no cadence: it reports `Visibility.VISIBLE` like
+before and only reads the store (every user's node occupants stay host-detail-only, `focused_only`).
+
 ### 5.5 Caching (`core/cache.py`)
 SQLite at `~/.local/state/runfleet/cache.sqlite` (WAL; writes batched every 10 s and at exit via `asyncio.to_thread`;
 `--no-cache` disables):
@@ -2681,40 +2687,118 @@ Glyph legend: `●` ok, `◐` retrying, `✖` unreachable/auth, `○` disabled, 
 `+` marked, `!` host has a problem, `~` data is stale. Colours are in §7.11. Data values are illustrative unless a test
 in §10.2 pins them.
 
-**A. Fleet view (default start screen)** — card grid, two cards per row (60 columns each), cards sized to content
-(Slurm 8 lines, workstation 2 + #GPUs lines, capped at 8 GPUs then "+N more"). Free-GPU counts include nodes planned for
-pending jobs (vega `mixed-`), marked in the host screen.
+**A. Fleet view (default start screen)** — card grid, two cards per row (each half of the width left of the
+reserved scrollbar column), cards sized to content (Slurm 6 lines + extra free-GPU lines, workstation #GPUs + 3 lines,
+capped at 8 GPUs then "+N more"). Free-GPU counts include nodes planned for pending jobs (vega `mixed-`), marked in the
+host screen. This fleet stays compact at 120×35 (tier T0, §7.4): lynx's cached card takes 5 lines, which leaves 8 spare
+rows, one short of the roomy gate; the demo fleet (lynx without a cache) is roomy at this size, rows [10, 10, 6].
 
 ```
- RunFleet ▏ALL▕  ● k2 8s  ● vega 3s  ◐ lyra retry 38s  ● labstation 2s  ✖ lynx auth     R 13  PD 2  F 3/24h   ⟳ 15s
- ▌Fleet▐  Jobs   GPUs                                                                                  scope: all hosts
-┌─1 k2 · slurm 25.05.8 · ● ok 0.21s · 8s ago───────────────┐┌─2 vega · slurm 25.11.4 · ● ok 0.20s · 3s ago─────────────┐
-│ my jobs   R 4   PD 1   F 0   CD 7          (last 24h)    ││ my jobs   R 4   PD 1   F 0   CD 3          (last 24h)    │
-│ my GPUs   5   A100-40G ×3 · H200 ×2                      ││ my GPUs   6   H200 ×6                                    │
-│ job util  ▕██████████████████▊  ▏ 94%   mem 98/203G      ││ job util  ▕█████████████████▌   ▏ 88%   mem 455/848G     │
-│ free GPUs gpu-preempt 27/152                             ││ free GPUs h200 2/48 · h100 0/8 · a30 3/20                │
-│ next      PD smoke-test · priority · est. 06:31 (52m)    ││ next      PD lmft-x07-trainer-s0 · QOS job cap (4/4)     │
-│ login     login02  load 2.3/32                           ││ login     login-v01  load 5.1/64                         │
-└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
-┌─3 lyra · slurm 26.05.3 · ◐ retrying · last ok 4m ago─────┐┌─4 labstation · workstation · ● ok 0.08s · 2s ago─────────┐
-│ my jobs   R 0   PD 0   F 1   CD 3          (last 24h)    ││ 0 A6000   ▕          ▏  0%  ▕          ▏  0.0/48G  30°C  │
-│ my GPUs   0    job util n/a (no GPU accounting here)     ││ 1 A6000   ▕          ▏  0%  ▕          ▏  0.0/48G  31°C  │
-│ free GPUs free-gpu 7/112 · free-gpuxl 4/32               ││ 2 A6000   ▕          ▏  0%  ▕          ▏  0.0/48G  29°C  │
-│                                                          ││ 3 A6000   ▕███████   ▏ 70%  ▕████▍     ▏ 21.0/48G  78°C  │
-│ ! ssh: Connection timed out during banner exchange       ││ cpu ▕▏ 3%   mem ▕▉        ▏ 9% of 503G   load 2.1/64     │
-│   (via ProxyJump jumpvm) · next retry in 38s · e info    ││ tasks  mine 1 (orb.launch, 1 GPU) · others 0             │
-└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
-┌─5 lynx · workstation · ✖ needs auth · last ok 14m ago────┐
-│ 0 PRO6000 ▕█████████▊▏ 97%  ▕█▌        ▏ 14.9/95.6G 55°C │
-│ 1 PRO6000 ▕██████████▏100%  ▕█▌        ▏ 14.9/95.6G 57°C │
-│ tasks  mine 1 (orb.launch ×2, 2 GPUs)                    │
-│ ✖ Permission denied (publickey,keyboard-interactive)     │
-│   press c to log in (Duo / password prompts appear)      │
-└──────────────────────────────────────────────────────────┘
+ RunFleet ▏ALL▕  ● k2 8s  ● vega 3s  ◐ lyra retry 38s  ● labstation 2s  ✖ lynx auth       R 10  PD 3  F 2/24h   ⟳ 5s  ⚙
+  Fleet   Jobs   GPUs                                                                                  scope: all hosts
+┏━ 1 k2 · slurm 25.05.8 · ● ok 0.21s · 8s ago ━━━━━━━━━━━━┓┌─ 2 vega · slurm 25.11.4 · ● ok 0.20s · 3s ago ───────────┐
+┃ my jobs   R 4   PD 2   F 0   CD 7            (last 24h) ┃│ my jobs   R 4   PD 1   F 0   CD 3            (last 24h)  │
+┃ my GPUs   5   A100-40G ×3 · H200 ×2                     ┃│ my GPUs   6   H200 ×6                                    │
+┃ job util  ▕████████████████████▌ ▏  93%   mem 166/401G  ┃│ job util  ▕██████████████████▌   ▏  84%   mem 332/846G   │
+┃ free GPUs gpu-preempt 31/164 (4 planned) · labpi 2/16   ┃│ free GPUs h200 2/40 (2 planned) · h100 0/9 · a30 3/24    │
+┃ next      PD smoke-test · priority                      ┃│ next      PD lmft-x07-trainer-s0 · per-user job cap (Q…  │
+┃ login     login02  load 2.3/32                          ┃│ login     login-v01  load 5.1/64                         │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────────────────────────────────────────┘
+┌─ 3 lyra · slurm 26.05.3 · ◐ retrying · last ok 4m ago ──┐┌─ 4 labstation · workstation · ● ok 0.08s · 2s ago ───────┐
+│ my jobs   R 0   PD 0   F 2   CD 3            (last 24h) ││ 0 A6000     ▕        ▏   0%  ▕        ▏  0.0/48.0G 30°C  │
+│ my GPUs   0                                             ││ 1 A6000     ▕        ▏   0%  ▕▍       ▏  2.1/48.0G 31°C  │
+│ job util  n/a — no GPU accounting on this cluster       ││ 2 A6000     ▕        ▏   0%  ▕        ▏  0.0/48.0G 29°C  │
+│ free GPUs free-gpu 9/120 · free-gpuxl 4/36              ││ 3 A6000     ▕█████▋  ▏  70%  ▕███▌    ▏ 21.0/48.0G 78°C  │
+│ ! ssh: Connection timed out during banner exchange      ││ cpu ▕▏   ▏  3%  mem ▕▌     ▏  9% of 503G  load 2.1/64    │
+│   (via jump host) · next retry in 38s · e info          ││ tasks  mine 1 (orb.launch, 1 GPU) · others 1             │
+└─────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+┌─ 5 lynx · workstation · ✖ needs auth · last ok 14m ago ─┐
+│ 0 PRO6000   ▕███████▊▏  97%  ▕█▎      ▏ 14.9/95.6G 55°C │
+│ 1 PRO6000   ▕████████▏ 100%  ▕█▎      ▏ 14.9/95.6G 57°C │
+│ tasks  mine 1 (orb.launch ×2, 2 GPUs) · others 0        │
+│ ✖ Permission denied (publickey,keyboard-interactive)    │
+│   press c to log in (Duo / password prompts appear)     │
+└─────────────────────────────────────────────────────────┘
 
 
 
- ↵ host detail  space scope  c connect  s shell  t on/off  r refresh  tab view  / filter  : cmd  ? help  q quit
+
+
+
+
+
+
+ ↵ host detail  space scope  c connect  s shell  t on/off  e info  tab view  ^p cmd  q quit  / filter            ? help
+```
+
+**A2. Fleet view, roomy cards (172×62, demo seed 7, tier T1, §7.4)** — the same cards grow into the tall terminal:
+each keeps its summary in fixed slots, then lists the jobs that need you (fresh failures, stalled or short on time,
+never-run, then the rest by time left), one row per job; workstation GPU lines say who holds the GPU; the empty cell
+after the last card is the fleet panel (free GPUs by type, your types first; what changed since your last visit).
+
+```
+ RunFleet ▏ALL▕  ● k2 10s  ● vega 10s  ● lyra 10s  ● labstation 0s  ✖ lynx auth                                                               R 18  PD 5  F 6/24h   ⟳ 5s  ⚙
+  Fleet   Jobs   GPUs                                                                                                                                      scope: all hosts
+┏━ 1 k2 [clusters] · slurm 25.05.8 · ● ok 0.00s · 10s ago ━━━━━━━━━━━━━━━━━━━━━━━━━━┓┌─ 2 vega [clusters] · slurm 25.11.4 · ● ok 0.00s · 10s ago ─────────────────────────┐
+┃ my jobs   R 7   PD 2   F 3   CD 3                                      (last 24h) ┃│ my jobs   R 4   PD 2   F 2   CD 1                                      (last 24h)  │
+┃ my GPUs   15   A100-80G ×8 · A100-40G ×3 · 3090 ×2 · H200 ×2                      ┃│ my GPUs   6   H200 ×6                                                              │
+┃ job util  waiting for sstat                                                       ┃│ job util  waiting for sstat                                                        │
+┃ free GPUs gpu-preempt 12/108 +11 MIG (14 planned) · lab 0/8                       ┃│ free GPUs a30 1/8 (1 planned) · h100 0/7 · h200 6/48 (5 planned)                   │
+┃ login     login02  load 2.3/32                                                    ┃│ login     login-v01  load 5.1/64                                                   │
+┃ failed    F   lmft-x0-lr1e-5             exit 1                           3h ago  ┃│ failed    F   lmft-x07-sampler-s0        exit 1                           5h ago   │
+┃           TO  orb-sw…imagenette-w…2--a01 hit time limit                   4h ago  ┃│           F   lmft-x07-ddp-s0            exit 1                           6h ago   │
+┃           OOM lmft-x07-trainer-s2        out of memory                    6h ago  ┃│ running   R   lmft-x07-trainer-s1        2×H200                    –  1d15h left   │
+┃ running   R   ◉ orb-sw…eval--cifar…--s43 1×3090                    –    34m left  ┃│           R   orb-swp--train--v…s47--a01 1×H200                    –  1d17h left   │
+┃           R   ↻1 orb-s…voc-warmup-…--a01 1×3090                    – 20h39m left  ┃│           R   orb-swp--train--v…s48--a01 1×H200                    –  1d17h left   │
+┃           R   ddp-scale--imagen…it-b--n2 8×A100                    – 22h47m left  ┃│           R   lmft-x07-sampler-s1        2×H200                    –  1d18h left   │
+┃           R   lmft-x07-sampler-s0        2×H200                    –  1d14h left  ┃│ pending   PD  lmft-x07-eval-s0           never: dependency failed        no est.   │
+┃           R   orb-swp--…warmup--s43--a02 1×A100                    –  2d19h left  ┃│           PD  lmft-x07-trainer-s0        per-user job cap (QOS)          overdue   │
+┃           R   orb-swp--t…const--s43--a02 1×A100                    –  2d19h left  ┃│                                                                                    │
+┃           R   orb-s…cosinewarm--s43--a02 1×A100                    –  2d19h left  ┃│                                                                                    │
+┃ pending   PD  smoke-test                 priority                         in 34m  ┃│                                                                                    │
+┃           PD  orb-sweep-lab--s44         resources                       no est.  ┃│                                                                                    │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────────────────────────────────────────────────────────────────────┘
+┌─ 3 lyra [clusters] · slurm 26.05.3 · ● ok 0.00s · 10s ago ────────────────────────┐┌─ 4 labstation [workstations] · workstation · ● ok 0.00s · 0s ago ──────────────────┐
+│ my jobs   R 5   PD 1   F 1   CD 2                                      (last 24h) ││ 0 A6000     ▕         ▏   0%  ▕         ▏  0.0/48.0G 30°C  free                    │
+│ my GPUs   5   A30 ×3 · RTX6000 ×2                                                 ││ 1 A6000     ▕████████▌▏  94%  ▕█████▋   ▏ 30.0/48.0G 73°C  carol sample_ddpm.py    │
+│ job util  n/a — no GPU accounting on this cluster                                 ││ 2 A6000     ▕███▋     ▏  40%  ▕█▏       ▏  6.0/48.0G 47°C  mine eval_ckpt.py       │
+│ free GPUs free-gpu 6/48 · free-gpuxl 15/32                                        ││ 3 A6000     ▕██████▏  ▏  68%  ▕███▉     ▏ 21.0/48.0G 63°C  mine orb.launch         │
+│ login     login-a02  load 11.4/48                                                 ││ cpu ▕▎   ▏  6%  mem ▕█▏        ▏ 11% of 504G  load 3.8/64                          │
+│ failed    PR  orb-s…cosinewarm--s44--a01 preempted, killed               17h ago  ││           swap 2% of 2.0G · up 117d · load 3.8 3.7 3.9                             │
+│ running   R   orb-sw…eval--places…p--s45 1×A30                     –    12m left  ││ running   R   orb.launch (orb.train)     gpu 3 · cpu 101%     ▆  68%   18h54m up   │
+│           R   orb-swp--…warmup--s45--a01 1×A30                     –  2d21h left  ││           R   eval_ckpt.py               gpu 2 · cpu 94%      ▄  40%      12m up   │
+│           R   orb-swp--tr…adam--s46--a01 1×A30                     –  2d23h left  ││ others    R   carol sample_ddpm.py       gpu 1 · 30.0G        █  94%    5h20m up   │
+│           R   orb-sweep [3]              1×RTX6000                 –  2d23h left  ││                                                                                    │
+│           R   orb-sweep [4]              1×RTX6000                 –  2d23h left  ││                                                                                    │
+│ pending   PD  orb-sweep [5-12%2]         array task limit                overdue  ││                                                                                    │
+│                                                                                   ││                                                                                    │
+│                                                                                   ││                                                                                    │
+│                                                                                   ││                                                                                    │
+│                                                                                   ││                                                                                    │
+│                                                                                   ││                                                                                    │
+└───────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────┘
+┌─ 5 lynx [workstations] · ✖ needs auth ────────────────────────────────────────────┐┌─ fleet · free GPUs · what changed ─────────────────────────────────────────────────┐
+│ no data yet                                                                       ││ free GPUs now · your types first  lynx ?                            sinfo <1m ago  │
+│ ✖ permission denied (publickey,keyboard-interactive)                              ││   3090        4   k2 gpu-preempt 4 (2 planned)                                     │
+│   press c to log in (Duo / password prompts appear)                               ││   H200        9   vega h200 6 (5 planned) · k2 gpu-preempt 3                       │
+│                                                                                   ││   RTX6000    11   lyra free-gpuxl 11                                               │
+│                                                                                   ││   A30         6   lyra free-gpu 5 · vega a30 1 (1 planned)                         │
+│                                                                                   ││   H100-80G    0                                                                    │
+│                                                                                   ││   A100-80G    1   k2 gpu-preempt 1 (1 planned)                                     │
+│                                                                                   ││   A100-40G    0                                                                    │
+│                                                                                   ││   A6000       1   labstation gpu 0                                                 │
+│                                                                                   ││   also free   MIG slices 11 (k2) · L40S 4 · PRO6000 2 · P100-16G 1 · V100 1 · V1…  │
+│                                                                                   ││ since 02:42 (you were away): 3 failed · 1 out of memory · 1 timeout · 3 completed  │
+│                                                                                   ││   10:21  lyra ✓ orb-sweep [2]                ran 0:41:00                           │
+│                                                                                   ││   09:40  lyra ✓ orb-sweep [1]                ran 0:38:00                           │
+│                                                                                   ││   07:41  k2   ✖ lmft-x0-lr1e-5               exit 1                                │
+│                                                                                   ││   06:55  k2   ✓ orb-ab--train--resnet18-bs5… ran 11:24:33                          │
+│                                                                                   ││   05:42  k2   ✖ orb-swp--train--imagenette-… hit time limit                        │
+│                                                                                   ││   04:55  vega ✖ lmft-x07-sampler-s0          exit 1                                │
+│                                                                                   ││   04:23  vega ✖ lmft-x07-ddp-s0              exit 1                                │
+│                                                                                   ││   03:43  k2   ✖ lmft-x07-trainer-s2          out of memory                         │
+└───────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────┘
+ ↵ host detail  space scope  c connect  s shell  t on/off  e info  tab view  ^p cmd  q quit  / filter                                                                ? help
 ```
 
 **B. Fleet view at 80×24** — one row per host.
@@ -3009,13 +3093,74 @@ connect_timeout in the config).`
 
 ### 7.4 Responsive rules
 - Header: full form ≥ 110 columns; < 110 drops ages; < 90 shows dots + names only; < 70 dots with numbers (`●1 ●2 ◐3`).
-- Fleet: cards when width ≥ 100 (2 per row ≥ 120, 3 per row ≥ 180); table otherwise.
+- Fleet: cards when width ≥ 100 (2 per row ≥ 120, 3 per row ≥ 180); table otherwise. `#fleet-cards` always reserves
+  its scrollbar column (`scrollbar-gutter: stable`) and card text is fitted to `(W − 1) // cols − 4` cells, never
+  wrapped (`text-wrap: nowrap; text-overflow: ellipsis`): at 100×30 a wrapped line used to make one card of a row taller.
+- **Fleet roomy layout** (`ui/fleet_layout.py`, pure; mockup A2). Today's cards are tier **T0**; a tall view is tier
+  **T1**. Heights depend only on geometry: `plan(W, H, shapes, enabled)` is a function of the view size and each card's
+  *shape*, never of the data, so cards do not jump when jobs come and go.
+  - *Shapes* (content lines, borders excluded): no snapshot (3, 3, 0); Slurm `t0 = 5 + F`, `t1 = 4 + F`, cap 12, with F
+    = the lines of the free-GPU block for the partition names and totals with everything free and planned (the widest
+    text they can produce), or for today's numbers when those take more (a partition too wide for the block even alone
+    folds the widest text into one `+N more` line, its smaller numbers fit on a second); workstation `t0 = G + 3`, `t1 = G + 1`, cap 8, G = GPU lines (≤ 8, + 1 for "+N more", 1
+    without GPUs). F and G are per-host high-water marks for the session, reset only when Settings changes the host set
+    or order; so a re-plan happens only on a resize, a host-set change, a shape change (first snapshot, more GPUs, a new
+    partition name or total) or the palette switch.
+  - *Gate*: `W ≥ 100`, view height `H ≥ 32`, card inner width ≥ 52 and `spare = H − Σ(base_row + 2) ≥ 3 × rows`
+    (base_row = the tallest `t0` in the row); otherwise T0, today's code path unchanged. ui.json `fleet_layout =
+    "compact"` forces T0 (§7.13).
+  - *Allocator*: row caps = the tallest `t1 + cap` in the row (the orphan row at least 24, the panel's room); spare
+    rows go round-robin, one per row per pass, top row first, until spent or every row is at its cap. An orphan cell
+    with ≥ 6 rows takes the rest as the fleet panel (`FleetPanel`, column-span = the empty cells); a full grid gets a
+    full-width panel row below it when ≥ 10 rows are left. Demo fleet: 172×62 → rows [17, 17, 19], panel 19;
+    120×40 → [11, 12, 8], panel 8; 120×35 → [10, 10, 6]; 100×30 and 80×24 stay T0 / table.
+  - *Inside a T1 card* every slot is fixed: the summary (free-GPU block padded to F, never longer: a partition that
+    does not fit is counted in `+N more`, never dropped), then `login` (Slurm) or the host
+    line (workstation), then a list region of exactly `h − t1` rows. Error lines replace `login` / the host line and
+    take the first list row; "next" moves into the list; a workstation adds `swap · up · load` from 8 list rows.
+    Lists rank own jobs by need (Slurm: fresh failures < 4 h, running with a warn/red hint or low on time or a red/amber
+    runway, never-run or held pending, older failures in `recent_window`, other running by time left, other pending by
+    estimated start; workstation: fresh failures, own running with a hint, own running by GPUs, other users' tasks,
+    older failures; CD/CA never, a plain EX task is no failure; ties by job id). Shown grouped failed / running /
+    pending (others); with more candidates than rows, array siblings of rank 4/5 fold (`orb-sweep [3-4] ×2`), then
+    `rows − 1` rows and `+N more · R a, next ends in X · PD b · tab: Jobs`. Wide template (inner ≥ 72): label 10 |
+    badge 4 | name inner − 55 | detail 20 | GPU% 6 | time 11; narrow: badge 4 | name inner − 34 | detail 16 (running:
+    GPUs 9, a space, GPU% 6) | time 11, so `20h39m left` never moves the GPU% column. Folded array tasks are listed in
+    task order (`[3,5,12]`). Time cells change once a minute (`<1m`, `33m left`, `2d19h left`, `5h20m up`, `in 35m`, `overdue`, `3h ago`).
+    Workstation GPU lines gain an owner column (22 cells wide, a 6-cell tag narrow): `?` (old reading), `no reading`
+    (`?` narrow: neither util nor memory sampled), `mine orb.launch` / `carol sample.py` (`+N` more owners), `in use ·
+    no process`, `free`.
+  - *Fleet panel* (always the whole fleet, not the scope): free GPUs now, counted once per node with
+    `util/slurmfmt.node_free` (an allocated node with an idle GPU counts 0; `parse_sinfo.summarize` uses the same), only
+    nodes of the listed partitions, MIG slices apart per host, workstation GPUs not in use and not an old reading;
+    problem/stale hosts show as `host ?`, and so does a fresh cluster whose last `slurm.sinfo` failed, is missing (nodes
+    from the cache only) or is older than `fleet_layout.sinfo_bound_s` (two periods of the slowest legitimate
+    `slurm.nodes` cadence, + 5 s: `poll_nodes` × hidden 5 × idle 4 × the +/- rate × a busy controller's slowdown, at
+    least the 600 s backoff cap; 80 min at the defaults);
+    your types (GPU types of your active, queued or recent jobs and your tasks' GPUs) first by fleet total, the rest on
+    one `also free` line; `sinfo Nm ago` = the oldest counted sinfo. GPU types are labelled by one normaliser for gres
+    types and nvidia-smi names (`fleet_layout.type_label`: `nvidia_a100-sxm4-40gb` and `NVIDIA A100-SXM4-40GB` are both
+    `A100-40G`; a glued `rtx3090` / `rtx6000` reads like `GeForce RTX 3090` / `Quadro RTX 6000`, an Ada card keeps
+    its generation, `6000Ada`, apart from the Turing `6000`; a `Ti` / `SUPER` suffix stays with the number and `GTX` is
+    a prefix like `RTX`: `rtx2080ti` and `GeForce RTX 2080 Ti` are `2080TI`, `gtx1070` is `1070`). Then what changed (§7.14), newest first. At most half the
+    panel goes to the free part. It never takes focus; arrows and enter skip it, and a click on it (or on a gap of the
+    grid) leaves the focus on the selected card (`#fleet-cards` does not focus on click); its legend rows in the help
+    overlay appear only while it is shown.
+  - *Cost*: the 1 Hz tick re-renders text only. `FleetView` caches each card's ranking and its `distinct_starts` per
+    (jobs dict, minute, window) and until a listed failure turns 4 h old or leaves the window
+    (`fleet_layout.rank_expiry`, to the second, so the list agrees with the card's `my jobs` counts); the ranking (a
+    `RankedList`) keeps its selection per row count, so folding and selecting run once per ranking (folding is linear
+    in the array size). A `fleet_layout.Memo` keeps the panel's scans: the node scan per host until its
+    nodes/partitions change, the own-job type scan and the ended-job list until its jobs change, and the activity rows
+    until then, a new alert or the moment an end or event leaves the window (`activity_expiry`).
 - Jobs table columns (priority 1 = never dropped; the highest priority number goes first, the rightmost first among
   equals). Widths are minimums; the slack goes in tiers: NAME up to 28, NODE / REASON up to 26, NAME up to 40, the rest
   to NODE / REASON (at 120 columns `never: dependency failed` fits). NAME keeps what tells sweep siblings apart: the
   part after the longest prefix shared with its sorted neighbours, backed up to a segment start, is kept whole when it
   fits (`orb-swp--tr…warmup--s43--a02` / `orb-swp--tra…const--s43--a02` / `orb-swp…cosinewarm--s43--a02`); a name
-  without such siblings is cut middle-right (keeps the seed/attempt suffix). At 80 columns LEFT and GPUS are dropped
+  without such siblings is cut middle-right (keeps the seed/attempt suffix). Cuts are measured in terminal cells; a name
+  with emoji sequences (a variation selector, a ZWJ sequence of emoji) is cut at Rich's grapheme boundaries and
+  measured per grapheme, never per code point. At 80 columns LEFT and GPUS are dropped
   before NODE / REASON and GPU% (critic: pending reasons and hints were invisible).
 
 | Col | Min width | Priority | Content |
@@ -3141,13 +3286,15 @@ fuzzy-matched commands — no command grammar: `Fleet view`, `Jobs view`,
 `GPUs view`, `Scope: all` / `Scope: <host>`, `Host detail: <host>`, `Connect <host>`, `Refresh <host>` / `Refresh all`,
 `Enable <host>` / `Disable <host>`, `State preset: fresh|active|queued|failed|all`, `Sort by <column>`, `Group by
 none|host|array`, `Doctor <host>` (runs `FleetAPI.doctor`, shows the report in a modal), `Settings` / `Settings:
-general` / `Settings: about`, `Update RunFleet` (§8.6), `Action log`, `Notifications` / `Since you were away` (§7.14), `Log in to all hosts
+general` / `Settings: about`, `Update RunFleet` (§8.6), `Fleet: roomy cards` /
+`Fleet: compact cards` (§7.4, §7.13), `Action log`, `Notifications` / `Since you were away` (§7.14), `Log in to all hosts
 needing auth` / `Forward a port…` / `Forwards` (§7.15), `RunFleet log`
 (`run_external(service.local_pager_argv())`: the local pager on `runfleet.log`, not LogScreen), `Help`, `Quit`.
 
 ### 7.11 Colours and thresholds (`ui/theme.py`)
 - States: ACTIVE green; QUEUED yellow (held: yellow + `H`, e.g. `PDH`); DONE dim blue; FAILED red (PREEMPTED orange);
-  ENDED grey (with a red hint when the exit scan found an error); CANCELLED magenta-dim; UNKNOWN grey italic.
+  ENDED grey (with a red hint when the exit scan found an error); CANCELLED muted magenta (a solid mix, not SGR 2:
+  iTerm2 draws faint text half-transparent); UNKNOWN grey italic.
 - GPU bars: partial blocks `▏▎▍▌▋▊▉█`; utilisation < 10 % green, < 75 % yellow, ≥ 75 % red; memory 10/80 (nvitop
   defaults, `[ui]` thresholds).
 - Host chips: ok green, degraded yellow `!`, retrying yellow `◐`, unreachable red `✖`, needs_auth/hostkey magenta `✖`,
@@ -3155,9 +3302,51 @@ needing auth` / `Forward a port…` / `Forwards` (§7.15), `RunFleet log`
 - `NO_COLOR` honoured (bold/reverse instead of colour; never reverse on bar fills — a reverse-video █ is drawn in the
   background colour — high GPU% gets a `!` instead; table cursor rows get `text-style: reverse` via the app class
   `-no-color`, since backgrounds are stripped); transparent default background.
-- Body text uses the terminal's default foreground (`color: ansi_default`); bars with a theme background keep the theme
-  foreground. A light background (`RUNFLEET_THEME=light`, or `COLORFGBG` bg 7 / 9–15) selects a light palette (darker
-  greys, yellow and accent) and a light Textual theme.
+- Body text uses the terminal's default foreground (`color: ansi_default`, DataTables included: Textual's default is
+  the theme's); bars with a theme background keep the theme foreground.
+- **Mode and background.** `cli.run_tui` asks the terminal for its background before Textual starts
+  (`ui/termbg.py`: OSC 11 + a DA1 sentinel on /dev/tty, non-canonical, the DA reply ends the wait (≤ 2 s), the
+  /dev/tty descriptor closed on every path, background jobs skipped) and calls `theme.setup(choice, background)`. A
+  colour counts only from a complete reply (BEL / ST terminated). With the DA reply in time, typeahead — the input
+  minus every OSC sequence and DA reply, complete or cut short — is pushed back with TIOCSTI. Without it the line is
+  drained until quiet (≤ 3 s more), flushed, and nothing is pushed back, so a late or split reply never reaches
+  Textual as keys. *Deferred (known limits):* where TIOCSTI is disabled (Linux `dev.tty.legacy_tiocsti=0`, OpenBSD)
+  keys typed during the query are lost, and a reply arriving after the drain cap reaches Textual as keys. Mode precedence: `RUNFLEET_THEME` (dark|light|ansi) › the Settings › About choice
+  (ui.json `theme`; `--demo`: auto) › a 16-colour terminal (Rich's detection → `ansi`) › the background
+  (`theme.is_light`: light when black ink has more contrast on it than white, so #999999 is light) › `COLORFGBG` (bg 7 / 9–15 light) › dark. Hues are fixed per mode (dark / light sets); every neutral
+  (DIM, GREY, MUTED, FOREGROUND, TRACK, SURFACE, RULE, PANEL, BORDER) and tint (CURSOR, CURSOR_BLUR, HOVER,
+  BORDER_PROBLEM, CANCELLED) is `mix(background, ink | hue, t)` — on black exactly the old fixed greys (±1). A
+  background contradicting a forced mode is not used as the base. In 256-colour mode the fills snap to the xterm-256
+  entry the terminal will draw. `ansi`: named ANSI colours only, `Theme(ansi=True)` with Textual's ansi-dark variables,
+  no bar track, host colours from the 9 non-grey slots. Ansi or 16 colours (`PLAIN_CURSOR`): reverse / underlined cursor
+  rows (app class `-plain-cursor`), the focused detail tab and dialog menu highlights in reverse video, and pills /
+  cause chips are `bold reverse <colour>` (the terminal's own background on the colour: "default on blue" put the
+  terminal's foreground on it, 1.2–1.5:1 on some profiles). 256 colours: fills snap to the entry the terminal draws
+  (neutrals on the grey ramp), each stepped away from the background and the previous fill; the cursor family
+  (CURSOR, CURSOR_BLUR, HOVER, `theme._cursor256`) takes, for each, the xterm entry 16–255 nearest (redmean) to its
+  truecolor tint with MUTED (as drawn) ≥ 3.5:1 on it, on the ink's side of the *reported* background, ≥ 1.2 / 1.1 /
+  1.02:1 against it and in that order of loudness; only grey (and, for the cursor, the accent's blue side: the nearest
+  cube entry to a pale tint is often pink or cyan), measured as Rich draws it. When nothing quieter fits (near white
+  few greys are drawable) the blurred cursor / hover share the louder neighbour's entry rather than take another hue.
+- **No translucent CSS colours.** Textual blends `$x N%` over `ansi_default` against black (it cannot know the
+  background), so frames, cursor rows, hover, scrollbars and panels use solid `$rf-*` theme variables
+  (`TEXTUAL_THEME.variables`; `RunFleetApp.get_theme_variable_defaults` provides them before the theme is set), and
+  modals have no backdrop. Table cursor rows keep each cell's colours (`cursor_foreground_priority="renderable"`).
+  The highlighted option of a menu in a dialog (action menu, digest, forwards) is drawn on `$rf-cursor` with the
+  dialog's foreground, not on the accent (its prompts keep their own colours, 1.0–1.6:1 on the accent).
+- **Clickable bars keep their colours.** Textual's `link-color` repaints every `@click` span; FleetHeader, HintBar and
+  ViewTabs override `Widget.link_style` (`theme.link_style()`: no colour; hover bold on HOVER).
+- **Live switch** (`RunFleetApp.set_theme_choice`): `theme.setup` with the background reported at start, register the
+  new Textual theme (named per mode and base, so the reactive fires), toggle `-plain-cursor`, call `forget_rendered()` on every widget that has it (tables rebuild their rows,
+  `FleetView` its empty-fleet message, `LogView` redraws its kept raw lines — a deque bounded like the RichLog, which
+  stores rendered strips — and its status line at the same scroll position and follow state; Rich's `Text ==`
+  ignores the base style, so "unchanged, skip it" caches would keep old colours), save ui.json `theme`, then
+  `refresh_data(None)` on every FleetScreen except the detail screen of a host Settings removed (still under
+  Settings, it has no state; `set_fleet_layout` skips it too, as `_flush_changes` does) and repaint. Settings › About
+  shows `choice → MODE` whenever the mode in effect differs from the choice, and `RUNFLEET_THEME` as the source when
+  it decides.
+- `runfleet doctor` prints a *terminal* block first: TERM, COLORTERM, TERM_PROGRAM, COLORFGBG, the colour system, the
+  OSC 11 answer and the resulting theme, with hints for non-truecolor sessions and iTerm2's colour settings.
 - Hint bar: `? help` is reserved at the right edge; low-value globals (`tab view`, `^p cmd`, `q quit`) are dropped
   first; the app relabels / hides entries for the current selection (`^k cancel` / `^k terminate`, hidden when only
   ended jobs are selected).
@@ -3246,6 +3435,9 @@ it. Everything goes through FleetAPI (§3.7).
   `check failed · ↵ retry`. `↵` checks (forced) unless a newer version is known; then it arms (`confirm = ":update"`,
   the message names the install's update command) and `↵` again calls `app.request_update()`; `esc` disarms.
 - `--demo`: works on an in-memory host list (`config_path` None), says `demo — not saved`, writes nothing.
+- The Fleet card size is not a config.toml key and has no General row (that panel is full): palette › *Fleet: roomy
+  cards* / *Fleet: compact cards* switch it live and save ui.json `fleet_layout` (`auto`, the default: roomy when the
+  view has room, §7.4; `compact`: always today's cards), read at start like the theme choice.
 - While the panel is the top screen the base screen's HintBar is hidden (app class `-settings-open`): the panel has its
   own hint line. Right-hand notes keep at least one space to the (truncated) value.
 - `F1` (and `?`) inside Settings and every other dialog opens Help with that dialog's own keys (`HELP_CONTEXT`); the
@@ -3294,6 +3486,14 @@ command: everything is derived from the snapshots the poller already produces.
   paused). `D` opens the digest: counts by end state per host, the failures (FAILED group + EX) with their summary,
   `enter` opens one, `f` shows every own job that ended since then in the Jobs view (preset set aside, `esc` clears).
   Without a last visit `D` covers `recent_window`.
+- **Fleet panel** (roomy Fleet view, §7.4): *what changed* counts own ends since `digest_since` (else `recent_window`)
+  plus this session's time-low warnings (`since 05:12 (you were away): 2 failed · 1 completed · 1 low on time`), then
+  rows `HH:MM host glyph name summary` (`Mon 11:00` once older than 20 h, like the head's `since` label; `09-06 11:00`
+  from 6 days back), columns padded by terminal cells (CJK names keep the summary column), newest first within
+  `recent_window`: own ends from the store (complete, they
+  survive a restart; `✖` bad end, `✓` completed with `ran H:MM:SS`, `■` other end) and the history's `time_low` `◷`,
+  `restarted` `↻` and `gpu_idle` `◌` events (session only, one row per job and kind; events of hosts no longer in the
+  fleet are left out of rows and counts). Rows older than `digest_since` are dim.
 - **Runway and restarts** (Jobs table, detail title): LEFT is amber below 10 % of the limit or min(30 min, 25 %)
   and red below 2 % or min(5 min, 10 %) (no limit: the minute floors alone); `↻N` before the name when `restarts` (squeue `RestartCnt`, already parsed) is above 0.
 
@@ -3581,7 +3781,7 @@ Nested node sections (owner `node`, each `timeout -k 2 5` via framing; order fix
 |---|---|
 | `~/.config/runfleet/config.toml` | user config (optional) |
 | `~/.local/state/runfleet/cache.sqlite` | cache (§5.5) |
-| `~/.local/state/runfleet/ui.json` | view, sort, filter text, state preset, grouping |
+| `~/.local/state/runfleet/ui.json` | view, sort, filter text, state preset, grouping, theme (auto/dark/light/ansi), Fleet card size (`fleet_layout`: auto/compact) |
 | `~/.local/state/runfleet/update.json` | update check (§8.6): newest version on main, when asked, the last version announced |
 | `~/.local/state/runfleet/runfleet.log` | rotating log (5 MB × 3); `--debug` raises the level and adds `debug/` raw dumps; `--demo` records carry `[demo]` |
 | `~/.local/state/runfleet/ssh-<host>.log` | `-E` log of master creation / connect (§4.2) |
@@ -3983,7 +4183,10 @@ real stack afterwards:
    polling it (a card appears), unchecking removes it (card gone); `t` shows the probe result; `a` adds a custom
    target; `J`/`K` reorder the cards; General values change by key and by click; a broken config shows its error.
 Snapshots (SVG): fleet, jobs, job detail, host (ws), host (cluster), log viewer, help, confirm, settings at 120×35;
-fleet, jobs, job detail and settings at 80×24.
+fleet, jobs, job detail and settings at 80×24; fleet at 100×30 (compact, no wrapped lines), 120×40 and 172×62 (roomy),
+and 172×62 with a Slurm host needing auth over its cached data. A stability test runs the demo stack for 60 simulated
+minutes in 5 s steps at 172×62 and 120×40: the plan, card and panel heights never change and no line is wider than its
+card.
 
 ### 10.6 Demo mode (WP4; also the dev environment on a GPU-less dev box)
 - `runfleet --demo [--demo-seed N]`: one scenario. Its hosts have the shapes of the field-probed machines and the
@@ -4107,7 +4310,7 @@ it); its signatures are unchanged:
 | every other `.py` path in §3.2 | a one-line module docstring stating its purpose | owner per §11.2 |
 | `src/runfleet/ui/runfleet.tcss` | empty | WP3 |
 | `tests/conftest.py` | `sample()`, `meta()` (last entry wins), `frame()`, ManualClock fixture, no-ssh guard | WP2 |
-| `tests/unit/test_contracts.py` | imports every module of §3.2 (and fails on modules not listed there); constructs one instance of each contract dataclass with defaults; asserts the §11.5 import rules (no `textual` outside `ui/` and `cli.py`; no `asyncio`/`subprocess`/`textual` in `backends/`) | WP1 |
+| `tests/unit/test_contracts.py` | imports every module of §3.2 (and fails on modules not listed there); constructs one instance of each contract dataclass with defaults; asserts the §11.5 import rules (no `textual` outside `ui/` and `cli.py`; no `asyncio`/`subprocess`/`textual` in `backends/`; no `backends` import in `ui/` but `backends.base`) | WP1 |
 | `pyproject.toml`, `uv.lock`, `LICENSE`, `README.md` (stub), `CHANGELOG.md` (stub), `.github/workflows/ci.yml` | §2.2, §10.8 | WP4 |
 
 Exit criterion: `uv sync && uv run ruff check . && uv run mypy src/runfleet && uv run pytest` green; every import
@@ -4130,7 +4333,8 @@ resolves.
   sections via `backends/detect.py`), WP4 (DemoTransport) and WP1 (`log` sections only, FakeTransport). New sections are added to Appendix A in the same change.
 - Typing: full annotations; `mypy --strict` for `models`, `config`, `probe`, `transport`, `backends`, `core`; Textual
   code may be non-strict. `ruff` per §2.2.
-- No `textual` import outside `ui/` and `cli.py`; no `subprocess`/`asyncio` in `backends/`; time only through `Clock`;
+- No `textual` import outside `ui/` and `cli.py`; no `subprocess`/`asyncio` in `backends/`; `ui/` imports nothing from
+  `backends/` but the contract types of `backends.base` (pure helpers both need live in `util/`); time only through `Clock`;
   logging via `logging.getLogger("runfleet.<module>")`; no secrets in logs (never log environment values or file
   contents beyond 200-char excerpts).
 - Never run anything against real hosts from tests or CI. Manual work on real hosts (M3/M4) needs explicit approval
