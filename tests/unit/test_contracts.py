@@ -14,6 +14,7 @@ import pkgutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
+from typing import get_args, get_type_hints
 
 import pytest
 
@@ -33,7 +34,7 @@ __main__ cli export models errors config configedit sshconfig paths debugdump wa
 util util.shell util.slurmfmt util.humanize util.logscan util.efficiency util.platform
 probe probe.section probe.framing
 transport transport.base transport.openssh transport.mux transport.spawn transport.classify transport.local
-transport.fake
+transport.fake transport.agent transport.session
 backends backends.base backends.registry backends.detect
 backends.common backends.common.nvidia backends.common.procfs backends.common.gpu_types backends.common.cgroup
 backends.slurm backends.slurm.collector backends.slurm.commands backends.slurm.states backends.slurm.parse_squeue
@@ -431,6 +432,35 @@ def test_fleet_service_implements_every_fleet_api_method() -> None:
     api = {n for n, v in vars(service.FleetAPI).items() if inspect.isfunction(v) and not n.startswith("_")}
     impl = {n for n, v in vars(service.FleetService).items() if inspect.isfunction(v)}
     assert api and api <= impl, sorted(api - impl)
+
+
+# ---------------------------------------------------------------- P2 (session transport): exactly what was decided
+def test_mux_values_are_frozen() -> None:
+    """P2 decision: MuxMode and the config's `mux` gain "session", nothing else."""
+    assert get_args(models.MuxMode) == ("user", "managed", "off", "session", "local", "none")
+    hints = get_type_hints(config.HostConfig)
+    assert get_args(hints["mux"]) == ("auto", "user", "managed", "off", "session")
+
+
+def test_transport_contract_members_are_frozen() -> None:
+    """§3.5 is unchanged by P2: the session login is an optional protocol of transport/session.py, not a member of
+    the frozen Transport contract."""
+    members = {n for n in vars(tbase.Transport) if not n.startswith("_")}
+    assert members == {"mux", "ssh_log", "prepare", "check_master", "probe", "stream", "interactive_argv",
+                       "before_connect", "connect_argv", "reset_master", "close", "forward_blocker", "forward",
+                       "cancel_forward"}
+    assert {n for n, v in vars(tbase).items() if isinstance(v, type) and v.__module__ == tbase.__name__} == {
+        "RunResult", "ProbeResult", "StreamHandle", "Transport"}
+
+
+def test_interactive_login_capability() -> None:
+    """The session login (§4.8) and the one FleetAPI method the UI reaches it through (§3.7)."""
+    from runfleet.transport.session import InteractiveLogin, SessionTransport
+
+    assert {n for n in vars(InteractiveLogin) if not n.startswith("_")} == {"login"}
+    assert str(inspect.signature(InteractiveLogin.login)) == "(self) -> 'int'"
+    assert str(inspect.signature(SessionTransport.login)) == "(self) -> 'int'"
+    assert str(inspect.signature(service.FleetAPI.connect_login)) == "(self, host: 'str') -> 'Callable[[], int] | None'"
 
 
 def test_config_error_carries_key_path() -> None:

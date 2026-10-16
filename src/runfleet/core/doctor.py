@@ -1,8 +1,8 @@
 """[WP1] Per-host diagnostics -> DoctorReport.
 
-`runfleet doctor` (and the palette's "Doctor <host>"): ssh -G summary, mux mode and jump rewrite, master check, one
-detect probe (latency, profile, tools, clock, gpu_tres). At most two ssh round trips: master creation if needed and
-the detect probe; `ssh -G` and `-O check` are local.
+`runfleet doctor` (and the palette's "Doctor <host>"): ssh -G summary, mux mode and jump rewrite, master (or
+session, §4.8) check, one detect probe (latency, profile, tools, clock, gpu_tres). At most two ssh round trips: master
+or session creation if needed and the detect probe; `ssh -G` and `-O check` are local (a session check is one ping).
 """
 
 from __future__ import annotations
@@ -50,15 +50,23 @@ async def run_doctor(host: HostConfig, transport: Transport, *, hooks: BackendHo
         checks.append(DoctorCheck("ssh -G", True, " ".join(f"{k}={v}" for k, v in s.summary().items())))
         rewrite = ("ProxyJump rewritten to a BatchMode ProxyCommand" if muxpolicy.needs_rewrite(s)
                    else "no jump rewrite")
-        where = "Windows" if platform.IS_WINDOWS else transport.plan.control_path or "no socket"
+        if transport.plan.mode == "session":
+            where = "one ssh login + a temporary sh agent"
+        else:
+            where = "Windows" if platform.IS_WINDOWS else transport.plan.control_path or "no socket"
         checks.append(DoctorCheck("mux", None, f"{transport.plan.mode} ({where}); {rewrite}"))
-        if platform.IS_WINDOWS:
+        if transport.plan.mode == "session":
+            warnings.append(muxpolicy.SESSION_NOTE)
+        elif platform.IS_WINDOWS:
             warnings.append(muxpolicy.WINDOWS_NO_MUX)
     else:
         checks.append(DoctorCheck("ssh -G", None, f"{transport.kind} transport (no ssh)"))
         checks.append(DoctorCheck("mux", None, transport.mux))
 
-    if reset:
+    if reset and transport.mux == "session":     # `doctor --reset` runs in its own process: no session to close
+        checks.append(DoctorCheck("reset", None, "nothing to reset: a session lives only inside the running "
+                                  "RunFleet (press c on the host there to log in anew)"))
+    elif reset:
         await transport.reset_master()
         checks.append(DoctorCheck("reset", None, "managed master closed" if transport.mux == "managed"
                                   else "nothing to reset (only managed masters are closed)"))
@@ -71,7 +79,9 @@ async def run_doctor(host: HostConfig, transport: Transport, *, hooks: BackendHo
             warnings.append(f"see {transport.ssh_log}")
         return DoctorReport(host=host.name, checks=tuple(checks), warnings=tuple(warnings))
     up = await transport.check_master()
-    checks.append(DoctorCheck("master", up, "master up" if transport.mux in ("user", "managed") else "not used"))
+    checks.append(DoctorCheck("master", up, "master up" if transport.mux in ("user", "managed")
+                              else "session up (agent answers)" if transport.mux == "session" and up
+                              else "session down" if transport.mux == "session" else "not used"))
 
     regs = hooks.collectors()
     script = framing.make_script(hooks.detect_sections(host, regs), "doctor")

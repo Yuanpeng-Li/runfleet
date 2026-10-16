@@ -14,7 +14,7 @@ import os
 import re
 import shlex
 import subprocess
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -532,6 +532,7 @@ async def login_all(app: RunFleetApp) -> None:
     app._connecting.update(hosts)
     try:
         steps: list[tuple[str, list[str]]] = []
+        logins: list[Callable[[], int] | None] = []
         already: list[str] = []
         for host in hosts:
             if await app.service.prepare_connect(host):
@@ -541,6 +542,7 @@ async def login_all(app: RunFleetApp) -> None:
             argv = app.service.connect_argv(host)
             if argv is not None:
                 steps.append((host, argv))
+                logins.append(app.service.connect_login(host))   # session transport: the login is the session
         rcs: list[int] = []
         if steps:
             n = len(steps)
@@ -550,7 +552,8 @@ async def login_all(app: RunFleetApp) -> None:
                 banner = (f"RunFleet → {i}/{n} {host} — approve the Duo push / answer the prompts "
                           "(Ctrl-C skips this host)")
                 batch.append((argv, banner, state.status.ssh_log if state is not None else None))
-            result = app.run_external_sequence(batch)
+            result = (app.run_external_sequence(batch, logins) if any(f is not None for f in logins)
+                      else app.run_external_sequence(batch))
             if result is None:                 # no suspend here (web driver): one host at a time instead
                 app.toast("cannot suspend this terminal — log in per host (c)", severity="warning")
                 return

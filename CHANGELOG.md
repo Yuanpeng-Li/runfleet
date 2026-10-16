@@ -5,6 +5,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-16
+
+### Added
+- **Duo and password hosts on Windows** (session transport): the Windows `ssh` has no ControlMaster, so RunFleet now
+  keeps one ssh login per host open and runs every refresh, detail view and log stream over it, through a small
+  temporary POSIX `sh` helper it sends on that login's stdin. Nothing is installed on the server; the helper keeps
+  its few state files in a private temp directory and removes it, and ends everything it started, when the login
+  ends. `c` (and `C`, log in to all) now logs in once in the console and that login serves the host until RunFleet
+  exits; key and `ssh-agent` hosts need only one login per host instead of one per refresh. A probe that times out
+  ends only itself; the session is restarted only when it stops answering too, or when it dropped (at most once per
+  30 s; Duo hosts then ask for `c` again). Shells and the remote pager are still separate `ssh -t` logins, and port forwards are not available over a
+  session yet. Host detail and `runfleet doctor` show `mux: session` and what it means; `runfleet connect` only checks
+  the login there and says to press `c` in RunFleet.
+- **`mux = "session"`** brings the same transport to Linux and macOS (opt-in; never chosen by `auto`). The server
+  needs a POSIX `sh`, `dd`, `awk`, `od` and `mktemp`; `setsid` and `ps` make kills reach every process of a probe.
+
+### Fixed
+- Ctrl-C in a command RunFleet runs in the terminal (the local pager, a `c` login) no longer ends
+  RunFleet once the command returns: the command gets the Ctrl-C (`less` stops following), and a session login is
+  aborted at the first Ctrl-C.
+
+### Changed
+- Windows: every process RunFleet starts joins a Job Object that Windows ends with RunFleet, so not even a crash
+  leaves an `ssh.exe` (or its ProxyJump hop) behind. `mux = "off"` keeps the old behaviour (a login per refresh).
+
 ## [0.6.0] - 2026-10-16
 
 ### Added
@@ -357,7 +382,8 @@ First public release.
   opt-in with `--yes`); `scripts/gen_docs.py`; `scripts/screenshots.py`.
 - CI: lint, types and tests on Python 3.11 and 3.13, plus a packaging job that runs the demo from the built wheel.
 
-[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.3.0...v0.4.0

@@ -46,8 +46,9 @@ class Transport(Protocol):
     async def stream(self, spec: StreamSpec) -> StreamHandle: ...
     def interactive_argv(self, remote_cmd: str | None) -> list[str]: ...  # `ssh -t …` run under App.suspend
     async def before_connect(self) -> bool: ...     # resolve + clear a stale socket; True = master already up
-    def connect_argv(self) -> list[str] | None: ...  # `ssh -fN … -E <log>`; None if not applicable (local/fake)
-    async def reset_master(self) -> None: ...       # managed masters only: `ssh -O exit`, unlink socket
+    def connect_argv(self) -> list[str] | None: ...  # `ssh -fN … -E <log>`; None if not applicable (local/fake);
+                                                    # an `ssh … true` auth check without a master (off, session)
+    async def reset_master(self) -> None: ...       # managed masters: `ssh -O exit`, unlink socket; session: end it
     async def close(self) -> None: ...
     # local port forwards through the existing master (`ssh -O forward|cancel -L 127.0.0.1:lport:node:rport`);
     # nothing runs remotely. forward_blocker: why this transport cannot forward (no master), None if it can

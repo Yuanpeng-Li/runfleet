@@ -356,8 +356,9 @@ async def test_single_in_flight_and_manual_refresh_floor(rig_factory: Callable[.
     assert len(times) == 2 and times[1] - times[0] >= 3.0              # ≥ 3 s after the previous probe
 
 
-async def test_check_master_failure_ensures_and_skips_the_tick(rig_factory: Callable[..., Rig]) -> None:
-    rig = rig_factory(mux="user")
+@pytest.mark.parametrize("mux", ["user", "session"])
+async def test_check_master_failure_ensures_and_skips_the_tick(rig_factory: Callable[..., Rig], mux: str) -> None:
+    rig = rig_factory(mux=mux)                                         # a session (§4.8) is checked like a master
     await settle()
     polls = rig.t.count("poll")
     rig.t.master_ok = False
@@ -371,6 +372,25 @@ async def test_two_timeouts_reset_a_managed_master(rig_factory: Callable[..., Ri
     await settle()
     rig.t.fail_next(ErrorKind.TIMEOUT, times=2)
     await run_for(rig.clock, 60)
+    assert "reset_master" in rig.t.calls
+
+
+async def test_two_probe_timeouts_keep_a_session_that_answers(rig_factory: Callable[..., Rig]) -> None:
+    """A section stuck remotely (a hung NFS mount) times out tick after tick while the agent answers its pings:
+    resetting would end a healthy Duo login that the BatchMode restart cannot redo (review: integration 7)."""
+    rig = rig_factory(mux="session")
+    await settle()
+    rig.t.fail_next(ErrorKind.TIMEOUT, times=3)
+    await run_for(rig.clock, 90)
+    assert rig.t.count("poll") >= 4 and "reset_master" not in rig.t.calls
+
+
+async def test_two_timeouts_reset_a_session_that_does_not_answer(rig_factory: Callable[..., Rig]) -> None:
+    rig = rig_factory(mux="session")                                   # ended and started anew
+    await settle()
+    rig.t.master_ok = False
+    rig.t.prepare_errors.extend([HostError(ErrorKind.TIMEOUT, "ssh session not answering")] * 2)
+    await run_for(rig.clock, 120)
     assert "reset_master" in rig.t.calls
 
 

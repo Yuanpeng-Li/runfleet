@@ -11,7 +11,7 @@ Configuration keys are in [CONFIG.md](CONFIG.md); the design and its reasoning i
 | `runfleet` | Monitors the hosts in `~/.config/runfleet/config.toml`. With no config on a terminal it lists the Host aliases of `~/.ssh/config`, lets you pick (`1-5`, `k2,lynx`, `all`, `d` for the demo), probes them read-only and writes the config. Hosts that do not answer right now (VPN off, a slow first login) are not saved; it prints the `runfleet hosts import … --write` command that adds them later. After that, manage hosts in **Settings** (`,`). A config whose hosts were all removed starts in Settings. |
 | `runfleet HOST …` | Exactly these hosts this run (ssh aliases or config names), merged with matching `[[host]]` settings. Hosts not in the config yet are saved as soon as they answer or need a login (`general.remember_hosts`, on by default), with one notice; the next plain `runfleet` includes them. |
 | `runfleet --demo` | A simulated fleet (Slurm clusters `k2`, `vega`, `lyra`; workstations `labstation`, `lynx`) behind the real parsers and UI. No network. `lynx` starts as "needs auth": press `c` to "log in". `--demo-seed N` picks another world. |
-| `runfleet connect HOST` | Logs in once in this terminal (Duo, passwords and host-key questions appear here) with RunFleet's multiplexing, then exits. Later RunFleet sessions reuse the connection. |
+| `runfleet connect HOST` | Logs in once in this terminal (Duo, passwords and host-key questions appear here) with RunFleet's multiplexing, then exits. Later RunFleet sessions reuse the connection. On Windows (and with `mux = "session"`) it only checks the login: press `c` inside RunFleet instead. |
 | `runfleet hosts list` | The configured hosts (with no config: how to create one). |
 | `runfleet hosts import [--all \| ALIAS …] [--write]` | Probes aliases read-only (`BatchMode`, at most `max_parallel_ssh` at a time, one line per host as it answers) and prints what each one is (Slurm version, workstation, needs auth, unreachable). `--write` saves the usable ones (including hosts that only need a login) to the config; an existing file is appended to, never rewritten, and aliases already in it are reported as "already configured". Unreachable hosts are listed with the command to add them later. |
 | `runfleet doctor [HOST …] [--reset]` | Per host: `ssh -G` summary, multiplexing mode, ProxyJump rewrite, master check, probe latency, detected profile, capabilities, missing tools, clock skew, GPU accounting. `--reset` closes RunFleet-managed ssh masters first. |
@@ -392,7 +392,7 @@ None of these changes a job, so they work in read-only mode too.
   on a workstation the target is the workstation itself. Palette › *Forwards* lists them (`enter` copies the URL
   again, `^k` stops one; a forward ssh could not stop stays listed); all are stopped when RunFleet exits. After a
   reconnect `P` on the same port sets the forward up again on the new master. Not available without a master (a host that needs a
-  login, `mux = "user"` without a ControlPath, `mux = "off"`).
+  login, `mux = "user"` without a ControlPath, `mux = "off"`, the session transport of Windows or `mux = "session"`).
 - **Log in to all** (`C` in the Fleet view; palette › *Log in to all hosts needing auth*): after the overnight
   disconnect, one trip to the terminal logs in to every host that needs it or is unreachable, one after another
   (`2/3 vega — approve the Duo push`; `Ctrl-C` skips a host), then RunFleet resumes them all and says which worked.
@@ -594,21 +594,30 @@ RunFleet runs natively on Windows 10 and 11 (install: `install.ps1`, see the REA
 (8.1 or newer; `runfleet doctor` shows the version it found) and works best in Windows Terminal. Your
 `%USERPROFILE%\.ssh\config`, keys and the Windows `ssh-agent` service are used as they are.
 
-What is different, because the Windows `ssh` has no ControlMaster (connection sharing):
+The Windows `ssh` has no ControlMaster (connection sharing), so RunFleet keeps **one ssh login per host** open
+instead and sends every refresh, detail view and log over it (the *session* transport; `mux: session` in the host
+screen and `runfleet doctor`). On that login RunFleet runs a small temporary `sh` helper that it sends each time:
+nothing is installed on the server, and the helper removes its temporary files and ends everything it started when
+the login ends. The server needs a POSIX `sh` and the usual tools (`dd`, `awk`, `od`, `mktemp`); Linux login nodes
+and workstations have them.
 
 | | Windows (preview) | under WSL, Linux, macOS |
 |---|---|---|
-| connection | every refresh is a separate ssh login (`mux: off (Windows)` in the host screen and `runfleet doctor`); `mux` settings and ControlPath in your ssh config are ignored | one shared connection per host |
-| hosts with a key or ssh-agent | work | work |
-| hosts with Duo, password or OTP | stay at `✖ auth`: a login with `c` is only a check and does not carry over to the background probes | `c` logs in once; RunFleet reuses it |
-| port forwards (`f`) | not available | available |
+| connection | one ssh login per host, open while RunFleet runs (`mux: session`); `mux` settings and ControlPath in your ssh config are ignored, except `mux = "off"` (every refresh a separate login) | one shared connection per host (your ControlMaster or RunFleet's) |
+| hosts with a key or ssh-agent | work; RunFleet logs in by itself | work |
+| hosts with Duo, password or OTP | press `c` (or `C` for all): the prompts appear in the console, and that login serves the host until RunFleet exits; after a restart, or when the connection drops, `c` again | `c` logs in once; RunFleet reuses it while the master lives |
+| shells (`s`) and the remote pager (`p`) | a separate login each (another Duo push) | share the connection |
+| `runfleet connect HOST` | only checks the login (it cannot stay open after the command ends): press `c` inside RunFleet | logs in once for RunFleet |
+| port forwards (`f`) | not available yet | available |
 | `ssh = "local"` (this machine) | not available: run RunFleet in WSL to monitor the Windows machine's own WSL side | available |
 | `ctrl+z` | not bound (no job control); not listed in help | suspends to the shell |
 | `runfleet update`, Settings › About | prints the command (quit RunFleet, then `uv tool upgrade runfleet`): a running `runfleet.exe` cannot be replaced | updates in place |
 | background colour | not asked; dark palette unless `RUNFLEET_THEME=light` | asked from the terminal |
 
-For hosts behind Duo or a password, run RunFleet inside [WSL](https://learn.microsoft.com/windows/wsl/install) (the
-Linux install line); WSL has its own `~/.ssh`. Other Windows details: the pager is `less` when one is installed (Git
+If RunFleet is killed or crashes, Windows ends its ssh logins with it. For port forwards, run RunFleet inside
+[WSL](https://learn.microsoft.com/windows/wsl/install) (the Linux install line; WSL has its own `~/.ssh`).
+On Linux and macOS the same session transport is available with `mux = "session"` (never the default there).
+Other Windows details: the pager is `less` when one is installed (Git
 for Windows brings one), else `more`; the editor (`e` in Settings) is `notepad` unless `EDITOR` or `VISUAL` is set
 (a name such as `code` is found on `PATH` the way the console finds it, `code.cmd` included); a
 `[notify] command` given as a string runs through `cmd.exe /c`. Host names Windows cannot use as file names (`con`,
@@ -625,7 +634,7 @@ mouse, hold `shift` while dragging (Windows Terminal), or start with `--no-mouse
 | `~/.local/state/runfleet/runfleet.log` | `%LOCALAPPDATA%\runfleet\runfleet.log` | log (5 MB × 3); `--debug` adds `debug/` raw dumps; lines from `--demo` carry `[demo]` |
 | `~/.local/state/runfleet/bundles/` | `%LOCALAPPDATA%\runfleet\bundles\` | support bundles from the copy menu (`HOST-ID.md`, secrets scrubbed) |
 | `~/.local/state/runfleet/ssh-HOST.log` | `%LOCALAPPDATA%\runfleet\ssh-HOST.log` | ssh's own messages when making a connection |
-| `$XDG_RUNTIME_DIR/runfleet/` | `%LOCALAPPDATA%\runfleet\Cache\cm\` | RunFleet-managed ssh master sockets (none on Windows), per-host instance locks |
+| `$XDG_RUNTIME_DIR/runfleet/` | `%LOCALAPPDATA%\runfleet\Cache\cm\` | RunFleet-managed ssh master sockets (none on Windows: one ssh login per host instead), per-host instance locks |
 
 The state directory is private (0700, files 0600) whatever your umask: it holds job names, paths and command lines.
 On Windows the folders under your profile are private to your account already.

@@ -392,6 +392,37 @@ async def test_connect_needs_auth_host(make_app: MakeApp, monkeypatch: pytest.Mo
         assert svc.store.hosts["lynx"].status.state is ConnState.OK
 
 
+async def test_connect_on_a_session_host_hands_over_its_login(make_app: MakeApp,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """Session transport (§4.8): `c` passes the transport's login to the suspended run (the argv only serves the
+    manual-command modal); log in to all (`C`) passes one login per host."""
+    app, svc = make_app()
+
+    def login() -> int:
+        return 0
+
+    svc.logins["lynx"] = login
+    runs: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(app, "run_external", lambda argv, **kw: runs.append((argv, kw.get("login"))) or 0)
+    seqs: list[object] = []
+    monkeypatch.setattr(app, "run_external_sequence", lambda steps, logins=None: seqs.append(logins) or
+                        [0] * len(steps))
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.press("5")
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause(FLUSH)
+        assert runs == [(svc.connect_argv("lynx"), login)]
+        assert svc.called("after_connect") == [("lynx", 0)]
+        svc.inject("lynx", "auth")
+        svc.inject("vega", "unreachable")
+        await pilot.pause()
+        await pilot.press("C")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert seqs and seqs[-1] is not None and login in seqs[-1]          # type: ignore[operator]
+
+
 async def test_host_error_screen_from_red_chip(make_app: MakeApp) -> None:
     app, svc = make_app()
     async with app.run_test(size=BIG) as pilot:

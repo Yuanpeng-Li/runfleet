@@ -56,7 +56,7 @@ class HostConfig:
     backend: Literal["auto", "slurm", "workstation"] = "auto"
     color: str | None = None
     group: str = ""
-    mux: Literal["auto", "user", "managed", "off"] = "auto"
+    mux: Literal["auto", "user", "managed", "off", "session"] = "auto"
     connect_timeout: float = 45
     ssh_options: tuple[str, ...] = ()
     remote_shell: Literal["sh", "login"] = "sh"
@@ -303,7 +303,7 @@ WORKSTATION_SCHEMA: Mapping[str, Reader] = {
 HOST_SCHEMA: Mapping[str, Reader] = {
     "name": _host_name,                                 # type: ignore[dict-item]
     "ssh": _str, "enabled": _bool, "backend": _choice("auto", "slurm", "workstation"), "color": _opt_str,
-    "group": _str, "mux": _choice("auto", "user", "managed", "off"), "connect_timeout": parse_duration,
+    "group": _str, "mux": _choice("auto", "user", "managed", "off", "session"), "connect_timeout": parse_duration,
     "ssh_options": _str_list(_matching(_SSH_OPTION_RE, "ssh option (expected Key=Value)")),
     "remote_shell": _choice("sh", "login"), "forward_agent": _bool,
 }

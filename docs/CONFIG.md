@@ -170,7 +170,7 @@ The order of `[[host]]` tables is the order of the cards and the scope keys `1`�
 | `backend` | `auto` \| `slurm` \| `workstation` | `auto` | `auto` detects: `squeue` + `sinfo` → Slurm; `nvidia-smi` → GPU workstation; otherwise a CPU workstation |
 | `color` | string | palette | host colour in tables |
 | `group` | string | `""` | label shown on cards (`"clusters"`, `"workstations"`) |
-| `mux` | `auto` \| `user` \| `managed` \| `off` | `auto` | ssh connection sharing, see below |
+| `mux` | `auto` \| `user` \| `managed` \| `off` \| `session` | `auto` | ssh connection sharing, see below |
 | `connect_timeout` | duration | `45s` | how long making a connection may take |
 | `ssh_options` | list of strings | `[]` | extra `-o Key=Value` for background probes and log streams (not for interactive sessions) |
 | `remote_shell` | `sh` \| `login` | `sh` | `login` runs the probe through `bash -l` for sites whose tools need a login profile |
@@ -240,13 +240,19 @@ host, impolite), so it shares one connection per host:
 - `user` / `managed` force one of the two; `off` makes every probe a fresh login (only for testing). `user` needs a
   `ControlPath` in your `~/.ssh/config`: without one RunFleet does not multiplex at all (no master is created or
   checked), so every probe is a fresh login as with `off`.
+- `session` keeps one plain ssh login per host open (no ControlMaster) and runs every probe and log over it through a
+  small temporary `sh` helper that RunFleet sends on that login: nothing is installed on the server, and the helper
+  removes its temp files when the login ends. A Duo or password login (`c`) then lasts until RunFleet exits. No port
+  forwards over it yet. Opt-in on Linux and macOS (useful where ControlMaster sockets are not possible); never chosen
+  by `auto` there.
 
 RunFleet holds at most three sessions on a shared master, so your own `ssh` sessions are never refused. It never
-closes your master on its own; `runfleet doctor --reset HOST` closes managed ones.
+closes your master on its own; `runfleet doctor --reset HOST` closes managed ones. A `session` login lives only
+inside the running RunFleet, so nothing outside it can close it; press `c` on the host to log in anew.
 
-On native Windows (preview) `mux` is always `off`, whatever this key or your `~/.ssh/config` say: the Windows OpenSSH
-client has no ControlMaster. Every refresh is a fresh login, so hosts that need Duo or a password cannot be polled
-there; run RunFleet in WSL for them (see the user guide's Windows section).
+On native Windows (preview) the Windows OpenSSH client has no ControlMaster, so every value except `off` means
+`session` there, whatever your `~/.ssh/config` says; `off` makes every refresh a fresh login (hosts that need Duo or
+a password then cannot be polled). See the user guide's Windows section.
 
 ## Hosts without a config
 

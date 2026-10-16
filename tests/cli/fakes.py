@@ -69,6 +69,7 @@ class FakeService:
         self.written_path = Path("/tmp/runfleet-test-config.toml")
         self.connect: list[str] | None = ["ssh", "-fN", "x"]
         self.already_connected = False
+        self.login: Callable[[], int] | None = None      # connect_login: set for a session-transport host (§4.8)
         self.lock_path: object = None
         self.demo_mode = False
         self.settings_open = False
@@ -104,6 +105,9 @@ class FakeService:
     def connect_argv(self, host: str) -> list[str] | None:
         self.calls.append(("connect_argv", host))
         return self.connect
+
+    def connect_login(self, host: str) -> Callable[[], int] | None:
+        return self.login
 
     def remember_hosts(self, names: Sequence[str]) -> None:
         self.calls.append(("remember_hosts", list(names)))

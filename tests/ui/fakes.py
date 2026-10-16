@@ -615,6 +615,7 @@ class FakeService:
         self.search_errors: dict[str, str] = {}             # host -> search_logs error (no probe)
         self.search_gate: asyncio.Event | None = None       # set: search_logs waits for it (a slow host)
         self.already_connected: set[str] = set()
+        self.logins: dict[str, Callable[[], int]] = {}      # connect_login answers (session transport hosts)
         # Settings (FleetAPI runtime host management): in memory like --demo unless a test sets config_path
         self.config_path: Path | None = None
         self.saved: list[HostConfig] = [HostConfig(name=h.name, ssh=h.ssh) for h in config.hosts]
@@ -906,6 +907,9 @@ class FakeService:
 
     def connect_argv(self, host: str) -> list[str] | None:
         return ["ssh", "-fN", "-o", "ControlMaster=yes", host]
+
+    def connect_login(self, host: str) -> Callable[[], int] | None:
+        return self.logins.get(host)
 
     async def after_connect(self, host: str, rc: int) -> None:
         self._record("after_connect", host, rc)

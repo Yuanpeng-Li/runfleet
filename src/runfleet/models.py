@@ -42,7 +42,8 @@ class ErrorKind(StrEnum):        # defined ONLY here; errors.py holds exception 
     PERMISSION = "permission"
     INTERNAL = "internal"
 
-MuxMode = Literal["user", "managed", "off", "local", "none"]   # "none" = fake/demo transports
+MuxMode = Literal["user", "managed", "off", "session", "local", "none"]   # "none" = fake/demo transports;
+                                                                         # "session": one ssh + agent (§4.8)
 
 class Visibility(StrEnum):
     HIDDEN = "hidden"

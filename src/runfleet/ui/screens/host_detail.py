@@ -16,7 +16,7 @@ from textual.widgets import DataTable, Static
 
 from runfleet.core.store import HostState
 from runfleet.models import Job, JobKey, StateGroup, Visibility
-from runfleet.transport.mux import WINDOWS_NO_MUX
+from runfleet.transport.mux import SESSION_NOTE, WINDOWS_NO_MUX
 from runfleet.ui import keymap, render, theme
 from runfleet.ui.messages import FleetChanged
 from runfleet.ui.screens import FleetScreen
@@ -87,6 +87,8 @@ def connection_lines(state: HostState, now: datetime, width: int) -> list[Text]:
     lines = [render.fit(first, width)]
     if windows_off:
         lines.append(render.fit(Text(WINDOWS_NO_MUX, style=theme.dim()), width))
+    elif st.mux == "session":
+        lines.append(render.fit(Text(SESSION_NOTE, style=theme.dim()), width))
     if st.error is not None:
         err = Text(f"✖ {st.error.kind.value}: {st.error.summary}", style=theme.conn_style(st.state))
         lines.append(render.fit(err, width))

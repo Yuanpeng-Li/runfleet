@@ -100,6 +100,19 @@ async def test_unknown_job_and_needs_auth_exit_3(world: Callable[..., World]) ->
     assert task.result() == wait.EXIT_ERROR and "runfleet connect k2" in w.lines[-1]
 
 
+async def test_needs_auth_on_a_session_host(world: Callable[..., World]) -> None:
+    """`runfleet connect` is only an auth check for a session host (its login would end with that process), so
+    sending the user there loops forever on a Duo host (review: integration 5)."""
+    w = world()
+    w.t.mux_mode = "session"
+    w.t.prepare_errors.append(None)
+    w.t.fail_next(ErrorKind.AUTH)
+    task = w.start("k2:101")
+    await run_for(w.clock, 20)
+    assert task.result() == wait.EXIT_ERROR
+    assert "runfleet connect" not in w.lines[-1] and "key or ssh-agent" in w.lines[-1]
+
+
 def test_targets_resolve_and_reject() -> None:
     assert wait.resolve_targets(["k2:31270818_3"], (K2,)) == [wait.Target("k2", "31270818_3", "k2:31270818_3")]
     for bad in ("k2", ":1", "k2:", "nohost:1"):

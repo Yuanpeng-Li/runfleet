@@ -412,11 +412,13 @@ def test_display_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------- mux policy and the jump rewrite (§4.1-4.2)
-@pytest.mark.parametrize("cfg_mux", ["auto", "user", "managed", "off"])
+@pytest.mark.parametrize("cfg_mux", ["auto", "user", "managed", "session", "off"])
 @pytest.mark.parametrize("g", [G_K2, G_LYRA])
-def test_windows_forces_sharing_off(windows: None, g: str, cfg_mux: str) -> None:
+def test_windows_never_uses_a_controlmaster(windows: None, g: str, cfg_mux: str) -> None:
+    """Windows: the session transport (§4.8) whatever `mux` or a ControlPath say, unless mux = "off"."""
     plan = mux.decide(parse_ssh_g(g, "h"), HostConfig("h", "h", mux=cfg_mux), Path("/x"))  # type: ignore[arg-type]
-    assert plan.mode == "off" and not plan.uses_master and plan.control_path is None
+    assert plan.mode == ("off" if cfg_mux == "off" else "session")
+    assert not plan.uses_master and plan.control_path is None
     assert plan.probe_opts == ("-o", "ControlMaster=no", "-o", "ControlPath=none")
 
 
@@ -519,8 +521,10 @@ async def test_openssh_resolve_on_windows_never_needs_a_uid(windows: None, monke
     monkeypatch.setenv("WIN_PD_OVERRIDE_LOCAL_APPDATA", r"C:\Users\u\AppData\Local")
     t = OpenSSHTransport(HostConfig("k2", "k2"), log_path=tmp_path / "ssh-k2.log")
     assert await t.resolve() is None
-    assert t.mux == "off" and t.rendered_control_path is None
-    assert await t.prepare() is None                                        # no master to create
+    assert t.mux == "session" and t.rendered_control_path is None           # §4.8, never the user's ControlPath
+    off = OpenSSHTransport(HostConfig("k2", "k2", mux="off"), log_path=tmp_path / "ssh-k2.log")
+    assert await off.resolve() is None and off.mux == "off"
+    assert await off.prepare() is None                                      # no master to create
 
 
 async def test_local_host_is_refused_on_windows(windows: None) -> None:
@@ -635,7 +639,7 @@ async def test_doctor_on_windows_says_why_sharing_is_off(windows: None, monkeypa
         return spawn.failed_probe(script, HostError(ErrorKind.AUTH, "authentication needed"))
 
     monkeypatch.setattr(openssh, "resolve", fake_resolve)
-    host = HostConfig("lyra", "lyra", backend="slurm", mux="managed")
+    host = HostConfig("lyra", "lyra", backend="slurm", mux="off")
     t = OpenSSHTransport(host, mux_dir=tmp_path / "cm", log_path=tmp_path / "ssh.log")
     monkeypatch.setattr(t, "probe", no_probe)
     rep = await run_doctor(host, t, hooks=STUB_HOOKS, clock=ManualClock(CLOCK_START))
@@ -643,6 +647,82 @@ async def test_doctor_on_windows_says_why_sharing_is_off(windows: None, monkeypa
     assert by["mux"].detail.startswith("off (Windows); ProxyJump rewritten")
     assert by["master"].detail == "not used" and by["probe"].ok is False
     assert mux.WINDOWS_NO_MUX in rep.warnings
+
+
+async def test_doctor_on_windows_names_the_session(windows: None, monkeypatch: pytest.MonkeyPatch,
+                                                   tmp_path: Path) -> None:
+    from runfleet.core.clock import ManualClock
+    from runfleet.core.doctor import run_doctor
+    from runfleet.models import HostError
+    from runfleet.transport import make_transport, openssh
+    from runfleet.transport.session import SessionTransport
+    from tests.conftest import CLOCK_START
+    from tests.unit.stubs import STUB_HOOKS
+
+    async def fake_resolve(alias: str, **kw: Any) -> Any:
+        return parse_ssh_g(G_LYRA, alias)
+
+    async def no_session(*, force: bool = False) -> Any:
+        return HostError(ErrorKind.AUTH, "authentication needed")
+
+    monkeypatch.setattr(openssh, "resolve", fake_resolve)
+    monkeypatch.setenv("WIN_PD_OVERRIDE_LOCAL_APPDATA", r"C:\Users\u\AppData\Local")
+    host = HostConfig("lyra", "lyra", backend="slurm", mux="managed")      # managed is impossible: session
+    t = make_transport(host)
+    assert isinstance(t, SessionTransport)
+    monkeypatch.setattr(t, "prepare", no_session)
+    rep = await run_doctor(host, t, hooks=STUB_HOOKS, clock=ManualClock(CLOCK_START))
+    by = {c.name: c for c in rep.checks}
+    assert by["mux"].detail.startswith("session (one ssh login + a temporary sh agent); ProxyJump rewritten")
+    assert by["master"].ok is False and "authentication needed" in by["master"].detail
+    assert mux.SESSION_NOTE in rep.warnings and mux.WINDOWS_NO_MUX not in rep.warnings
+    # `doctor --reset` runs in its own process, which holds no session: it must not claim to close one
+    rep = await run_doctor(host, t, hooks=STUB_HOOKS, clock=ManualClock(CLOCK_START), reset=True)
+    reset = {c.name: c for c in rep.checks}["reset"].detail
+    assert reset.startswith("nothing to reset: a session lives only inside the running RunFleet")
+
+
+def test_kill_on_exit_job_object(windows: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every background process joins ONE KILL_ON_JOB_CLOSE job, created on first use (Win32 calls faked)."""
+    import ctypes
+    import struct
+
+    calls: list[Any] = []
+
+    class Kernel32:
+        def CreateJobObjectW(self, attrs: Any, name: Any) -> int:
+            calls.append(("create", attrs, name))
+            return 0x10
+
+        def SetInformationJobObject(self, job: int, cls: int, info: Any, size: int) -> int:
+            calls.append(("set", job, cls, info._obj.BasicLimitInformation.LimitFlags, size))
+            return 1
+
+        def OpenProcess(self, access: int, inherit: bool, pid: int) -> int:
+            calls.append(("open", access, inherit, pid))
+            return 0 if pid == 999 else 0x20 + pid
+
+        def AssignProcessToJobObject(self, job: int, proc: int) -> int:
+            calls.append(("assign", job, proc))
+            return 1
+
+        def CloseHandle(self, handle: int) -> int:
+            calls.append(("close", handle))
+            return 1
+
+    monkeypatch.setattr(platform, "_kernel32", Kernel32)
+    monkeypatch.setattr(platform, "_job_handle", None)
+    assert platform.kill_on_exit(1) is True and platform.kill_on_exit(2) is True
+    size = ctypes.sizeof(platform._job_info_type())
+    if struct.calcsize("P") == 8:
+        assert size == 144                       # sizeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION) on Win64
+    assert calls == [("create", None, None), ("set", 0x10, 9, 0x2000, size),
+                     ("open", 0x0101, False, 1), ("assign", 0x10, 0x21), ("close", 0x21),
+                     ("open", 0x0101, False, 2), ("assign", 0x10, 0x22), ("close", 0x22)]
+    assert platform.kill_on_exit(999) is False                               # already gone: nothing to assign
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)
+    calls.clear()
+    assert platform.kill_on_exit(3) is False and calls == []                 # POSIX: nothing to do
 
 
 # ---------------------------------------------------------------- config and ~/.ssh/config on Windows

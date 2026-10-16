@@ -446,7 +446,7 @@ async def _pids_with_args(argv: list[str]) -> list[int]:
     (it carries `-fN` and the literal ControlPath), so an `ssh` wrapper that execs the real binary still matches."""
     tail = " ".join(argv[1:])
     uid = platform.current_uid()
-    if uid is None:                        # Windows: no `ps`, and no backgrounded masters to find (sharing is off)
+    if uid is None:                        # Windows: no `ps`, and no backgrounded masters to find (no ControlMaster there)
         return []
     try:
         res = await spawn.run(["ps", "-ww", "-o", "pid=,args=", "-U", str(uid)], timeout=CHECK_TIMEOUT)

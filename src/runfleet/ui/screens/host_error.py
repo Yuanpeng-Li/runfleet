@@ -19,6 +19,7 @@ from textual.widgets import Button, Static
 
 from runfleet.core.store import HostState
 from runfleet.models import ConnState, DoctorReport, ErrorKind
+from runfleet.transport.mux import WINDOWS_NO_MUX
 from runfleet.ui import keymap, render, theme
 from runfleet.ui.widgets.host_card import busy_note
 from runfleet.util import humanize, platform
@@ -39,9 +40,10 @@ _ADVICE: dict[ErrorKind, str] = {
 }
 
 
-# P1: no shared connection on Windows, so a login done with Connect does not carry over to the background probes
-WINDOWS_AUTH = ("Windows ssh cannot keep a login open: key/agent hosts work, but a Duo or password host stays here "
-                "after Connect. For those hosts run RunFleet in WSL until the session transport.")
+# Windows has no ControlMaster: with the session transport (§4.8, the default there) a Connect login is the session
+# the background polls use; with mux = "off" it carries over to nothing (transport.mux.WINDOWS_NO_MUX says so)
+WINDOWS_AUTH = ("Press c to log in: RunFleet keeps that login open as one ssh session while it runs (Windows ssh "
+                "has no ControlMaster), so a Duo or password host needs c again after RunFleet restarts.")
 
 
 def read_tail(path: str | None, n: int = LOG_TAIL) -> list[str]:
@@ -82,8 +84,8 @@ def error_report(state: HostState, now: datetime, width: int) -> Text:
         advice = _ADVICE.get(err.kind)
         if advice:
             lines.append(Text(advice.replace("<host>", state.config.ssh), style=theme.muted()))
-        if err.kind is ErrorKind.AUTH and platform.IS_WINDOWS:
-            lines.append(Text(WINDOWS_AUTH, style=theme.warn()))
+        if err.kind is ErrorKind.AUTH and platform.IS_WINDOWS and st.mux in ("session", "off"):
+            lines.append(Text(WINDOWS_AUTH if st.mux == "session" else WINDOWS_NO_MUX, style=theme.warn()))
         if err.detail:
             lines.append(Text(""))
             lines.append(Text("stderr", style="bold"))

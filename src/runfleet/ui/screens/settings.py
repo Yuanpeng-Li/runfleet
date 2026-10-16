@@ -1081,6 +1081,8 @@ def probe_summary(report: DetectReport) -> str:
         return f"ok{kind}{latency} · mux {report.mux}"
     if report.state in (ConnState.NEEDS_AUTH, ConnState.HOSTKEY):
         what = "needs a login" if report.state is ConnState.NEEDS_AUTH else "host key problem"
+        if report.mux == "session":       # `runfleet connect` is only an auth check for a session host (§4.8)
+            return f"{what} — save it, then press c on its card"
         return f"{what} — save it, then press c on its card (or `runfleet connect {report.alias}`)"
     return report.error.summary if report.error is not None else "no answer"
 

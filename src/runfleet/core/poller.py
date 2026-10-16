@@ -421,8 +421,9 @@ class HostPoller:
                 await self._on_transport_failure(err)
                 return
             prepared_now = True        # a cached profile polls first; re-detection waits for the next cycle
-        elif self.transport.mux in ("user", "managed") and not await self.transport.check_master():
-            # §4.1: no probe while a master is being made; mux hosts never fall back to direct probes
+        elif self.transport.mux in ("user", "managed", "session") and not await self.transport.check_master():
+            # §4.1: no probe while a master (or a session, §4.8) is being made; mux hosts never fall back to direct
+            # probes
             self._publish(state=ConnState.CONNECTING)
             err = await self._ensure_master()
             if err is not None:
@@ -848,7 +849,10 @@ class HostPoller:
         if err.kind is ErrorKind.TIMEOUT:
             self._timeouts_in_row += 1
             if self._timeouts_in_row >= 2:
-                if self.transport.mux == "managed":
+                # a session (§4.8) is reset only when its agent stops answering too: a probe stuck remotely (a hung
+                # NFS mount) must not end a healthy session, whose Duo login the BatchMode restart cannot redo
+                if self.transport.mux == "managed" or (self.transport.mux == "session"
+                                                       and not await self.transport.check_master()):
                     await self.transport.reset_master()
                     self._need_prepare = True
                     self._timeouts_in_row = 0

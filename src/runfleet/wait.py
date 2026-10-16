@@ -140,6 +140,11 @@ class Waiter:
             st = hs.status.state
             if st in (ConnState.NEEDS_AUTH, ConnState.HOSTKEY):
                 what = "needs a login" if st is ConnState.NEEDS_AUTH else "has a host key problem"
+                if hs.status.mux == "session" and st is ConnState.NEEDS_AUTH:
+                    # a session login lives in the process that made it: `runfleet connect` is only an auth check
+                    return self.error(f"{host} {what} — `runfleet wait` cannot use a Duo/password login with the "
+                                      "session transport (Windows): use a key or ssh-agent for this host, or watch "
+                                      "it in RunFleet (press c on it)")
                 return self.error(f"{host} {what} — run `runfleet connect {host}`, then wait again")
             if st in (ConnState.RETRYING, ConnState.UNREACHABLE):
                 since = self.down_since.setdefault(host, mono)

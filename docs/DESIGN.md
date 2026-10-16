@@ -63,27 +63,33 @@ revision 3 brings into scope.
 
 ### 1.2 Non-goals (v0.x)
 - Job **submission**, templates or resubmission (the user's own submission tooling owns that).
-- Installing anything on remote hosts, daemons, agents, Prometheus, slurmrestd.
+- Installing anything on remote hosts, daemons, persistent agents, Prometheus, slurmrestd. **Allowed (P2): a
+  session-scoped helper** — the session transport's `sh` agent (§4.8) is sent on stdin of RunFleet's own ssh login
+  each time, lives only in that remote shell's memory, keeps its few state files in a private `mktemp -d` directory
+  it removes, and ends with the login (stdin EOF, exit, a signal). Nothing is written to the home directory, nothing
+  outlives the session, nothing listens; still no daemon, no install.
 - Admin features (draining nodes, editing partitions), acting on other users' jobs or processes.
 - A web UI.
 - Long-term metrics storage.
 
-**Native Windows is a goal, shipped as a preview with P1 limits** (WSL remains the full-featured way on a Windows
-machine). The package imports and runs on Windows 10/11 with the built-in OpenSSH client (≥ 8.1); every local OS
-difference lives in `util/platform.py` (§3.2; a contract test keeps `fcntl`, `os.killpg`, `os.getuid`,
-`signal.SIGKILL`, `termios` out of every other module, `ui/termbg.py` excepted behind its own guards), and CI runs
-the suite on `windows-latest` (tests marked `posix` skipped) plus `mypy --platform win32` on Linux. P1 limits, all
-said in `doctor` and the UI: ssh connection sharing is forced off (§4.1), so every poll is a full login — key /
-ssh-agent hosts work, Duo or password hosts need WSL; no port forwards; no `ssh = "local"` host; no `ctrl+z`;
-`runfleet update` prints manual steps (§8.6); the terminal's background is not asked. Planned: P2, a long-lived
-`ssh.exe` session per host running a temporary `sh` agent sent on stdin (installs nothing, removes its own temp
-files), which makes Duo hosts usable; P3, port forwards over it and in-place updates.
+**Native Windows is a goal, shipped as a preview** (WSL remains the full-featured way on a Windows machine). The
+package imports and runs on Windows 10/11 with the built-in OpenSSH client (≥ 8.1); every local OS difference lives
+in `util/platform.py` (§3.2; a contract test keeps `fcntl`, `os.killpg`, `os.getuid`, `signal.SIGKILL`, `termios`
+out of every other module, `ui/termbg.py` excepted behind its own guards), and CI runs the suite on `windows-latest`
+(tests marked `posix` skipped) plus `mypy --platform win32` on Linux. Windows OpenSSH has no ControlMaster, so P2
+polls every host over the **session transport** (§4.8): one long-lived `ssh.exe` login per host running a temporary
+`sh` agent sent on stdin. Duo and password hosts work: `c` logs in once in the real console and that login serves
+every background poll until RunFleet exits (each restart needs `c` again). Limits, all said in `doctor` and the UI:
+shells (`s`) and the remote pager (`p`) are separate `ssh -t` logins (a Duo push each); no port forwards (P3); no
+`ssh = "local"` host; no `ctrl+z`; `runfleet update` prints manual steps (§8.6); the terminal's background is not
+asked; `runfleet connect` is only an auth check (a session cannot outlive the CLI process). Planned: P3, port
+forwards over the session and in-place updates.
 
 ### 1.3 v0.1 scope (polished core) vs later phases
 
 | Area | v0.1 | v0.2 | v0.3+ |
 |---|---|---|---|
-| Hosts | `config.toml`; `runfleet hosts import` (non-interactive, plus a plain first-run prompt when no config exists); ad-hoc `runfleet k2 lynx`; local host | import wizard UI, node-ssh mode (pam_slurm_adopt), multiple login endpoints | asyncssh transport (Windows), long-lived framed session per host |
+| Hosts | `config.toml`; `runfleet hosts import` (non-interactive, plus a plain first-run prompt when no config exists); ad-hoc `runfleet k2 lynx`; local host | import wizard UI, node-ssh mode (pam_slurm_adopt), multiple login endpoints | port forwards over the session transport (Windows, §4.8) |
 | Slurm | own jobs (squeue), history (sacct, bounded window), job detail (scontrol -d, sacct steps, sstat), job GPU util via sstat, sinfo nodes for the user's partitions | **Attach** (§7.16): per-GPU / per-process / cgroup readings of a running job via node ssh or a confirmed `srun --overlap`, on-demand `history <dur>`, other users' running jobs per node (host detail, §5.2.9), queue position, `scontrol update TimeLimit`, seff-style efficiency | PBS/Torque, LSF, HTCondor, Kubernetes |
 | Workstation | NVIDIA GPUs, GPU processes of all users, own tasks (sticky process trees), CPU/mem/load, logs via `/proc/<pid>/fd/1`, exit log scan (Traceback/OOM/Killed), stall hints | AMD `rocm-smi`, Intel | Apple |
 | Views | **Fleet (default)**, Jobs, GPUs, Job detail, Host detail, Log viewer (append + follow), Help, Confirm, Action menu, Host error, Textual command palette with RunFleet commands | log search / older-chunk paging / re-wrap, preview modes, themes / ASCII mode, pins, sparklines, experiment-regex grouping, column chooser, `:` command grammar, `:history` | LED grid for > 20 hosts |
@@ -279,15 +285,18 @@ src/runfleet/
     humanize.py          display formatting: durations, ages, bytes, MiB→G, percentages [WP3]
     logscan.py           exit log scan (Traceback / OOM / Killed): ended tasks + "Why it ended"; cause chip, error lines [WP2]
     efficiency.py        efficiency card: time / CPU / memory / GPU used vs requested, "next time" request (§5.2.8)
-    platform.py          the only home of OS differences: IS_WINDOWS, spawn keywords, kill_tree, file locks, command
-                         splitting/display, Windows-reserved names, Linux signal names (§1.2, §4.2, §8.1)  [WP1]
+    platform.py          the only home of OS differences: IS_WINDOWS, spawn keywords (background, session login),
+                         kill_tree, the Windows Job Object, file locks, command splitting/display, Windows-reserved
+                         names, Linux signal names (§1.2, §4.2, §4.8, §8.1)  [WP1]
   probe/
     section.py           FROZEN Section, SectionResult, SectionOutcome, ProbeScript, StreamSpec  [WP1]
     framing.py           render ProbeScript → POSIX sh; parse framed stdout → SectionResults  [WP1]
   transport/
     base.py              FROZEN Transport protocol, RunResult, ProbeResult, StreamHandle [WP1]
     openssh.py           OpenSSHTransport (probe, stream, argv builders, ensure_master)  [WP1]
-    mux.py               mux policy from `ssh -G`, jump rewrite, managed socket dir      [WP1]
+    session.py           SessionTransport: one long-lived ssh per host running the agent; jobs, pings, login (§4.8)  [WP1]
+    agent.py             the session agent: its POSIX sh text, request encoding, incremental reply decoder (pure, §4.8)  [WP1]
+    mux.py               mux policy from `ssh -G` (incl. who gets the session transport), jump rewrite, managed socket dir  [WP1]
     spawn.py             tty-less subprocess spawning (new session, scrubbed env)        [WP1]
     classify.py          ssh stderr/rc → ErrorKind/ConnState (table §9)                 [WP1]
     local.py             LocalTransport (`sh -s` locally)                               [WP1]
@@ -414,7 +423,8 @@ class ErrorKind(StrEnum):        # defined ONLY here; errors.py holds exception 
     PERMISSION = "permission"
     INTERNAL = "internal"
 
-MuxMode = Literal["user", "managed", "off", "local", "none"]   # "none" = fake/demo transports
+MuxMode = Literal["user", "managed", "off", "session", "local", "none"]   # "none" = fake/demo transports;
+                                                                         # "session": one ssh + agent (§4.8)
 
 class Visibility(StrEnum):
     HIDDEN = "hidden"
@@ -1089,14 +1099,16 @@ class Transport(Protocol):
     async def prepare(self, *, force: bool = False) -> HostError | None: ...  # ssh -G, mux policy, ensure master
                                                     # (BatchMode); idempotent; force = a user retry (manual `r`,
                                                     # after connect) that bypasses the 30 s master throttle
-    async def check_master(self) -> bool: ...       # `ssh -O check`; True when no master is involved
+    async def check_master(self) -> bool: ...       # `ssh -O check` (session: alive + a ping answered within 3 s);
+                                                    # True when no master is involved
     async def probe(self, script: ProbeScript, *, timeout: float) -> ProbeResult: ...   # never raises
     async def stream(self, spec: StreamSpec) -> StreamHandle: ...
     def interactive_argv(self, remote_cmd: str | None) -> list[str]: ...  # `ssh -t …` run under App.suspend
     async def before_connect(self) -> bool: ...     # resolve the mux plan + clear a stale socket before connect_argv;
                                                     # True = a working master is already up (nothing to log in to)
-    def connect_argv(self) -> list[str] | None: ...  # `ssh -fN … -E <log>`; None if not applicable (local/fake)
-    async def reset_master(self) -> None: ...       # managed masters only: `ssh -O exit`, unlink socket
+    def connect_argv(self) -> list[str] | None: ...  # `ssh -fN … -E <log>`; None if not applicable (local/fake);
+                                                    # an `ssh … true` auth check without a master (off, session)
+    async def reset_master(self) -> None: ...       # managed masters: `ssh -O exit`, unlink socket; session: end it
     async def close(self) -> None: ...
     # port forwards through the existing master (§7.15); nothing runs remotely
     def forward_blocker(self) -> str | None: ...    # why no forward is possible (no master, local host); None = can
@@ -1105,7 +1117,9 @@ class Transport(Protocol):
     async def cancel_forward(self, local_port: int, node: str, remote_port: int) -> HostError | None: ...  # -O cancel
 ```
 
-Lane limits (§4.2) are enforced by core (poller, LogService, ActionService), not by transports.
+Lane limits (§4.2) are enforced by core (poller, LogService, ActionService), not by transports. The session
+transport's interactive login is NOT part of this contract: it is the optional `InteractiveLogin` protocol of
+`transport/session.py` (§4.8), which the UI reaches through `FleetAPI.connect_login` (§3.7).
 
 ### 3.6 Collector contract — `src/runfleet/backends/base.py` (FROZEN)
 
@@ -1372,7 +1386,7 @@ class HostConfig:
     backend: Literal["auto", "slurm", "workstation"] = "auto"
     color: str | None = None
     group: str = ""
-    mux: Literal["auto", "user", "managed", "off"] = "auto"
+    mux: Literal["auto", "user", "managed", "off", "session"] = "auto"
     connect_timeout: float = 45
     ssh_options: tuple[str, ...] = ()
     remote_shell: Literal["sh", "login"] = "sh"
@@ -1606,6 +1620,9 @@ class FleetAPI(Protocol):
     # interactive argv; the UI runs them inside App.suspend
     async def prepare_connect(self, host: str) -> bool: ...  # Transport.before_connect; True = already connected
     def connect_argv(self, host: str) -> list[str] | None: ...   # call prepare_connect first (UI `c`, `runfleet connect`)
+    def connect_login(self, host: str) -> Callable[[], int] | None: ...
+        # the transport's InteractiveLogin.login (session transport, §4.8): BLOCKING, the UI runs it inside
+        # App.suspend instead of connect_argv (0 = logged in; the session then serves the polls); None otherwise
     async def after_connect(self, host: str, rc: int) -> None: ...   # reset backoff, re-prepare, poll now
     def shell_argv(self, host: str, key: JobKey | None = None) -> list[str]: ...
     def pager_argv(self, host: str, ref: LogRef) -> list[str] | None: ...
@@ -1720,21 +1737,25 @@ found its master and every ensure leaked one more plain login through jumpvm. Th
 - `managed`: `ssh -G -o ControlPath=<mux_dir>/cm-%C {ssh_options} <alias>`.
 If `ssh -G` cannot expand it, the pattern is used as before (and the rewrite then applies to every command alike).
 
-Mux decision (config `mux = "auto" | "user" | "managed" | "off"`, default `auto`):
+Mux decision (config `mux = "auto" | "user" | "managed" | "off" | "session"`, default `auto`):
 
 | `ssh -G` says | `auto` resolves to | Probe/stream options added |
 |---|---|---|
 | `controlpath` ≠ none **and** `controlpersist` ≠ no (k2, vega, labstation, lynx) | `user` | `-o ControlMaster=no` (use the master at the user's path, never become one) |
 | `controlpath` = none (lyra: `ControlMaster false`, no path), or `controlpersist` = no (a `-fN` master would never expire) | `managed` | `-o ControlMaster=no -o ControlPath=<mux_dir>/cm-%C` |
 | config `mux = "off"` | `off` | `-o ControlMaster=no -o ControlPath=none` (every probe is a cold login) |
+| config `mux = "session"` (opt-in on Linux/macOS; never chosen by `auto` there) | `session` | none: probes and streams are jobs of the one session ssh (§4.8), which runs with `-o ControlMaster=no -o ControlPath=none` |
 | `ssh = "local"` | `local` | no ssh (LocalTransport, §4.5) |
 
-**Windows forces `off`** (`decide()`, whatever `mux` or a ControlPath in `~/.ssh/config` say): Windows OpenSSH has no
-ControlMaster (Win32-OpenSSH#405), and a `-fN` master never backgrounds there, so `user`/`managed` would hang. The off
-plan already holds together: `connect_argv` is an `ssh … true` auth check, the poller skips `check_master`,
-`reset_master` does nothing, `forward_blocker` says why. `doctor` (mux check `off (Windows)` plus the reason as a
-warning) and the host screen (`mux: off (Windows)` and the reason) say so; the auth dialog adds that a Connect login
-does not carry over. The ProxyJump rewrite still applies, in Windows form (§4.2).
+**Windows: `session`** (`decide()` / `mux.wants_session()`, whatever `mux` or a ControlPath in `~/.ssh/config` say,
+except `mux = "off"`): Windows OpenSSH has no ControlMaster (Win32-OpenSSH#405), and a `-fN` master never
+backgrounds there, so `user`/`managed` would hang; `auto`, `user`, `managed` and `session` all become the session
+transport (§4.8; `make_transport` picks `SessionTransport` by the same rule). `doctor` (mux check `session (one ssh
+login + a temporary sh agent)` plus what that means as a warning) and the host screen (`mux: session` and the same
+note) say so; the auth dialog says that `c` logs in for as long as RunFleet runs. `mux = "off"` on Windows keeps the
+P1 plan: `connect_argv` is an `ssh … true` auth check, the poller skips `check_master`, `reset_master` does nothing,
+`forward_blocker` says why, and doctor / the host screen show `off (Windows)` with the reason. The ProxyJump rewrite
+applies in Windows form either way (§4.2).
 
 `<mux_dir>` = `$XDG_RUNTIME_DIR/runfleet` if set, else `~/.cache/runfleet/cm`; mode 0700; if a rendered socket path
 would exceed 86 bytes, `/tmp/runfleet-<uid>/` (0700). (OpenSSH first binds `<path>.<16 random chars>`, 17 bytes longer,
@@ -1770,7 +1791,8 @@ per tick through jumpvm or vega's slow login would be impolite and count as time
    turns that one probe into a direct BatchMode login — harmless; the next tick re-ensures.
 
 On exit RunFleet leaves masters running (ControlPersist expires them). `runfleet doctor --reset <host>` runs
-`ssh -O exit` for managed masters. User masters are only restarted by `c` after the user confirmed "restart the shared
+`ssh -O exit` for managed masters (a `session` lives only inside the running RunFleet: `--reset` says there is
+nothing to reset). User masters are only restarted by `c` after the user confirmed "restart the shared
 master?" in HostErrorScreen.
 
 ### 4.2 Process hygiene and command lines (exact)
@@ -1782,7 +1804,9 @@ plus `SSH_ASKPASS_REQUIRE=never`. Any prompt (host key, passphrase, password, Du
 classified (§9 rows 1–2). On Windows (`util/platform.py`) the same spawn uses `CREATE_NO_WINDOW |
 CREATE_NEW_PROCESS_GROUP` instead of a new session, stdin is always a pipe (closed at once when there is no input:
 some ssh.exe builds hang on a NUL stdin), and killing a probe, stream or notify hook ends its tree with
-`taskkill /F /T` and TerminateProcess (P2 adds a Job Object, so a crash leaves nothing behind either); a timed-out
+`taskkill /F /T` and TerminateProcess, and every process it starts joins RunFleet's one Job Object with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`platform.kill_on_exit`, ctypes), so not even a crash or a kill of RunFleet
+leaves an ssh.exe (or its ProxyCommand hop, which joins its parent's job) behind; a timed-out
 probe's taskkill runs in a worker thread, so a dropped network (every probe timing out at once) never stalls the
 TUI. Programs the user names (pager, editor, a notify hook argv) are looked up on `PATH` with `PATHEXT` first
 (`platform.resolve_program`): CreateProcess only appends `.exe`, and `more` is `more.com`, `code` is `code.cmd`.
@@ -1961,8 +1985,10 @@ Notes that matter:
 - `NEEDS_AUTH`/`HOSTKEY` stop polling. A manual `r` makes exactly one more BatchMode attempt (`prepare(force=True)`:
   the 30 s master throttle does not swallow it). `c` runs the interactive
   connect (§4.6), then `after_connect()` → `CONNECTING`.
-- Two consecutive transport timeouts with a `managed` master → `reset_master()`, then re-ensure. With a `user` master we
-  only show "shared ssh master unresponsive — press c to restart it".
+- Two consecutive transport timeouts with a `managed` master → `reset_master()`, then re-ensure. A `session` is reset
+  only when `check_master()` fails as well (its ping is a real round trip, unlike `-O check`): a probe stuck remotely
+  must not end a healthy session, and a reset session on a Duo host needs `c` again (BatchMode cannot log in). With a `user` master we only show "shared
+  ssh master unresponsive — press c to restart it".
 
 ### 4.5 Local host
 `ssh = "local"` (or `name` ∈ {`local`, `localhost`} with no `ssh` key) → `LocalTransport`: `create_subprocess_exec("sh",
@@ -1992,6 +2018,12 @@ def run_external(self, argv: list[str], *, banner: str | None = None, fail_log: 
 
 - Jump hosts prompt in the same terminal (interactive rewrite keeps prompts, drops later chatter into the log).
 - `ssh -fN` returns after authentication; the backgrounded master (and its hop) log only to `<log>`, never to the TUI.
+- **Session hosts** (§4.8): `FleetAPI.connect_login(host)` returns the transport's blocking login, and `run_external`
+  (`login=`) / `run_external_sequence` (`logins=`, log in to all) call it inside the same suspend instead of running
+  the argv, which then only serves the manual-command modal. The login starts the session ssh WITHOUT BatchMode,
+  the terminal inherited, so its prompts appear there as with `ssh -fN`; it returns 0 once the agent says ready and
+  that ssh keeps running after the resume. `runfleet connect` stays an auth check for session hosts and says to press
+  `c` in the TUI instead.
 - `SuspendNotSupported` → modal (`ManualCommandScreen`) with the exact command to run in another terminal and a
   *Done* button that calls `FleetAPI.after_connect(host, 0)` (re-prepare + poll now). `check_master` is a Transport
   method, not on `FleetAPI`, so the UI does not poll it (M2 integration decision).
@@ -2001,12 +2033,18 @@ def run_external(self, argv: list[str], *, banner: str | None = None, fail_log: 
   error stays readable); a multi-node job first asks for the node (batch host first). Other Slurm jobs → a login-node
   shell `cd`'d to WorkDir. srun (not ssh-to-node) because lyra's sshd refuses compute-node logins and pam_slurm_adopt
   lands in the *newest* job on a shared node (Attach field probes, §7.16).
+- **Ctrl-C while suspended**: `asyncio.run` (Textual's `App.run`) installs a SIGINT handler that only cancels the
+  main task on the first Ctrl-C, which would end RunFleet after the resume. The suspend therefore runs under
+  `platform.ctrl_c_raises()` (Python's default handler: KeyboardInterrupt), and a command under
+  `platform.ctrl_c_to_child()` (a Python no-op handler, so the command alone decides: `less` stops following, ssh
+  ends); a session login is aborted by the KeyboardInterrupt (rc 130).
 - After every suspend the app forces a full repaint and refreshes that host.
 
 ### 4.7 Logs (`core/logs.py`)
 - **Master first**: before a stream opens, a `user`/`managed` master that is gone (ControlPersist expired, the user
   closed theirs) is revived exactly like for on-demand probes (`check_master` → `prepare`); a failed prepare is shown in
-  the pane and no stream starts (no fallback BatchMode login through the jump host, no instant Duo failure).
+  the pane and no stream starts (no fallback BatchMode login through the jump host, no instant Duo failure). A
+  session host's transport does the same itself (a dead session is restarted, throttled, before the stream, §4.8).
 - **Follow** (JobDetail log pane and LogScreen only): `StreamSpec("log.tail", cmd="tail -c {n} -F -- {path} & p=$!;
   cat >/dev/null; kill $p 2>/dev/null", meta={"path": path, "bytes": n})`, `n = 65536`. Initial content and follow come
   from one command (no gap, no duplicate); the stdin watchdog kills the remote `tail` when we close stdin (verified on
@@ -2097,6 +2135,108 @@ locale the probe prelude exports).
   was rewritten, a `\r` update overwrote the match) the nearest line with it wins, with a note saying so; when the
   file grew by more than 8 MiB since the search, the usual last 64 KiB are streamed and the last line with the needle
   is used; the line never arriving within 5 s falls back the same way.
+
+### 4.8 Session transport (`transport/session.py`, `transport/agent.py`)
+
+**Why.** Windows OpenSSH has no ControlMaster, so without one every probe would be a full login (P1): fine for keys,
+impossible for Duo or password hosts. The session transport keeps ONE `ssh` per host open and multiplexes every
+probe and log stream over it through a small POSIX `sh` agent that RunFleet sends on that login's stdin. It still
+uses only the system ssh (D2), and it installs nothing (§1.2): the agent lives in the remote shell's memory, keeps a
+few state files in a private `mktemp -d` directory and removes it, and ends every job it started when its stdin
+closes, when it exits, or on HUP/INT/TERM/PIPE. Who gets it: Windows unless `mux = "off"`; Linux/macOS only with
+`mux = "session"` (opt-in, never the default: CI and developers exercise it there).
+
+**Command line.** `SessionTransport` subclasses `OpenSSHTransport` and reuses `resolve` (`ssh -G`), the jump rewrite,
+`ssh_options`, the `-E` log and the classification (§9):
+```
+session: ssh -T [-o BatchMode=yes] -o ControlMaster=no -o ControlPath=none {jump rewrite, + -E <log> for the hop}
+             {config ssh_options} -o ConnectTimeout=<connect_timeout | 30 for the login> -o ServerAliveInterval=15
+             -o ServerAliveCountMax=4 -o LogLevel=ERROR -E <log> -- <alias> <bootstrap>
+bootstrap (one word for the login shell):
+         exec sh -c 'IFS= read -r n; eval "$(dd bs=1 count=$n 2>/dev/null)"'
+         remote_shell="login": exec bash -l -c '<the same>'
+stdin  : "<n>\n" + the agent's n bytes, then one request per line
+```
+`read` and `dd bs=1` never read ahead, so the requests after the agent stay on stdin for its own `read` loop.
+
+**Protocol** (`agent.py` docstring is the reference; ids `[A-Za-z0-9_]+`, one ASCII line per message):
+
+| client → agent | meaning |
+|---|---|
+| `P <token>` | ping → `P <token>` |
+| `Q <id> <payload>` | probe: the payload (a rendered ProbeScript, §4.3) is fed to `sh -s` |
+| `S <id> <payload>` | stream: the payload runs as `sh -c`, its stdin open until `W` (§4.7 watchdog form) |
+| `W <id>` | close the stream's stdin |
+| `K <id>` | SIGTERM the job's command (its process group with `setsid`, and its descendants via `ps`), SIGKILL 2 s later; a job still running 1 s after that (output held open by a child in D state or one that escaped) stops counting toward the 8 |
+
+| agent → client | meaning |
+|---|---|
+| `R <pid> <version> <setsid\|-> <pipe_buf>` | ready, sent after an empty line so login-shell output without a newline (a title escape) cannot glue onto it (lines before it — `.bashrc` chatter — are ignored) |
+| `L <id> <text>` / `C <id> <text>` | a probe stdout line (newline implied) / a piece of a longer line |
+| `D <id> <hex>` | stream stdout bytes, one line per `read(2)`: `\r` progress arrives at once |
+| `E <id> <text>` / `F <id> <text>` | stderr line / piece, after the job's stdout ended (last 8 KiB) |
+| `Z <id> <rc>` | the job ended (`125` + `F … busy`: refused, 8 jobs already run) |
+| `X <text>` | the agent cannot start (no temp dir) |
+
+A payload is the bytes as a `printf` format (printable ASCII as is, `%` → `%%`, everything else and a leading `-` as
+`\ooo`): no `base64` needed remotely. **Every agent write is one `write(2)` below PIPE_BUF** (`getconf PIPE_BUF /`,
+512 if unknown; lines ≤ PIPE_BUF − 128 bytes and never more than 4 KiB), so lines of concurrent jobs never
+interleave on the shared stdout. Probe output goes through `awk` (`fflush` per line, each line printed with ONE `%s`
+conversion, long lines cut into `C` pieces), so framing (§4.3) sees exactly the bytes `sh -s` printed: framed output
+always ends in `\n`, the one thing line mode cannot carry (NUL bytes are not faithful either; probes print text).
+mawk (Debian/Ubuntu's awk) reads a pipe in blocks until EOF, so the agent runs it as `awk -W interactive`: lines
+leave as the job prints them, and a probe that times out keeps its finished sections (its unbuffered writes are why
+each line is one conversion). Streams go through `dd bs=N count=1 | od -A n -t x1`.
+
+**Jobs.** At most 8 at once (`agent.MAX_JOBS`): the client holds an `asyncio.Semaphore(8)` per host, the agent
+refuses a 9th (rc 125). After a `K` the client keeps the job's slot until its `Z` or 3.5 s, when the agent has
+stopped counting it too, so both sides count the same jobs. Jobs start detached from the agent's shell
+(`( rfa_run … & )`): it never `wait`s, and a plain `&` would grow its job table with every probe. Each job runs `setsid sh …` when util-linux `setsid` exists (its own process group), writes
+the command's pid to `<dir>/<id>.pg`, its stderr to `<id>.err`, its rc to `<id>.rc`; `K` and the exit cleanup kill
+that group plus its descendants found with `ps -A -o pid= -o ppid=` (GNU `timeout` puts sections in groups of their
+own), never the job's own plumbing, so the encoder flushes the partial output and `Z` still comes. A stream's stdin
+is a pipe from a holder loop (no `mkfifo`) that ends on `W`, when the command ended, when the temp dir is gone, or
+when the agent's pid is gone (even after a SIGKILL of the agent).
+
+**Remote requirements.** POSIX `sh` (dash, bash, BusyBox ash, ksh), `dd`, `awk` with `fflush`, `od`, `tr`, `tail`,
+`sleep`, `cat`, `rm`, `mktemp` or a writable `$TMPDIR` / `/tmp`. Optional: `setsid` (Linux; without it — macOS,
+some BusyBox systems — kills go through the `ps` walk) and `ps` with `-o pid= -o ppid=` (without either, a kill
+reaches only the job's shell and the job's processes end at their own remote timeouts). Tested on Linux CI under
+dash, bash and BusyBox ash (`tests/unit/test_agent.py`); macOS and other BSD remotes are expected to work (no
+`setsid`: the `ps` fallback, also tested) but are untested.
+
+**Lifecycle** (`SessionTransport`):
+- `prepare(force)`: resolve; a live session must answer a ping within 3 s, or keep delivering output meanwhile (a
+  pong queues behind a big log fetch on a slow link) (alive but silent → TIMEOUT error, the session is kept:
+  ServerAlive ends a dead link, and two timeouts in a row with a failing ping reset it, §4.4); else at most one new
+  BatchMode session per 30 s unless `force`; ready = `R` within `connect_timeout` + 5 s. Failures are classified from
+  `<log>` + the session's stderr (AUTH, HOSTKEY, REFUSED …; an agent that never started → §9 row 8).
+- `check_master()`: process alive and a ping answered within 3 s (or output still arriving); the poller treats
+  `session` like `managed` (check before a tick, `prepare` when it fails), except that two timeouts in a row reset it
+  only when `check_master()` fails too: a probe stuck remotely (a hung NFS mount) must not end a healthy Duo login.
+- `probe()`: starts a session if none is up (throttled), runs one `Q` job; its local timeout (§4.2, with the
+  frozen-loop extra budget) sends `K` for that job only, waits up to 3.5 s for its `Z` and keeps whatever output
+  arrived (partial rule). A session
+  that ends under a job finishes it as lost: `ProbeResult.error` from the session's death (ssh's log line classified,
+  else MUX "ssh session ended"), unless an end marker had arrived.
+- `stream()`: one `S` job; `close()` sends `W`, then `K` after 2 s (and waits up to 3.5 s more).
+- `login()` (`InteractiveLogin`, defined in `transport/session.py`): blocking, inside `App.suspend`; the session
+  WITHOUT BatchMode, the terminal inherited (POSIX: same process group so `/dev/tty` prompts work, through `sh -c 'trap "" INT QUIT; exec "$@"'` so a
+  later Ctrl-C in a pager or shell does not reach it; Windows: `CREATE_NEW_PROCESS_GROUP`, the console inherited:
+  Win32 `read_passphrase` reads the console even with piped stdin). Waits for `R` on a `threading.Event` (Ctrl-C
+  → 130), so the blocked event loop does not matter; the session then replaces any BatchMode attempt in flight.
+  Ctrl-C works because `run_external` puts Python's default SIGINT handler back for the suspend (§4.6): asyncio's
+  runner would otherwise only cancel the main task on the first Ctrl-C (ending RunFleet after the resume). An
+  aborted login's ssh gets SIGTERM first (it restores the terminal's echo), SIGKILL 1 s later.
+- A BatchMode start that is cancelled (the host was removed or disabled) or whose transport was closed meanwhile is
+  closed, never installed.
+- `reset_master()` / `close()`: close the session's stdin (the agent ends everything and removes its dir), kill
+  after 2 s. A crash of RunFleet closes the pipe too (POSIX) or the Job Object kills ssh.exe (Windows, §4.2).
+- I/O: three daemon threads per session on a plain `subprocess.Popen` (stdout decoder, stderr tail, stdin writer),
+  replies handed to the loop with `call_soon_threadsafe`: the same code on the Proactor loop and under a suspended
+  TUI.
+- Not over the session: shells (`s`) and the remote pager (`p`) are their own `ssh -t` logins (a Duo push each), and
+  port forwards (`forward_blocker` says so; P3 adds `-D` to the session).
 
 ---
 
@@ -3838,7 +3978,8 @@ keypress, as ordinary on-demand probes under their timeouts.
   `password|passwd|passphrase|secret|token|api_key|access_key` (`max_tokens` stays); also written 0600 to `<state>/bundles/<host>-<id>.md` (not in `--demo`).
 - **Port forwards** (`P`, palette *Forward a port…*, *Forwards*): node = the running job's batch host, `localhost` for
   tasks and host-level forwards; refused with the reason from `FleetAPI.forward_blocker` (host not OK/DEGRADED, needs
-  auth, or `Transport.forward_blocker()`: no master — user mode without ControlPath, `mux = "off"`, local host).
+  auth, or `Transport.forward_blocker()`: no master — user mode without ControlPath, `mux = "off"`, `session`
+  (until P3), local host).
   Candidates: `find_urls` over the log text RunFleet holds, else the last 1 MiB of stdout/stderr (one `fetch_log`
   each); one per port, a URL with path/token wins; labels by keyword or well-known port; plus *Other port…*
   (`PortPromptScreen`). `forward_port` picks a local port (the remote number when it binds on 127.0.0.1 and no forward
@@ -4100,7 +4241,7 @@ Nested node sections (owner `node`, each `timeout -k 2 5` via framing; order fix
 | `~/.local/state/runfleet/ui.json` | view, sort, filter text, state preset, grouping, saved Jobs views (`views`, `active_view`, §7.6), theme (auto/dark/light/ansi), Fleet card size (`fleet_layout`: auto/compact), watched jobs and the last visit (`watch`, `last_seen`), GPU availability watches (`watches`, §7.14) |
 | `~/.local/state/runfleet/update.json` | update check (§8.6): newest version on main, when asked, the last version announced |
 | `~/.local/state/runfleet/runfleet.log` | rotating log (5 MB × 3); `--debug` raises the level and adds `debug/` raw dumps; `--demo` records carry `[demo]` |
-| `~/.local/state/runfleet/ssh-<host>.log` | `-E` log of master creation / connect (§4.2) |
+| `~/.local/state/runfleet/ssh-<host>.log` | `-E` log of master creation / connect / the session ssh (§4.2, §4.8) |
 | `$XDG_RUNTIME_DIR/runfleet/` (else `~/.cache/runfleet/cm/`) | managed ControlMaster sockets, per-host `instance.lock.*` (0700) |
 
 The state dir and `debug/` are created 0700 and every file RunFleet writes there (log and rotations, cache, `ui.json`,
@@ -4108,8 +4249,10 @@ The state dir and `debug/` are created 0700 and every file RunFleet writes there
 
 **Windows** (`paths.py`, platformdirs with `appauthor=False`, so one `runfleet` level): config
 `%APPDATA%\runfleet\config.toml` (roaming), state (cache, `ui.json`, `update.json`, log, ssh logs, bundles, `debug\`)
-`%LOCALAPPDATA%\runfleet\`, instance locks `%LOCALAPPDATA%\runfleet\Cache\cm\` (no sockets: sharing is off, §4.1; no
-86-byte limit and no `/tmp` fallback). Modes are not set there (the profile's ACL keeps it private). Instance and
+`%LOCALAPPDATA%\runfleet\`, instance locks `%LOCALAPPDATA%\runfleet\Cache\cm\` (no sockets: no ControlMaster on
+Windows, §4.1; no 86-byte limit and no `/tmp` fallback). The session transport (§4.8) writes nothing locally beyond
+`ssh-<host>.log` (`-E`, truncated per session start) and remotely only its own `rfa.XXXXXX` temp dir, removed when the
+session ends. Modes are not set there (the profile's ACL keeps it private). Instance and
 config-edit locks use `msvcrt.locking` on one sentinel byte at 1 MiB (`util/platform.try_lock`), so the pid at
 offset 0 stays readable to a second instance; Windows refuses to unlink the open `.config.toml.lock`, so that file
 stays (harmless). Host names Windows cannot use as file names (`con`, `nul`, `aux`, `com1`…`lpt9`, a trailing dot)
@@ -4195,7 +4338,7 @@ name = "lynx"
 | `backend` | `auto`\|`slurm`\|`workstation` | auto | detection (§5.1) |
 | `color` | str | auto palette | host colour in tables |
 | `group` | str | "" | optional label shown on cards ("clusters", "workstations") |
-| `mux` | `auto`\|`user`\|`managed`\|`off` | auto | §4.1 |
+| `mux` | `auto`\|`user`\|`managed`\|`off`\|`session` | auto | §4.1; `session` = one ssh + agent (§4.8), opt-in on Linux/macOS, the default on Windows |
 | `connect_timeout` | duration | 45s | `ssh -fN` master creation |
 | `ssh_options` | list[str] | [] | extra `-o Key=Value` for probes and streams (not interactive) |
 | `remote_shell` | `sh`\|`login` | sh | `login` = `bash -l -c "exec sh -s"` for sites needing a login profile |
@@ -4243,7 +4386,8 @@ exit code 2 with `config.toml: host[2].poll_jobs: expected duration like "15s", 
 ### 8.5 CLI (`cli.py`)
 ```
 runfleet [HOST ...] [-c PATH] [--demo] [--demo-seed N] [--readonly] [--no-mouse] [--no-cache] [--debug] [--version]
-runfleet connect HOST                         auth-once with RunFleet's mux policy (ssh -fN in this terminal), then exit
+runfleet connect HOST                         auth-once with RunFleet's mux policy (ssh -fN in this terminal), then exit;
+                                              session hosts (§4.8): only an auth check (press c in the TUI instead)
 runfleet hosts list | import [--all | ALIAS ...] [--write]
 runfleet doctor [HOST ...] [--reset]
 runfleet snapshot [HOST ...] [--json] [--timeout SEC]
@@ -4386,7 +4530,7 @@ the UI. Each row names the detection rule implemented in `transport/classify.py`
 | 3 | DNS failure | `Could not resolve hostname` | UNREACHABLE (dns) | red chip "dns" | backoff straight to 5 min |
 | 4 | Network down / refused / timeout | `Connection timed out`, `Operation timed out`, `Connection refused`, `No route to host`, `Network is unreachable`, `kex_exchange_identification`, `banner exchange`, `Connection closed by` | RETRYING → UNREACHABLE after 3 | yellow `◐ retry Ns` → red; rows `~` | exponential backoff 2× up to 5 min, ±20 % jitter |
 | 5 | Jump hop fails | stderr of the rewritten `ProxyCommand` (`-W` hop): mentions the jump host, `channel 0: open failed`, `stdio forwarding failed`, `Connection closed by UNKNOWN` | as #1–#4 with kind JUMP | message names the jump host (`via jumpvm`) | as #4 |
-| 6 | Probe hangs | local timeout (§4.2) **before** any section end marker | RETRYING | "probe timed out after 25 s" | managed mux: `reset_master()` after 2 consecutive; user mux: suggest `c` restart |
+| 6 | Probe hangs | local timeout (§4.2) **before** any section end marker | RETRYING | "probe timed out after 25 s" | managed mux: `reset_master()` after 2 consecutive (session: only when its ping fails too); user mux: suggest `c` restart |
 | 6b | Probe partly done | local timeout **after** ≥ 1 end marker | DEGRADED; finished sections used, unfinished TIMEOUT | per-section errors | group backoff; transport backoff untouched |
 | 7 | Mux trouble | `mux_client_`, `Control socket connect`, `Session open refused by peer` | DEGRADED/RETRYING (MUX) | host screen shows mux details | on-demand lane → 1 session; managed master reset |
 | 8a | Local ssh killed | rc < 0 (signal) before any end marker | RETRYING | "ssh killed by SIGKILL" | as #4 (transient, never paused) |
@@ -4510,6 +4654,16 @@ Mandated parser assertions (minimum; Appendix B lists file → test module):
 - **No tty**: a fake `ssh` that tries to open `/dev/tty` and prompt is spawned via `transport/spawn.py` inside a pty
   harness → it fails (ENXIO) and nothing is written to the pty; the result classifies as AUTH.
 - `classify.py` table tests: every regex in §9 rows 1–7.
+- **Session transport** (§4.8). `tests/unit/test_agent.py` runs the REAL agent under `sh`, dash, bash and BusyBox ash:
+  8 concurrent jobs and a refused 9th, a 5000-byte line byte-exact with every reply line below PIPE_BUF, `\r`
+  progress arriving while a stream runs, `K` ending one job only (also with `setsid` hidden: the `ps` walk), `W`,
+  stdin EOF and SIGTERM/SIGHUP ending every job (a TERM-ignoring one too) with no leftover process or temp dir, a
+  rendered ProbeScript parsing exactly as under plain `sh`. `tests/unit/test_session.py` drives `SessionTransport`
+  through a fake ssh (a Python script relaying `sh -c <remote command>` like ssh): prepare/ping, the argv, probes and
+  streams, a timeout killing one job, 12 concurrent probes, auth failure and the 30 s throttle, a dropped session
+  failing its jobs and reconnecting, the blocking login, and the transport contract run against both OpenSSH and
+  session transports. Windows pieces (Job Object, spawn keywords) are tested with `IS_WINDOWS` patched and a fake
+  kernel32; the fake-ssh tests are `posix` (Windows CI has no `sh`).
 - Poller with `ManualClock`: tick period and evaluation only at ticks, piggyback never alone, event groups via
   follow-ups, hidden/focused factors, jitter bounds, floors, backoff growth/reset, partial-timeout rule, NEEDS_AUTH
   pause, single in-flight, manual refresh floor, idle ×4 and idle pause, persistent MonitorView with ages, merge order.

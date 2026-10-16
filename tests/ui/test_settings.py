@@ -450,6 +450,9 @@ def test_helpers() -> None:
     assert probe_summary(ok) == "ok · 0.21s · mux user"
     auth = DetectReport("lynx", ConnState.NEEDS_AUTH, None, None, "none", {}, None)
     assert "runfleet connect lynx" in probe_summary(auth)
+    # a session host's login lives in the TUI; `runfleet connect` only checks auth (review: integration 5)
+    session_auth = DetectReport("lynx", ConnState.NEEDS_AUTH, None, None, "session", {}, None)
+    assert probe_summary(session_auth) == "needs a login — save it, then press c on its card"
 
 
 async def test_help_inside_settings_lists_the_settings_keys(make_app: MakeApp) -> None:

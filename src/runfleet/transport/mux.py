@@ -1,4 +1,5 @@
-"""[WP1] Mux policy from `ssh -G`, ProxyJump rewrite, managed socket dir (§4.1-4.2).
+"""[WP1] Mux policy from `ssh -G` (incl. the session transport choice, §4.8), ProxyJump rewrite, managed socket dir
+(§4.1-4.2).
 
 Pure functions: given the resolved `SshSettings` and the host config, decide the mux mode and produce the exact option
 lists the OpenSSH transport splices into its command lines.
@@ -18,9 +19,12 @@ from runfleet.sshconfig import SshSettings
 from runfleet.util import platform
 
 MANAGED_PERSIST = "15m"
-# Why sharing is off on Windows whatever the config says (doctor, host detail; DESIGN §4.1)
-WINDOWS_NO_MUX = ("Windows OpenSSH has no ControlMaster; every poll logs in again — keys/agent work, Duo hosts: "
-                  "use WSL until the session transport")
+# Why sharing is off on Windows when the config says `mux = "off"` (doctor, host detail; DESIGN §4.1)
+WINDOWS_NO_MUX = ('mux = "off" on Windows: every poll logs in again — keys/agent work; Duo/password hosts need the '
+                  'default (session)')
+# What the session transport means for the user (doctor, host detail; DESIGN §4.8)
+SESSION_NOTE = ("one ssh login per host, kept open while RunFleet runs (session transport): a Duo/password login "
+                "ends when RunFleet exits; shells and the pager log in on their own")
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +36,7 @@ class MuxPlan:
     names it literally, so options that change OpenSSH's `%C` hash (ProxyJump vs. the ProxyCommand rewrite, User,
     Port, HostName from `ssh_options`) can never make two commands look at different sockets.
     """
-    mode: MuxMode                        # "user" | "managed" | "off"
+    mode: MuxMode                        # "user" | "managed" | "off" | "session"
     control_path: str | None             # the socket path in use ("…/cm-%C" pattern or the literal socket)
     probe_opts: tuple[str, ...]          # added to BASE (probe, stream)
     imux_opts: tuple[str, ...]           # interactive sessions
@@ -69,22 +73,33 @@ def control_path_option(path: str, *, literal: bool) -> str:
     return f"ControlPath={value}"
 
 
+def wants_session(host: HostConfig) -> bool:
+    """The host runs over the session transport (§4.8): always on Windows unless `mux = "off"` (its ssh has no
+    ControlMaster); elsewhere only when the config asks for it (`mux = "session"`, opt-in, never the default)."""
+    if platform.IS_WINDOWS:
+        return host.mux != "off"
+    return host.mux == "session"
+
+
 def decide(settings: SshSettings, host: HostConfig, mux_dir: Path, *, socket: str | None = None) -> MuxPlan:
     """§4.1: user ControlPath (with ControlPersist) -> "user"; none/ControlPersist=no -> "managed"; config overrides.
 
     `socket`: the expanded socket path (`OpenSSHTransport.resolve` gets it from `ssh -G`); without it the managed
     plan names the `cm-%C` pattern and the user plan the path `ssh -G` printed.
 
-    Windows: always "off", whatever `mux` or ~/.ssh/config say (`WINDOWS_NO_MUX`): its ssh has no ControlMaster, and
-    a master started with `-fN` never backgrounds there (the command would hang).
+    Windows: "session" (§4.8), or "off" when the config says so, whatever `mux` or ~/.ssh/config say otherwise: its
+    ssh has no ControlMaster, and a master started with `-fN` never backgrounds there (the command would hang).
+    "session" never shares a ControlMaster either: its one login is the long-lived session ssh itself.
     """
-    mode = "off" if platform.IS_WINDOWS else host.mux
+    mode = host.mux
+    if platform.IS_WINDOWS:
+        mode = "session" if wants_session(host) else "off"
     if mode == "auto":
         persist_no = settings.controlpersist.strip().lower() in ("no", "false", "0")
         mode = "user" if settings.controlpath is not None and not persist_no else "managed"
-    if mode == "off":
-        return MuxPlan("off", None, ("-o", "ControlMaster=no", "-o", "ControlPath=none"),
-                       ("-o", "ControlPath=none"), ())
+    if mode in ("off", "session"):
+        return MuxPlan(mode, None, ("-o", "ControlMaster=no", "-o", "ControlPath=none"), ("-o", "ControlPath=none"),
+                       ())
     if mode == "user":
         path = socket or settings.controlpath
         if path is None:          # `mux = "user"` forced without a ControlPath: the user's config applies as is

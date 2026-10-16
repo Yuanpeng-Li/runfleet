@@ -207,6 +207,8 @@ def _argv_of(args: Any, shell: bool) -> list[str]:
 def _spawns_real_ssh(argv: list[str], executable: Any, env: Mapping[str, str] | None) -> bool:
     if not argv:
         return False
+    if len(argv) > 4 and argv[3] == "runfleet-login" and executable is None:   # platform.login_argv's sh wrapper
+        return _spawns_real_ssh(argv[4:], None, env)
     prog = os.fsdecode(executable) if executable is not None else argv[0]
     if _ssh_stem(prog) != "ssh":                 # `ssh`, `ssh.exe`, `C:\…\OpenSSH\SSH.EXE`
         return False

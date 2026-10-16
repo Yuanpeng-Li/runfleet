@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -715,9 +715,11 @@ class RunFleetApp(App[None]):
             self.toast(f"{host}: nothing to connect (local host)")
             return
         state = self.host_state(host)
+        # session transport (§4.8): the login IS the long-lived session, started here and kept after the resume
+        login = self.service.connect_login(host)
         rc = self.run_external(argv, banner=f"RunFleet → connecting to {host} (Duo/password/host-key prompts appear "
                                "here; Ctrl-C aborts)", fail_log=state.status.ssh_log if state else None,
-                               connect_host=host)
+                               connect_host=host, login=login)
         if rc is not None:
             await self.service.after_connect(host, rc)
             if rc == 0:
@@ -1248,37 +1250,35 @@ class RunFleetApp(App[None]):
             super().action_suspend_process()
 
     def run_external(self, argv: list[str], *, banner: str | None = None, fail_log: str | None = None,
-                     connect_host: str | None = None, pause_on_error: bool = False) -> int | None:
+                     connect_host: str | None = None, pause_on_error: bool = False,
+                     login: Callable[[], int] | None = None) -> int | None:
         """Run ``argv`` in the real terminal with the TUI suspended; the ONLY place that suspends (tests patch it).
 
         Returns the exit code, or None when suspending is impossible (a modal then shows the command to run; its
         *Done* re-prepares ``connect_host``, which only a login passes). ``pause_on_error``: a command that fails
         within seconds (a shell whose `cd` or ssh failed) waits for Enter, so its error is not hidden by the redraw.
+        ``login``: a transport's interactive login (session transport, §4.8) runs instead of ``argv``, which then
+        only serves the manual-command modal.
         """
+        rc = 130
         try:
-            with self.suspend(), spawn.loop_frozen():     # the loop is blocked: in-flight probe timers must not count
-                if banner:
-                    print(banner, flush=True)
-                started = time.monotonic()
+            # the loop is blocked: in-flight probe timers must not count; Ctrl-C ends the step, never RunFleet
+            with self.suspend(), spawn.loop_frozen(), rfplatform.ctrl_c_raises():
                 try:
-                    # Windows: `more` is more.com, `code` code.cmd (CreateProcess only adds .exe)
-                    rc = subprocess.run(rfplatform.resolve_program(argv), check=False).returncode
-                except OSError as exc:
-                    print(f"runfleet: cannot run {argv[0]}: {exc}", flush=True)
-                    rc = 127
-                except KeyboardInterrupt:
-                    rc = 130
-                prompt = None
-                if rc != 0 and fail_log:
-                    _print_log_tail(fail_log)
-                    prompt = "ssh failed — press Enter to return to RunFleet "
-                elif pause_on_error and rc not in (0, 130) and time.monotonic() - started < QUICK_EXIT:
-                    prompt = f"runfleet: {argv[0]} exited with {rc} — press Enter to return to RunFleet "
-                if prompt is not None:
-                    try:
+                    if banner:
+                        print(banner, flush=True)
+                    started = time.monotonic()
+                    rc = _run_step(argv, login)
+                    prompt = None
+                    if rc != 0 and fail_log:
+                        _print_log_tail(fail_log)
+                        prompt = "ssh failed — press Enter to return to RunFleet "
+                    elif pause_on_error and rc not in (0, 130) and time.monotonic() - started < QUICK_EXIT:
+                        prompt = f"runfleet: {argv[0]} exited with {rc} — press Enter to return to RunFleet "
+                    if prompt is not None:
                         input(prompt)
-                    except (EOFError, KeyboardInterrupt):
-                        pass
+                except (EOFError, KeyboardInterrupt):
+                    pass
         except SuspendNotSupported:
             from runfleet.ui.screens.host_error import ManualCommandScreen
 
@@ -1287,24 +1287,23 @@ class RunFleetApp(App[None]):
         self.refresh(layout=True, repaint=True)
         return rc
 
-    def run_external_sequence(self, steps: Sequence[tuple[list[str], str, str | None]]) -> list[int] | None:
+    def run_external_sequence(self, steps: Sequence[tuple[list[str], str, str | None]],
+                              logins: Sequence[Callable[[], int] | None] | None = None) -> list[int] | None:
         """Several commands in ONE suspend (log in to all), each after its banner; besides :meth:`run_external` the
-        only place that suspends (tests patch it). ``steps``: (argv, banner, ssh log shown when it fails). Ctrl-C
-        skips to the next one (rc 130); Enter is asked once at the end when one failed. None: cannot suspend."""
+        only place that suspends (tests patch it). ``steps``: (argv, banner, ssh log shown when it fails); ``logins``
+        (parallel to ``steps``): a transport login to run instead of that argv (§4.8). Ctrl-C skips to the next one
+        (rc 130); Enter is asked once at the end when one failed. None: cannot suspend."""
         rcs: list[int] = []
         try:
-            with self.suspend(), spawn.loop_frozen():
-                for argv, banner, fail_log in steps:
-                    print(banner, flush=True)
+            with self.suspend(), spawn.loop_frozen(), rfplatform.ctrl_c_raises():
+                for i, (argv, banner, fail_log) in enumerate(steps):
                     try:
-                        rc = subprocess.run(rfplatform.resolve_program(argv), check=False).returncode
-                    except OSError as exc:
-                        print(f"runfleet: cannot run {argv[0]}: {exc}", flush=True)
-                        rc = 127
+                        print(banner, flush=True)
+                        rc = _run_step(argv, logins[i] if logins is not None and i < len(logins) else None)
+                        if rc not in (0, 130) and fail_log:
+                            _print_log_tail(fail_log)
                     except KeyboardInterrupt:
                         rc = 130
-                    if rc not in (0, 130) and fail_log:
-                        _print_log_tail(fail_log)
                     rcs.append(rc)
                 if any(rc not in (0, 130) for rc in rcs):
                     try:
@@ -1385,6 +1384,23 @@ def _screen_host(screen: Screen[Any]) -> str | None:
         return host
     key = getattr(screen, "key", None)
     return key.host if isinstance(key, JobKey) else None
+
+
+def _run_step(argv: list[str], login: Callable[[], int] | None) -> int:
+    """One external command (or a transport login) in the suspended terminal: its exit code, 127 when it cannot
+    start, 130 on Ctrl-C. Run it under `platform.ctrl_c_raises()`: Ctrl-C then aborts a login (KeyboardInterrupt,
+    the login ends its ssh); a command gets the Ctrl-C itself and decides (`less` stops following, ssh ends)."""
+    try:
+        if login is not None:
+            return login()
+        # Windows: `more` is more.com, `code` code.cmd (CreateProcess only adds .exe)
+        with rfplatform.ctrl_c_to_child():
+            return subprocess.run(rfplatform.resolve_program(argv), check=False).returncode
+    except OSError as exc:
+        print(f"runfleet: cannot run {argv[0]}: {exc}", flush=True)
+        return 127
+    except KeyboardInterrupt:
+        return 130
 
 
 def _print_log_tail(path: str, n: int = 20) -> None:

@@ -64,7 +64,8 @@ Workstation GPUs live, cluster GPUs of your running jobs from Slurm accounting, 
 
 - **Nothing to install remotely.** It uses your OpenSSH client and `~/.ssh/config` as they are (ProxyJump,
   ControlMaster, keys, Duo / 2FA) and only runs commands that are already there: `squeue`, `sacct`, `scontrol`,
-  `sstat`, `sinfo`, `sprio`, `sshare`, `nvidia-smi`, `ps`, `/proc`.
+  `sstat`, `sinfo`, `sprio`, `sshare`, `nvidia-smi`, `ps`, `/proc`. (On Windows, whose `ssh` cannot share a
+  connection, a small `sh` helper travels over RunFleet's own login and is gone when it ends.)
 - **Gentle on shared login nodes.** One SSH round trip per host per refresh — about the load of
   `watch -n 15 squeue --me` — slower for hosts off screen, paused when you walk away.
 - **Calm when hosts are not.** An unreachable host, an expired login or a hung `nvidia-smi` becomes a badge and a
@@ -112,13 +113,15 @@ update when RunFleet is already there. It needs:
   It reads `%USERPROFILE%\.ssh\config` and uses the Windows `ssh-agent` service for your keys.
 - **Windows Terminal** is recommended (colours, mouse); the old console works too.
 
-What the preview cannot do yet, because the Windows `ssh` has no ControlMaster (connection sharing):
+The Windows `ssh` has no ControlMaster (connection sharing), so RunFleet keeps one ssh login per host open and
+sends every refresh over it, through a small temporary `sh` helper it passes on that login (nothing is installed
+on the server; the helper cleans up when the login ends):
 
-- **Every refresh logs in again.** Hosts you reach with a key or `ssh-agent` work normally. Hosts that ask for **Duo,
-  a password or an OTP** cannot be polled: a login in RunFleet (`c`) does not carry over to the background probes.
-  For those hosts, run RunFleet inside [WSL](https://learn.microsoft.com/windows/wsl/install) with the Linux install
-  line above — everything works there.
-- No port forwards, no `ssh = "local"` host (monitoring the Windows machine itself), no `ctrl+z`.
+- **Duo, password and OTP hosts work.** Press `c` (or `C` for all of them); the prompts appear in the console, and
+  that login serves the host until RunFleet exits. After a restart, press `c` again. Key and `ssh-agent` hosts log in
+  by themselves. Shells (`s`) and the remote pager (`p`) are separate logins (another Duo push each).
+- No port forwards yet, no `ssh = "local"` host (monitoring the Windows machine itself), no `ctrl+z`; for forwards,
+  run RunFleet inside [WSL](https://learn.microsoft.com/windows/wsl/install) with the Linux install line above.
 - `runfleet update` cannot replace the running `runfleet.exe`: it prints the command instead (quit RunFleet, then
   `uv tool upgrade runfleet`).
 

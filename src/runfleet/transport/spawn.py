@@ -6,7 +6,8 @@ so nothing can open `/dev/tty`), stdin a pipe or `/dev/null`, `DISPLAY`/`SSH_ASK
 
 Windows (`util.platform`): no console window and a process group of its own instead of a session, and stdin is
 always a pipe (closed at once when there is nothing to send: some ssh.exe builds hang on a NUL stdin); killing ends
-the whole tree with `taskkill /F /T`.
+the whole tree with `taskkill /F /T`, and every process joins RunFleet's KILL_ON_JOB_CLOSE Job Object, so none
+survives RunFleet (`platform.kill_on_exit`).
 """
 
 from __future__ import annotations
@@ -95,6 +96,8 @@ async def spawn(argv: Sequence[str], *, stdin_pipe: bool, capture: bool = True,
     assert protocol is not None
     proc = asyncio.subprocess.Process(transport, protocol, loop)
     _CHILDREN[proc] = (protocol.exited, transport)
+    if platform.IS_WINDOWS:
+        platform.kill_on_exit(proc.pid)    # Job Object: nothing it starts outlives RunFleet, even after a crash
     if pipe_in and not stdin_pipe and proc.stdin is not None:
         proc.stdin.close()                 # Windows: end of input, like /dev/null
     return proc
@@ -302,6 +305,13 @@ async def run_probe(argv: Sequence[str], script: ProbeScript, *, timeout: float,
         res = await run(argv, timeout=timeout, input=text.encode(), env=env)
     except SpawnError as e:
         return failed_probe(script, HostError(ErrorKind.SSH, str(e)[:80], str(e)))
+    return finish_probe(script, text, res, classify, label=label, where=" ".join(argv))
+
+
+def finish_probe(script: ProbeScript, text: str, res: RunResult, classify: ProbeClassifier, *, label: str | None,
+                 where: str) -> ProbeResult:
+    """Parse a finished probe's stdout, classify a transport failure, log the DEBUG summary line and, with
+    `--debug`, the raw dump (`where`: the command line or the session it ran in)."""
     parsed = framing.parse(res.stdout, script, timed_out=res.timed_out)
     error = classify(res, parsed)
     if label is not None:
@@ -314,7 +324,7 @@ async def run_probe(argv: Sequence[str], script: ProbeScript, *, timeout: float,
         log.debug("%s", summary)
         if debugdump.enabled():
             names = " ".join(s.name for s in script.sections)
-            meta = f"{summary}\nargv: {' '.join(argv)}\nsections: {names}"
+            meta = f"{summary}\nargv: {where}\nsections: {names}"
             debugdump.dump_probe(label, script.purpose, text, res.stdout, res.stderr, meta)
     return ProbeResult(run=res, sections=parsed.sections, error=error)
 

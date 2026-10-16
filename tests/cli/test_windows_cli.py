@@ -162,7 +162,8 @@ def test_windows_report(windows: None, monkeypatch: pytest.MonkeyPatch) -> None:
     assert "  ✓ ssh -V  OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2" in lines
     assert "  ✓ console  Windows Terminal" in lines
     assert any("RUNFLEET_THEME=light" in x for x in lines)
-    assert any("no ControlMaster" in x for x in lines) and any("WSL" in x for x in lines)
+    assert any("no ControlMaster" in x for x in lines) and any("mux: session" in x for x in lines)
+    assert any("press c" in x for x in lines) and not any("WSL" in x for x in lines)
     monkeypatch.setattr(cli, "ssh_version", lambda: "OpenSSH_for_Windows_7.7p1, LibreSSL 2.6.5")
     monkeypatch.delenv("WT_SESSION")
     lines = cli.windows_report()
@@ -205,8 +206,30 @@ def test_ssh_version_reads_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_connect_on_windows_is_an_auth_check(h: Harness, windows: None, capsys: pytest.CaptureFixture[str]) -> None:
+    """A session transport's login lives as long as the process that made it: `runfleet connect` only checks the
+    login and says to press c in the TUI (§4.8); with mux = "off" it says what that means."""
+    def session_host(svc: Any) -> None:
+        svc.login = lambda: 0
+
+    h.script = session_host
     rc, out, _ = run(["connect", "--demo", "lynx"], capsys)
-    assert rc == 0 and "login works" in out and "cannot keep it open" in out and "reuses" not in out
+    assert rc == 0 and "login works" in out and "press c" in out and "reuses" not in out
+    h.script = None
+    rc, out, _ = run(["connect", "--demo", "lynx"], capsys)
+    assert rc == 0 and "login works" in out and 'mux = "off"' in out and "reuses" not in out
+
+
+def test_probe_report_for_a_session_host_points_at_the_tui() -> None:
+    """`hosts import` / first run: a session host that needs a login is logged in with c in RunFleet; `runfleet
+    connect` would only check its auth (review: integration 5)."""
+    from runfleet.models import ConnState, DetectReport
+
+    session = DetectReport("lynx", ConnState.NEEDS_AUTH, None, None, "session", {}, None)
+    assert "runfleet connect" not in cli.report_line(session, saved=True)
+    assert "press c on it in RunFleet" in cli.report_line(session, saved=True)
+    assert "save it, then press c" in cli.report_line(session, saved=False)
+    managed = DetectReport("lynx", ConnState.NEEDS_AUTH, None, None, "managed", {}, None)
+    assert "`runfleet connect lynx`" in cli.report_line(managed, saved=True)
 
 
 def test_config_help_and_paths_name_the_real_location(windows: None, monkeypatch: pytest.MonkeyPatch,

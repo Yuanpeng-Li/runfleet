@@ -15,7 +15,7 @@ from runfleet.core.clock import ManualClock
 from runfleet.core.logs import LogService
 from runfleet.models import ErrorKind, HostError
 from runfleet.transport.fake import FakeTransport
-from runfleet.transport.mux import WINDOWS_NO_MUX
+from runfleet.transport.mux import SESSION_NOTE, WINDOWS_NO_MUX
 from runfleet.ui import keymap, notify
 from runfleet.ui.screens.host_detail import connection_lines
 from runfleet.ui.screens.host_error import WINDOWS_AUTH, error_report
@@ -175,11 +175,137 @@ def test_host_detail_unchanged_off_windows(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_auth_error_explains_the_windows_limit(windows: None, monkeypatch: pytest.MonkeyPatch) -> None:
     lynx = _states()["lynx"]
-    lynx.status = dataclasses.replace(lynx.status, error=HostError(ErrorKind.AUTH, "Permission denied"))
+    lynx.status = dataclasses.replace(lynx.status, mux="session",
+                                      error=HostError(ErrorKind.AUTH, "Permission denied"))
     text = error_report(lynx, T0, 400).plain
-    assert WINDOWS_AUTH in text and "WSL" in text
+    assert WINDOWS_AUTH in text and "Press c" in text and "WSL" not in text and WINDOWS_NO_MUX not in text
     monkeypatch.setattr(platform, "IS_WINDOWS", False)
     assert WINDOWS_AUTH not in error_report(lynx, T0, 400).plain
+
+
+def test_auth_error_with_mux_off_on_windows(windows: None) -> None:
+    """With mux = "off" there is no session for a Connect login to live in: the session hint would be wrong
+    (review: integration 4)."""
+    lynx = _states()["lynx"]
+    lynx.status = dataclasses.replace(lynx.status, mux="off", error=HostError(ErrorKind.AUTH, "Permission denied"))
+    text = error_report(lynx, T0, 400).plain
+    assert WINDOWS_AUTH not in text and WINDOWS_NO_MUX in text
+
+
+def test_host_detail_names_the_session(windows: None) -> None:
+    st = _states()["labstation"]
+    st.status = dataclasses.replace(st.status, mux="session")
+    text = "\n".join(t.plain for t in connection_lines(st, T0, 400))
+    assert "mux: session" in text and "(Windows)" not in text and SESSION_NOTE in text and WINDOWS_NO_MUX not in text
+
+
+# ---------------------------------------------------------------- session login (§4.8)
+@pytest.mark.parametrize("sequence", [False, True])
+def test_a_session_login_runs_instead_of_the_connect_argv(monkeypatch: pytest.MonkeyPatch, sequence: bool) -> None:
+    """The transport's login runs inside the suspend (its ssh must outlive it); the argv is not run."""
+    import contextlib
+    import subprocess
+
+    from runfleet.ui.app import RunFleetApp
+    from tests.ui.fakes import FakeService
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("the argv must not run"))
+    app = RunFleetApp(FakeService(), clock=ManualClock(T0), persist_state=False)
+    monkeypatch.setattr(app, "suspend", contextlib.nullcontext)
+    monkeypatch.setattr(app, "refresh", lambda **kw: app)
+    logins: list[str] = []
+
+    def login(name: str, rc: int) -> Any:
+        def run() -> int:
+            logins.append(name)
+            if rc == 130:
+                raise KeyboardInterrupt
+            return rc
+        return run
+
+    if sequence:
+        steps = [(["ssh", "a", "true"], "1/2", None), (["ssh", "b", "true"], "2/2", None)]
+        assert app.run_external_sequence(steps, [login("a", 0), login("b", 130)]) == [0, 130]
+    else:
+        assert app.run_external(["ssh", "a", "true"], login=login("a", 0)) == 0
+        assert app.run_external(["ssh", "b", "true"], login=login("b", 130)) == 130
+    assert logins == ["a", "b"]
+
+
+def _app_without_terminal(monkeypatch: pytest.MonkeyPatch) -> Any:
+    import contextlib
+
+    from runfleet.ui.app import RunFleetApp
+    from tests.ui.fakes import FakeService
+
+    app = RunFleetApp(FakeService(), clock=ManualClock(T0), persist_state=False)
+    monkeypatch.setattr(app, "suspend", contextlib.nullcontext)
+    monkeypatch.setattr(app, "refresh", lambda **kw: app)
+    return app
+
+
+def _under_asyncio_run(step: Any) -> Any:
+    """`step()` called from a coroutine under `asyncio.run`, as Textual's `App.run` does: asyncio's runner then owns
+    SIGINT. The main task must survive the step (it is RunFleet)."""
+    import signal
+
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler    # else the runner installs nothing
+
+    async def main() -> Any:
+        result = step()
+        await asyncio.sleep(0.05)               # a cancelled main task (RunFleet quitting) raises here
+        return result
+
+    try:
+        return asyncio.run(main())
+    except (KeyboardInterrupt, asyncio.CancelledError) as e:
+        pytest.fail(f"Ctrl-C in a suspend ended RunFleet: {type(e).__name__}")
+
+
+@pytest.mark.posix
+@pytest.mark.parametrize("sequence", [False, True])
+def test_one_ctrl_c_aborts_a_session_login_not_runfleet(monkeypatch: pytest.MonkeyPatch, sequence: bool) -> None:
+    """asyncio's SIGINT handler only cancels the main task on the first Ctrl-C (no KeyboardInterrupt): a session
+    login (its ssh ignores SIGINT) went on waiting, and RunFleet ended after the resume (review: integration 1)."""
+    import os
+    import signal
+    import time
+
+    app = _app_without_terminal(monkeypatch)
+    waited: list[float] = []
+
+    def login() -> int:                          # SessionTransport.login waits for the agent in a loop like this
+        t0 = time.monotonic()
+        try:
+            os.kill(os.getpid(), signal.SIGINT)  # the user's Ctrl-C at the Duo prompt
+            while time.monotonic() - t0 < 3:
+                time.sleep(0.01)
+        finally:
+            waited.append(time.monotonic() - t0)
+        return 0
+
+    if sequence:
+        rcs = _under_asyncio_run(lambda: app.run_external_sequence([(["ssh", "a", "true"], "1/1", None)], [login]))
+        assert rcs == [130]
+    else:
+        assert _under_asyncio_run(lambda: app.run_external(["ssh", "a", "true"], login=login)) == 130
+    assert waited and waited[0] < 1
+
+
+@pytest.mark.posix
+def test_ctrl_c_in_a_pager_belongs_to_the_pager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A Ctrl-C reaches the whole foreground process group: the pager handles it (`less` stops following) and must
+    neither be killed by RunFleet nor end it."""
+    import sys
+
+    app = _app_without_terminal(monkeypatch)
+    script = ("import os, signal, time\n"
+              "got = []\n"
+              "signal.signal(signal.SIGINT, lambda *a: got.append(1))\n"
+              "os.kill(os.getppid(), signal.SIGINT); os.kill(os.getpid(), signal.SIGINT)\n"
+              "time.sleep(0.6)\n"
+              "raise SystemExit(0 if got else 9)\n")
+    assert _under_asyncio_run(lambda: app.run_external([sys.executable, "-c", script])) == 0
 
 
 # ---------------------------------------------------------------- update (§8.6)

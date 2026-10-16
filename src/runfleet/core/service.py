@@ -110,6 +110,9 @@ class FleetAPI(Protocol):
     # interactive argv; the UI runs them inside App.suspend
     async def prepare_connect(self, host: str) -> bool: ...  # resolve + clear stale socket; True = already connected
     def connect_argv(self, host: str) -> list[str] | None: ...   # call prepare_connect first
+    def connect_login(self, host: str) -> Callable[[], int] | None: ...
+        # the transport's interactive login (session transport, §4.8): BLOCKING, run inside App.suspend instead of
+        # connect_argv (0 = logged in; the session then serves the polls); None: run connect_argv as before
     async def after_connect(self, host: str, rc: int) -> None: ...   # reset backoff, re-prepare, poll now
     def shell_argv(self, host: str, key: JobKey | None = None, node: str | None = None) -> list[str]: ...
     def pager_argv(self, host: str, ref: LogRef) -> list[str] | None: ...
@@ -731,6 +734,12 @@ class FleetService(FleetAPI):
 
     def connect_argv(self, host: str) -> list[str] | None:
         return self._transport(host).connect_argv()
+
+    def connect_login(self, host: str) -> Callable[[], int] | None:
+        from runfleet.transport.session import InteractiveLogin
+
+        t = self._transport(host)
+        return t.login if isinstance(t, InteractiveLogin) else None
 
     async def after_connect(self, host: str, rc: int) -> None:
         self._details = {k: v for k, v in self._details.items() if k.host != host}

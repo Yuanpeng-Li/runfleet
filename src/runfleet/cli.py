@@ -141,8 +141,8 @@ def ssh_version() -> str | None:
 
 
 WINDOWS_LIMITS = (
-    "ssh sharing is off: Windows OpenSSH has no ControlMaster, so every poll logs in again",
-    "key / ssh-agent hosts work; Duo or password hosts stay at \"needs auth\" (use WSL for them for now)",
+    "no ControlMaster in Windows OpenSSH: one ssh login per host stays open while RunFleet runs (mux: session)",
+    "Duo / password hosts: press c in RunFleet; that login ends when RunFleet exits; shells and the pager log in again",
     "no port forwards, no ssh = \"local\" host, no ^z; `runfleet update` prints the steps to update by hand",
 )
 
@@ -516,6 +516,8 @@ def report_line(report: DetectReport, *, saved: bool | None, width: int = 12) ->
     state = report.state.value.replace("_", " ")
     name = report.alias.ljust(max(width, len(report.alias) + 2))
     if report.state in (ConnState.NEEDS_AUTH, ConnState.HOSTKEY):
+        if report.mux == "session":         # its login lives in the TUI; `runfleet connect` only checks auth (§4.8)
+            return f"  {name}{state:<12}({'saved; ' if saved else 'save it, then '}press c on it in RunFleet)"
         note = "saved; press c in RunFleet or run" if saved else "log in with"
         return f"  {name}{state:<12}({note} `runfleet connect {report.alias}`)"
     if report.state in (ConnState.OK, ConnState.DEGRADED):
@@ -743,11 +745,15 @@ def cmd_connect(args: argparse.Namespace, clock: Clock, out: Callable[[str], Non
         out(f"{args.host}: nothing to connect (local host)")
         return EXIT_OK
     out(f"RunFleet → connecting to {args.host} (Duo/password/host-key prompts appear here; Ctrl-C aborts)")
+    session = service.connect_login(name) is not None     # session transport (§4.8): its login lives in the TUI
     rc = run_command(argv)
     if rc == 0:
-        if platform.IS_WINDOWS:              # sharing is off: `connect` was only an auth check
-            out(f"{args.host}: login works. Windows ssh cannot keep it open: background polls log in on their own "
-                "(keys / ssh-agent); Duo or password hosts need WSL for now")
+        if session:                          # `connect` was only an auth check: a session ends with this process
+            out(f"{args.host}: login works. RunFleet keeps a login open only while it runs (session transport): "
+                "start runfleet and press c on this host (Duo/password hosts)")
+        elif platform.IS_WINDOWS:            # mux = "off": `connect` was only an auth check
+            out(f"{args.host}: login works. With mux = \"off\" every poll logs in on its own (keys / ssh-agent); "
+                "Duo or password hosts need the default mux")
         else:
             out(f"{args.host}: connected; RunFleet reuses this connection while it lasts")
         return EXIT_OK
