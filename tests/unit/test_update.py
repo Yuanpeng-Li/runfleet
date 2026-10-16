@@ -44,7 +44,7 @@ def test_uv_tool_from_git(tmp_path: Path) -> None:
     inst = detect(prefix)
     assert (inst.kind, inst.steps, inst.manual, inst.note) == (
         "uv", (("/usr/bin/uv", "tool", "upgrade", "runfleet"),), "uv tool upgrade runfleet", "")
-    assert inst.env == {"UV_TOOL_DIR": str(tmp_path / "tools"), "UV_TOOL_BIN_DIR": "/opt/bin"}   # as installed
+    assert inst.env == {"UV_TOOL_DIR": str(tmp_path / "tools"), "UV_TOOL_BIN_DIR": str(Path("/opt/bin"))}  # as installed
     assert inst.describe() == f"installed with uv tool from {GIT}"
 
 

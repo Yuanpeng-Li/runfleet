@@ -4459,7 +4459,7 @@ Mandated parser assertions (minimum; Appendix B lists file → test module):
   `JOB_GRES=gpu:A30:1`.
 - Synthetic: a squeue row whose Name contains `|` (sep `|`) → dropped, id in `bad_ids`, the previous Job kept and not
   vanished; the same row with sep `\x1f` parses. Epoch timestamps `1788696459` → aware UTC.
-- `*/squeue_me_o`, `*/squeue_parts_o`: legacy parser with the fixture's field spec
+- `*/squeue_me_legacy`, `*/squeue_parts_legacy` (`squeue -o`; not `_o`: a name differing from `_O` only in case clashes on Windows and macOS file systems): legacy parser with the fixture's field spec
   `%i|%j|%T|%M|%l|%D|%R|%b|%C|%m|%P|%V|%S|%Z|%o` (the legacy parser takes the spec as a parameter).
 - `*/sacct_ext`: `CANCELLED by 2100007` → CA + uid; `None assigned` → no nodes; `Start None`; `FAILED 2:0` →
   exit 2; `End Unknown` for RUNNING.
@@ -4768,7 +4768,7 @@ Owner = `Section.owner` (name prefix). All `meta` values are also interpolated (
 
 | Fixture(s) | Test module |
 |---|---|
-| `*/squeue_me_O`, `*/squeue_parts_O`, `*/squeue_me_o`, `*/squeue_parts_o`, `*/squeue_parts_states`, `*/squeue_array_expand` | `tests/backends/slurm/test_parse_squeue.py` |
+| `*/squeue_me_O`, `*/squeue_parts_O`, `*/squeue_me_legacy`, `*/squeue_parts_legacy`, `*/squeue_parts_states`, `*/squeue_array_expand` | `tests/backends/slurm/test_parse_squeue.py` |
 | `*/sacct_basic`, `*/sacct_ext`, `*/sacct_steps`, `*/sacct_running_steps`, `*/sacct_failed_job_steps`, `*/sacct_completed_gpu_tres`, `*/sacct_state_filter_test`, `*/sacct_failed_states` | `tests/backends/slurm/test_parse_sacct.py` |
 | `*/scontrol_show_job*`, `*/scontrol_show_node` | `tests/backends/slurm/test_parse_scontrol.py` |
 | `*/sinfo_nodes_O`, `*/sinfo_parts`, `*/sinfo_summary` | `tests/backends/slurm/test_parse_sinfo.py` |

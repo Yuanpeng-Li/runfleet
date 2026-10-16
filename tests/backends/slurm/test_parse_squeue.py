@@ -172,11 +172,11 @@ def test_bad_rows_ratio() -> None:
 
 
 @pytest.mark.parametrize("host", ["k2", "vega", "lyra"])
-@pytest.mark.parametrize("name", ["squeue_me_o", "squeue_parts_o"])
+@pytest.mark.parametrize("name", ["squeue_me_legacy", "squeue_parts_legacy"])
 def test_legacy_fixtures(host: str, name: str) -> None:
     pr = parse_squeue_legacy(sample(host, name), LEGACY_FIXTURE_SPEC, host=host, tz=TZ[host], me=USER[host])
     assert not pr.bad_lines
-    o = {j.key.id: j for j in parse_squeue(sample(host, name.replace("_o", "_O")), host=host, tz=TZ[host],
+    o = {j.key.id: j for j in parse_squeue(sample(host, name.replace("_legacy", "_O")), host=host, tz=TZ[host],
                                            sep="|").items}
     for j in pr.items:
         if j.array_task and not j.array_task.isdigit():
@@ -187,7 +187,7 @@ def test_legacy_fixtures(host: str, name: str) -> None:
 
 
 def test_legacy_reason_or_nodelist() -> None:
-    pr = parse_squeue_legacy(sample("k2", "squeue_me_o"), LEGACY_FIXTURE_SPEC, host="k2", tz=TZ["k2"])
+    pr = parse_squeue_legacy(sample("k2", "squeue_me_legacy"), LEGACY_FIXTURE_SPEC, host="k2", tz=TZ["k2"])
     by_id = {j.key.id: j for j in pr.items}
     assert by_id["2334564"].reason == "Priority" and by_id["2334564"].nodes == ()
     assert by_id["2332861"].nodes == ("n-40-01",)

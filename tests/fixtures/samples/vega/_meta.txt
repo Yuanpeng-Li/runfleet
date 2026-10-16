@@ -26,7 +26,7 @@ rc=0 ms=7
 cmd: squeue --me
 rc=0 ms=20
 
-## squeue_me_o
+## squeue_me_legacy
 cmd: squeue --me -h -o '%i|%j|%T|%M|%l|%D|%R|%b|%C|%m|%P|%V|%S|%Z|%o'
 rc=0 ms=19
 
@@ -46,7 +46,7 @@ rc=0 ms=28
 cmd: squeue -p 'h200,h100,a30' -h -O 'JobID:|,ArrayJobID:|,ArrayTaskID:|,Name:|,UserName:|,State:|,StateCompact:|,Reason:|,TimeUsed:|,TimeLimit:|,TimeLeft:|,NumNodes:|,NumCPUs:|,MinMemory:|,Partition:|,QOS:|,Account:|,SubmitTime:|,StartTime:|,EndTime:|,NodeList:|,BatchHost:|,tres-alloc:|,tres-per-node:|,tres-per-job:|,RestartCnt:|,STDOUT:|,STDERR:|,WorkDir:|,Command:|' | head -25
 rc=0 ms=45
 
-## squeue_parts_o
+## squeue_parts_legacy
 cmd: squeue -p 'h200,h100,a30' -h -o '%i|%j|%T|%M|%l|%D|%R|%b|%C|%m|%P|%V|%S|%Z|%o' | head -25
 rc=0 ms=21
 

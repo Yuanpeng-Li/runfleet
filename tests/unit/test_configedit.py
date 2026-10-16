@@ -26,7 +26,7 @@ INPUT = (GOLDEN / "input.toml").read_text(encoding="utf-8")
 
 
 def _cfg(path: Path, text: str = INPUT) -> ce.ConfigFile:
-    path.write_text(text, encoding="utf-8")
+    path.write_bytes(text.encode("utf-8"))      # exact bytes: write_text turns "\n" into "\r\n" on Windows
     return ce.ConfigFile(path)
 
 
@@ -213,7 +213,7 @@ def test_split_or_inline_host_lists_are_refused(tmp_path: Path) -> None:
 def test_atomic_write_keeps_mode_and_follows_symlinks(tmp_path: Path) -> None:
     real = tmp_path / "dotfiles" / "runfleet.toml"
     real.parent.mkdir()
-    real.write_text(INPUT)
+    real.write_bytes(INPUT.encode("utf-8"))
     real.chmod(0o640)
     link = tmp_path / "config.toml"
     link.symlink_to(real)
@@ -348,7 +348,7 @@ def test_concurrent_processes_never_lose_an_edit(tmp_path: Path) -> None:
     import sys
 
     path = tmp_path / "config.toml"
-    path.write_text(INPUT)
+    path.write_bytes(INPUT.encode("utf-8"))
     code = ("import sys; from pathlib import Path; from runfleet.configedit import ConfigFile; "
             "from runfleet.config import HostConfig; f = ConfigFile(Path(sys.argv[1])); "
             "[f.add_hosts([HostConfig(f'{sys.argv[2]}{i}', f'{sys.argv[2]}{i}')]) for i in range(8)]")

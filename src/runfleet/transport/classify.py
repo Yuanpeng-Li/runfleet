@@ -11,11 +11,11 @@ pauses as NEEDS_AUTH/HOSTKEY) and name the hop in the summary.
 from __future__ import annotations
 
 import re
-import signal
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from runfleet.models import ConnState, ErrorKind, HostError
+from runfleet.util import platform
 
 DETAIL_LIMIT = 4096
 SUMMARY_LIMIT = 80
@@ -102,10 +102,7 @@ def classify_ssh(rc: int | None, stderr: str, *, timed_out: bool = False, timeou
 def killed_by_signal(rc: int, stderr: str, *, what: str = "ssh") -> HostError:
     """The local client died from a signal (rc < 0: `pkill ssh`, the OOM killer, a logout). That says nothing about
     the remote shell, so it is a transient SSH error retried with backoff — never the pausing REMOTE row."""
-    try:
-        name = signal.Signals(-rc).name
-    except ValueError:
-        name = f"signal {-rc}"
+    name = platform.linux_signal_name(-rc)        # names as on Linux (a negative rc only happens on POSIX)
     return HostError(ErrorKind.SSH, _short(f"{what} killed by {name}"), _detail(f"rc={rc}\n{stderr}"))
 
 
