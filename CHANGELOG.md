@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-16
+
 ### Added
 - **Open what needs you from the Fleet view**: a click on a job row of a roomy Fleet card, or on a row of the fleet
   panel's *what changed*, opens that job (a click elsewhere on a card still selects it). `a` opens *Needs you*: every
@@ -355,7 +357,8 @@ First public release.
   opt-in with `--yes`); `scripts/gen_docs.py`; `scripts/screenshots.py`.
 - CI: lint, types and tests on Python 3.11 and 3.13, plus a packaging job that runs the demo from the built wheel.
 
-[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.2.1...v0.3.0
