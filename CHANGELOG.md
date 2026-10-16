@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 - The answer to your own key press (e.g. `C` with no host needing a login says "no host needs a login") could be
   dropped when three background notices had just been shown; such replies are never rate-limited now.
+- Session transport (`mux = "session"`, Windows): when the login ended while jobs were being killed, a job's last
+  write could race the helper's `rm -rf` and leave its private temp directory (`rfa.*`) on the login node; the
+  helper now retries the removal.
 
 ## [0.7.1] - 2026-10-16
 

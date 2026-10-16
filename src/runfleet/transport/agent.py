@@ -138,7 +138,11 @@ rfa_end() {
   rfa_v=
   for rfa_f in "$RA"/*.job; do [ -f "$rfa_f" ] && rfa_v="$rfa_v $(rfa_victims "$(basename "$rfa_f" .job)")"; done
   if [ -n "${rfa_v# }" ]; then kill -TERM $rfa_v 2>/dev/null; sleep "$RFA_T"; kill -KILL $rfa_v 2>/dev/null; fi
-  rm -rf "$RA"
+  # a killed job's subshell may still write its .rc into $RA while rm walks it ("Directory not empty"): retry
+  rfa_n=0
+  while [ -e "$RA" ] && [ "$rfa_n" -lt 10 ]; do
+    rm -rf "$RA" 2>/dev/null; [ -e "$RA" ] && sleep "$RFA_T"; rfa_n=$((rfa_n + 1))
+  done
 }
 trap rfa_end EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 141' PIPE
 printf '\nR %s 1 %s %s\n' "$RFA_PID" "${RFA_SS:--}" "$RFA_PB"

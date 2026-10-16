@@ -256,6 +256,36 @@ async def test_stdin_eof_ends_every_job_and_removes_the_temp_dir(live: Agent, tm
     assert await gone("rfa_hold") == [] and await gone(str(tmp_path)) == []
 
 
+async def test_temp_dir_is_removed_even_while_files_appear_in_it(live: Agent, tmp_path: Path) -> None:
+    """A killed job's subshell could write its .rc into the temp dir while `rm -rf` walked it ("Directory not
+    empty"): the dir stayed behind on the login node (seen once on CI with busybox). The agent now retries."""
+    import threading
+
+    (ra,) = list((tmp_path / "remote-tmp").iterdir())
+    stop = threading.Event()
+
+    def scribble() -> None:                      # a burst of late writes (0.5 s), as killed jobs' subshells would do
+        i = threading.get_ident() % 100000 * 1000000
+        end = time.monotonic() + 0.5
+        while not stop.is_set() and time.monotonic() < end:
+            try:
+                (ra / f"late{i}.rc").write_text("0")
+            except OSError:
+                pass
+            i += 1
+
+    threads = [threading.Thread(target=scribble, daemon=True) for _ in range(4)]
+    for t in threads:
+        t.start()
+    try:
+        assert await live.eof(10) == 0           # the agent's retries outlast the burst; one rm -rf did not
+    finally:
+        stop.set()
+        for t in threads:
+            t.join(2)
+    assert not ra.exists()
+
+
 @pytest.mark.parametrize("sig", [s for s in (signal.SIGTERM, getattr(signal, "SIGHUP", None)) if s is not None])
 async def test_signal_to_the_agent_cleans_up(live: Agent, tmp_path: Path, sig: signal.Signals) -> None:
     assert live.ready is not None
