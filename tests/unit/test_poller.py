@@ -570,6 +570,43 @@ async def test_collect_once_second_round_serves_groups_that_had_nothing_to_do() 
 
 
 # ---------------------------------------------------------------- review regressions
+@pytest.mark.parametrize("history_fails", [False, True])
+async def test_finished_job_sstat_error_does_not_leave_idle_host_degraded(history_fails: bool) -> None:
+    from runfleet.core.poller import BackendHooks
+    from tests.backends.factories import ctx
+    from tests.backends.slurm.test_collector import squeue
+
+    cx = ctx("k2")
+    clock = ManualClock(cx.now)
+    store = FleetStore([cx.host])
+    transport = FakeTransport(cx.host.name, clock=clock)
+    transport.results["slurm.squeue"] = squeue()
+    transport.queue("slurm.sstat", result("slurm.sstat", stderr="sstat: error: No steps running for job 2332861"))
+    poller = HostPoller(cx.host, transport, store, clock, random.Random(1),
+                        HostLanes(asyncio.Semaphore(8)), general=cx.general, hooks=BackendHooks.default(),
+                        caps=replace(cx.caps, profile=("slurm",)), caps_at=cx.now)
+    assert await poller.collect_once() is None
+    assert poller.status.state is ConnState.DEGRADED
+    assert not poller.status.sections["slurm.sstat"].ok
+
+    # The next jobs tick sees an empty queue; usage is not due yet.
+    transport.set_result("slurm.squeue")
+    clock.advance(15)
+    await poller.poll_tick()
+    assert poller.status.state is ConnState.DEGRADED
+
+    if history_fails:
+        transport.set_result("slurm.sacct", rc=1, stderr="Problem talking to the database")
+    clock.advance(120)
+    await poller.poll_tick(force_all=True)
+    usage = next(s for s in transport.probes[-1].script.sections if s.name == "slurm.sstat")
+    assert usage.cmd == ":" and usage.meta["ids_raw"] == []   # no Slurm RPC on an idle host
+    assert poller.status.sections["slurm.sstat"].ok
+    assert poller.status.state is (ConnState.DEGRADED if history_fails else ConnState.OK)
+    if history_fails:
+        assert poller.status.error is not None and poller.status.error.section == "slurm.sacct"
+
+
 async def test_slow_successful_probe_is_fresh_when_it_lands(rig_factory: Callable[..., Rig]) -> None:
     rig = rig_factory(latency=12.0)                                    # detect 0..12 s, first poll 12..24 s
     await run_for(rig.clock, 24)
