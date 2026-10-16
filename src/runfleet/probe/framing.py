@@ -34,7 +34,12 @@ export RF_T
 rf_cleanup() {{ [ -n "$RF_T" ] && rm -rf "$RF_T"; }}
 trap rf_cleanup EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 if command -v timeout >/dev/null 2>&1; then RF_TO=1; else RF_TO=; fi
-rf_ms() {{ rf_d=$(date +%s%3N 2>/dev/null); case $rf_d in *N|'') echo 0 ;; *) echo "$rf_d" ;; esac; }}
+# uutils date 0.8 ignores %3N and can omit its leading zeroes. Request all
+# nine nanosecond digits explicitly, then convert to milliseconds ourselves.
+rf_ms() {{
+  rf_d=$(date +%s%9N 2>/dev/null)
+  case $rf_d in *[!0-9]*|'') echo 0 ;; *) echo "$((rf_d / 1000000))" ;; esac
+}}
 rf() {{
   rf_n=$1 rf_s=$2 rf_q=$3; shift 3
   printf '\n%s B %s\n' "$RF" "$rf_n"

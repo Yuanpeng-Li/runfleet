@@ -108,6 +108,49 @@ def test_max_stdout_truncates() -> None:
 
 
 # ---------------------------------------------------------------- through the real /bin/sh
+@pytest.mark.posix
+@pytest.mark.parametrize("implementation", ["gnu", "uutils", "unsupported"])
+@pytest.mark.parametrize("start,end,elapsed_ms", [
+    ("1792165896123456789", "1792165896223999999", 100),
+    ("1792165896999000000", "1792165897001000000", 2),  # second rollover
+    ("1792165896000000007", "1792165896001999999", 1),  # leading zeroes
+])
+async def test_probe_duration_uses_milliseconds_across_date_implementations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    implementation: str, start: str, end: str, elapsed_ms: int,
+) -> None:
+    fake = tmp_path / "date"
+    fake.write_text('''#!/bin/sh
+if [ -e "$RF_TEST_DATE_STATE" ]; then
+  stamp=$RF_TEST_DATE_END
+else
+  stamp=$RF_TEST_DATE_START
+  : >"$RF_TEST_DATE_STATE"
+fi
+seconds=${stamp%?????????}
+nanos=${stamp#"$seconds"}
+case "$RF_TEST_DATE_IMPL:$1" in
+  unsupported:*) printf '%s%%N\\n' "$seconds" ;;
+  *:+%s%9N) printf '%s\\n' "$stamp" ;;
+  gnu:+%s%3N) printf '%s%.3s\\n' "$seconds" "$nanos" ;;
+  uutils:+%s%3N) printf '%s%s\\n' "$seconds" "$nanos" ;;
+  *) exit 1 ;;
+esac
+''', encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("RF_TEST_DATE_STATE", str(tmp_path / "date-called"))
+    monkeypatch.setenv("RF_TEST_DATE_START", start)
+    monkeypatch.setenv("RF_TEST_DATE_END", end)
+    monkeypatch.setenv("RF_TEST_DATE_IMPL", implementation)
+    s = script(Section("t.clock", "printf measured"))
+    res = await LOCAL.probe(s, timeout=10)
+    assert res.error is None
+    r = res.sections["t.clock"]
+    assert r.ok and r.stdout == "measured"
+    assert r.ms == (0 if implementation == "unsupported" else elapsed_ms)
+
+
 @pytest.mark.posix                # runs the probe under sh
 async def test_round_trip_through_sh(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SQUEUE_STATES", "all")
