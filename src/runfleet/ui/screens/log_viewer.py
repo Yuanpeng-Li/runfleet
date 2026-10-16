@@ -3,16 +3,20 @@
 Full-screen log of one job: header with the path, stream tabs (``o``/``e``) with load and follow state, the log
 body (``RichLog``, 20 000 lines) and the live ``\\r`` line. ``/`` searches the buffer (``n``/``N`` next/previous);
 ``]``/``[`` jump between error and warning lines (highlighted); ``p`` opens the whole file in ``$PAGER``.
+Opened from a log search hit (§4.7.1) it streams from the hit's search window (an absolute byte offset) and lands on
+the hit's line, paused.
 """
 
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.widgets import Input, Static
 
+from runfleet.core.logsearch import LogHit, LogQuery
 from runfleet.core.service import LogUpdate
 from runfleet.models import Job, JobKey, Visibility
 from runfleet.ui import keymap, theme
@@ -25,6 +29,8 @@ from runfleet.ui.widgets.tabs import tab_strip
 from runfleet.util import humanize
 
 STREAM_TAIL_BYTES = 65536          # FleetAPI.stream_log(tail_bytes=...) default (§3.7)
+HIT_LOAD_CAP = 8 << 20             # a hit's window this far behind the file's end: plain tail, land on its text
+HIT_WAIT = 5.0                     # s after the first lines: the hit's line never came, land on its text instead
 
 
 class LogScreen(FleetScreen):
@@ -59,6 +65,11 @@ class LogScreen(FleetScreen):
 
     open_search = False                     # set by `/` in job detail: open with the search box
     open_at: re.Pattern[str] | None = None  # set by `L` in job detail: land on the first line of the cause chip
+    hit: LogHit | None = None               # set by a log search result: stream from its window, land on its line
+    hit_query: LogQuery | None = None
+    _hit_line: int | None = None            # the raw line to land on (None: its text, from the end)
+    _hit_since: float | None = None         # monotonic time of the first lines while landing
+    _stream_start: int | None = None        # absolute offset the current stream began at (None: the last 64 KiB)
 
     @property
     def job(self) -> Job | None:
@@ -77,7 +88,11 @@ class LogScreen(FleetScreen):
         header.crumbs = ("Jobs", job.key.label, self.stream)
         header.refresh_content()
         if ref is not None:
-            self.follower.start(job.key.host, ref, retry=retry)
+            start = self._hit_start(ref)
+            self._stream_start = start
+            if self.hit is not None:
+                view.set_follow(False)
+            self.follower.start(job.key.host, ref, retry=retry, start=start)
         else:                      # never leave the previous stream writing under the new label
             self.follower.stop()
             view.reset()
@@ -105,6 +120,41 @@ class LogScreen(FleetScreen):
             self.ended = True
         if self.open_at is not None and update.lines:
             self.call_after_refresh(self._land_on_cause)
+        if self.hit is not None and (update.lines or update.eof):
+            if self._hit_since is None:
+                self._hit_since = self.rf.clock.monotonic()
+            self.call_after_refresh(self._land_on_hit, update.eof)
+        self._render_streams()
+
+    def _hit_start(self, ref: Any) -> int | None:
+        """Where the stream begins: the hit's search window when this is the hit's file and it did not grow by more
+        than HIT_LOAD_CAP since (then the hit's line number is exact), else the usual last 64 KiB."""
+        hit = self.hit
+        if hit is None or ref.path != hit.file.path or self.stream != hit.file.stream:
+            return None
+        size = max(ref.size or 0, hit.size or 0)
+        if size - hit.start > HIT_LOAD_CAP:
+            self._hit_line = None
+            return None
+        self._hit_line = hit.line - 1
+        return hit.start
+
+    def _land_on_hit(self, final: bool = False) -> None:
+        """Opened from a search hit: land on its line once loaded and drawn (then never again: following and jumping
+        afterwards are the user's). Its text is the fallback when the line does not come (the file was truncated)."""
+        hit, view = self.hit, self.query_one(LogView)
+        if hit is None:
+            return
+        q = self.hit_query
+        label = f"search hit “{humanize.truncate(q.pattern, 40)}”" if q is not None else "search hit"
+        again = q.pattern if q is not None and not q.regex else ""
+        line = self._hit_line if self._stream_start is not None else None
+        state = view.land(line, hit.needle, label, again=again)
+        waited = self._hit_since is not None and self.rf.clock.monotonic() - self._hit_since >= HIT_WAIT
+        if state == "pending" and (final or waited) and line is not None:
+            state = view.land(None, hit.needle, label, again=again)
+        if state != "pending" or final or waited:
+            self.hit = None
         self._render_streams()
 
     def _land_on_cause(self) -> None:
@@ -129,7 +179,10 @@ class LogScreen(FleetScreen):
         if ref is not None and ref.size is not None:
             # `loaded` counts lines after "\r" collapsing, so it undercounts tqdm logs; the stream starts with the
             # last STREAM_TAIL_BYTES (FleetAPI.stream_log default), so a file at most that big was read whole
-            whole = self.loaded >= ref.size or ref.size <= STREAM_TAIL_BYTES
+            if self._stream_start is not None:       # from a search hit's window
+                whole = self._stream_start == 0
+            else:
+                whole = self.loaded >= ref.size or ref.size <= STREAM_TAIL_BYTES
             info.append(" (whole file)" if whole else f" of {humanize.size(ref.size)}", style=theme.muted())
         info.append(" · tail -F via ssh · ", style=theme.dim())
         state = self.rf.store.hosts[self.key.host].status.state if self.key.host in self.rf.store.hosts else None
@@ -163,6 +216,8 @@ class LogScreen(FleetScreen):
     def refresh_time(self) -> None:
         if self.is_mounted and self.follower is not None and self.follower.dead:
             self._keep_following()
+        if self.is_mounted and self.hit is not None and self._hit_since is not None:
+            self._land_on_hit()
 
     def current_host(self) -> str | None:
         return self.key.host
@@ -177,6 +232,7 @@ class LogScreen(FleetScreen):
     def action_stream(self, stream: str) -> None:
         if stream != self.stream:
             self.stream = stream
+            self.hit = None                  # the other stream: no hit to land on
             self._start()
 
     def action_reconnect(self) -> None:

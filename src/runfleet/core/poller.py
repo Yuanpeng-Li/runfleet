@@ -140,11 +140,12 @@ class HostLanes:
 # ======================================================================================= helpers
 def merge_outputs(outputs: Sequence[CollectorOutput]) -> CollectorOutput:
     """§3.6 merge rule: in the given order, the last non-None value of every Optional field wins; errors are
-    concatenated, followups unioned, caps patches combined."""
+    concatenated, followups and handled sections unioned, caps patches combined."""
     values: dict[str, object] = {}
     caps: dict[str, object] = {}
     errors: list[HostError] = []
     followups: set[str] = set()
+    handled: set[str] = set()
     for out in outputs:
         for f in ("jobs", "gpus", "gpu_procs", "procs", "nodes", "partitions", "metrics"):
             v = getattr(out, f)
@@ -154,8 +155,9 @@ def merge_outputs(outputs: Sequence[CollectorOutput]) -> CollectorOutput:
             caps.update(out.caps_patch)
         errors.extend(out.errors)
         followups |= out.followups
+        handled |= out.handled
     return CollectorOutput(**values, caps_patch=caps or None, errors=tuple(errors),  # type: ignore[arg-type]
-                           followups=frozenset(followups))
+                           followups=frozenset(followups), handled=frozenset(handled))
 
 
 def update_monitor_view(view: MonitorView, out: CollectorOutput, now: datetime) -> MonitorView:
@@ -740,7 +742,8 @@ class HostPoller:
                 self.caps = snap.caps
                 if self.cache is not None:
                     self.cache.put_caps(self.name, snap.caps, self.caps_at or ctx.now)
-        self._update_sections(results, plan, list(merged.errors) + internal, received or ctx.now, probed=probed)
+        self._update_sections(results, plan, list(merged.errors) + internal, received or ctx.now, probed=probed,
+                              handled=merged.handled)
         if self.cache is not None:
             snap = self.store.hosts[self.name].snapshot
             if snap is not None:
@@ -793,14 +796,15 @@ class HostPoller:
         return dataclasses.replace(out, jobs=jobs)
 
     def _update_sections(self, results: Mapping[str, SectionResult], plan: _GroupPlan,
-                         errors: Sequence[HostError], now: datetime, *, probed: bool = True) -> None:
+                         errors: Sequence[HostError], now: datetime, *, probed: bool = True,
+                         handled: frozenset[str] = frozenset()) -> None:
         prev = dict(self.status.sections)
         by_section = {e.section: e for e in errors if e.section}
         host_errors = [e for e in errors if not e.section]
         failed_groups: set[str] = set()
         for name, r in results.items():
-            err = by_section.get(name) or section_error(r, now)
-            ok = r.ok and name not in by_section
+            ok = (r.ok or name in handled) and name not in by_section    # handled: an answer, not a failure
+            err = None if ok else by_section.get(name) or section_error(r, now)
             old = prev.get(name)
             st = SectionStatus(name=name, outcome=r.outcome.value, ok=ok, rc=r.rc, ms=r.ms,
                                last_ok=now if ok else (old.last_ok if old else None), error=None if ok else err)

@@ -8,14 +8,19 @@ from __future__ import annotations
 
 import re
 import shlex
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from runfleet.config import HostConfig
 from runfleet.models import MuxMode
 from runfleet.sshconfig import SshSettings
+from runfleet.util import platform
 
 MANAGED_PERSIST = "15m"
+# Why sharing is off on Windows whatever the config says (doctor, host detail; DESIGN §4.1)
+WINDOWS_NO_MUX = ("Windows OpenSSH has no ControlMaster; every poll logs in again — keys/agent work, Duo hosts: "
+                  "use WSL until the session transport")
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,8 +74,11 @@ def decide(settings: SshSettings, host: HostConfig, mux_dir: Path, *, socket: st
 
     `socket`: the expanded socket path (`OpenSSHTransport.resolve` gets it from `ssh -G`); without it the managed
     plan names the `cm-%C` pattern and the user plan the path `ssh -G` printed.
+
+    Windows: always "off", whatever `mux` or ~/.ssh/config say (`WINDOWS_NO_MUX`): its ssh has no ControlMaster, and
+    a master started with `-fN` never backgrounds there (the command would hang).
     """
-    mode = host.mux
+    mode = "off" if platform.IS_WINDOWS else host.mux
     if mode == "auto":
         persist_no = settings.controlpersist.strip().lower() in ("no", "false", "0")
         mode = "user" if settings.controlpath is not None and not persist_no else "managed"
@@ -142,19 +150,25 @@ def _pct(s: str) -> str:
     return s.replace("%", "%%")
 
 
-def jump_rewrite(settings: SshSettings, *, batch: bool, log: Path | None = None) -> tuple[str, ...]:
+def jump_rewrite(settings: SshSettings, *, batch: bool, log: Path | None = None,
+                 ssh: str = "ssh") -> tuple[str, ...]:
     """`-o ProxyCommand=ssh -T [-o BatchMode=yes] -o ConnectTimeout=10 -o LogLevel=ERROR [-E log] [-p P] [-l U]
     [-J H1,…,Hn-1] -W '[%h]:%p' Hn` when ssh -G reports a ProxyJump and no ProxyCommand; else ().
 
     OpenSSH does not pass command-line `-o` options to the ProxyJump hop, so BatchMode would not reach it. `batch=False`
     is the interactive form (connect, shells): the hop may prompt in the real terminal, but logs to `log`.
+
+    Windows: OpenSSH there starts the ProxyCommand without a shell (CreateProcess), so the command is
+    `"<absolute ssh.exe>" <args quoted for the MSVC runtime> -W "[%h]:%p" Hn`: `ssh` is the client's absolute path
+    (the caller resolves it); a leading quoted program is passed through as is, and its arguments are split by the
+    hop's C runtime, which `subprocess.list2cmdline` quotes for.
     """
     if not needs_rewrite(settings):
         return ()
     assert settings.proxyjump is not None
     hops = parse_jump(settings.proxyjump)
     last, earlier = hops[-1], hops[:-1]
-    words = ["ssh", "-T"]
+    words = ["-T"]
     if batch:
         words += ["-o", "BatchMode=yes"]
     words += ["-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR"]
@@ -166,5 +180,10 @@ def jump_rewrite(settings: SshSettings, *, batch: bool, log: Path | None = None)
         words += ["-l", last.user]
     if earlier:
         words += ["-J", ",".join(h.spec() for h in earlier)]
-    cmd = " ".join(_pct(shlex.quote(w)) for w in words) + " -W '[%h]:%p' " + _pct(shlex.quote(last.host))
+    if platform.IS_WINDOWS:
+        program = '"' + _pct(ssh) + '"'
+        cmd = " ".join([program, *(_pct(subprocess.list2cmdline([w])) for w in words)])
+        cmd += ' -W "[%h]:%p" ' + _pct(subprocess.list2cmdline([last.host]))
+        return ("-o", f"ProxyCommand={cmd}")
+    cmd = " ".join(_pct(shlex.quote(w)) for w in [ssh, *words]) + " -W '[%h]:%p' " + _pct(shlex.quote(last.host))
     return ("-o", f"ProxyCommand={cmd}")

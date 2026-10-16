@@ -16,6 +16,7 @@ from textual.widgets import DataTable, Static
 
 from runfleet.core.store import HostState
 from runfleet.models import Job, JobKey, StateGroup, Visibility
+from runfleet.transport.mux import WINDOWS_NO_MUX
 from runfleet.ui import keymap, render, theme
 from runfleet.ui.messages import FleetChanged
 from runfleet.ui.screens import FleetScreen
@@ -27,7 +28,7 @@ from runfleet.ui.widgets.host_card import busy_note, is_cluster
 from runfleet.ui.widgets.job_table import ClickTable
 from runfleet.ui.widgets.node_table import NodeTable, PartitionTable, occupant_lines
 from runfleet.ui.widgets.proc_table import SORT_LABELS, SORTS, ProcTable
-from runfleet.util import humanize
+from runfleet.util import humanize, platform
 
 
 # ---------------------------------------------------------------- pure renderers
@@ -66,7 +67,8 @@ def connection_lines(state: HostState, now: datetime, width: int) -> list[Text]:
     caps = snap.caps if snap is not None else None
     ok = sum(1 for s in st.sections.values() if s.ok)
     first = Text(f"ssh {state.config.ssh}", style="bold")
-    first.append(f" · mux: {st.mux}", style=theme.muted())
+    windows_off = platform.IS_WINDOWS and st.mux == "off"
+    first.append(f" · mux: {st.mux}" + (" (Windows)" if windows_off else ""), style=theme.muted())
     if st.latency_s is not None:
         first.append(f" · probe {st.latency_s:.2f}s", style=theme.muted())
     if st.sections:
@@ -83,6 +85,8 @@ def connection_lines(state: HostState, now: datetime, width: int) -> list[Text]:
     if busy:
         first.append(f" · {busy}", style=theme.warn())
     lines = [render.fit(first, width)]
+    if windows_off:
+        lines.append(render.fit(Text(WINDOWS_NO_MUX, style=theme.dim()), width))
     if st.error is not None:
         err = Text(f"✖ {st.error.kind.value}: {st.error.summary}", style=theme.conn_style(st.state))
         lines.append(render.fit(err, width))

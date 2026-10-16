@@ -174,3 +174,148 @@ async def test_heights_stay_put_for_an_hour(size: tuple[int, int]) -> None:
                 for card in app.screen.query(HostCard):
                     assert all(line.cell_len <= first.inner for line in card.lines), card.host
                 assert all(line.cell_len <= panel.content_region.width + 1 for line in panel.lines)
+
+
+# ---------------------------------------------------------------- opening entries from the Fleet view
+def _card(app: RunFleetApp, host: str) -> HostCard:
+    return next(c for c in app.screen.query(HostCard) if c.host == host)
+
+
+async def test_click_on_a_card_job_row_opens_that_job() -> None:
+    """A click on a list row opens the job it shows; a click on the summary still only selects the card."""
+    from runfleet.ui.screens.job_detail import JobDetailScreen
+    from runfleet.ui.screens.main import MainScreen
+
+    app = _app(persist_state=False)
+    async with app.run_test(size=(172, 62)) as pilot:
+        await pilot.pause(0.3)
+        card = _card(app, "vega")
+        row = next(i for i, k in enumerate(card.row_keys) if k is not None)
+        key = card.row_keys[row]
+        assert key is not None and app.store.job(key) is not None
+        await pilot.click(card, offset=(20, 1))                   # the first summary line: select only
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, MainScreen) and app.screen.focused is card
+        await pilot.click(card, offset=(20, row + 1))             # + 1: the top border
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, JobDetailScreen) and app.screen.key == key
+
+
+async def test_click_on_a_panel_activity_row_opens_that_job() -> None:
+    from runfleet.ui.screens.job_detail import JobDetailScreen
+
+    app = _app(persist_state=False)
+    async with app.run_test(size=(172, 62)) as pilot:
+        await pilot.pause(0.3)
+        panel = app.screen.query_one(FleetPanel)
+        row = next(i for i, k in enumerate(panel.row_keys) if k is not None)
+        key = panel.row_keys[row]
+        job = app.store.job(key) if key is not None else None
+        assert job is not None and job.name[:12] in panel.lines[row].plain
+        await pilot.click(FleetPanel, offset=(10, row + 1))
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, JobDetailScreen) and app.screen.key == key
+
+
+def _with_needs(app: RunFleetApp) -> None:
+    """A fresh failure on vega and a k2 job low on time, on top of lyra's two older failures."""
+    from datetime import timedelta
+
+    from runfleet.models import JobState
+    from tests.ui.fakes import slurm_job
+
+    svc: Any = app.service
+    svc.put_job(slurm_job("vega", "724999", "orb-eval--voc--s47--a01", JobState.FAILED,
+                          elapsed=timedelta(hours=1), ended_ago=120, exit_code=1))
+    svc.put_job(slurm_job("k2", "2334999", "orb-swp--train--cifar-short--s43--a02", JobState.RUNNING,
+                          elapsed=timedelta(minutes=55), limit=timedelta(hours=1), node="n-40-01"))
+
+
+@pytest.mark.parametrize("size", [(172, 62), (100, 30), (80, 24)])
+async def test_needs_you_picker_in_every_layout(size: tuple[int, int]) -> None:
+    """`a` lists what needs the user fleet-wide in rank order (roomy, compact cards and the narrow table alike);
+    enter opens the highlighted job."""
+    from textual.widgets import OptionList
+
+    from runfleet.models import JobKey
+    from runfleet.ui.screens.attention import AttentionScreen
+    from runfleet.ui.screens.job_detail import JobDetailScreen
+
+    app = _app(persist_state=False)
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause(0.3)
+        _with_needs(app)
+        await pilot.pause(0.3)
+        await pilot.press("a")
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, AttentionScreen)
+        assert [str(e.key) for e in app.screen.entries] == [
+            "vega:724999", "k2:2334999", "lyra:31354789", "lyra:31327454"]
+        menu = app.screen.query_one(OptionList)
+        first = str(menu.get_option_at_index(0).prompt)
+        assert "vega" in first and "724999" in first and "orb-eval--voc--s47--a01" in first and "exit 1" in first
+        second = str(menu.get_option_at_index(1).prompt)
+        assert "orb-swp--train--cifar-short--s43--a02" in second and "low on time" in second
+        await pilot.press("j")
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, JobDetailScreen) and app.screen.key == JobKey("k2", "2334999")
+
+
+async def test_needs_you_picker_closes_and_warns_about_a_gone_job() -> None:
+    from runfleet.models import JobKey
+    from runfleet.ui.screens.attention import AttentionScreen
+    from runfleet.ui.screens.main import MainScreen
+
+    app = _app(persist_state=False)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("a")
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, AttentionScreen)
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, MainScreen)
+        await pilot.press("a")
+        await pilot.pause(0.3)
+        svc: Any = app.service
+        svc.store.remove_job(JobKey("lyra", "31354789"))            # gone while the picker is open
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, MainScreen)
+        assert any("no longer listed" in str(n.message) for n in app._notifications)
+
+
+async def test_needs_you_list_fits_a_short_terminal() -> None:
+    """Review fix: with many two-line entries at 80×24 the list stays inside the dialog (a list taller than the box was
+    clipped, and the highlighted entry could sit unseen below it)."""
+    from datetime import timedelta
+
+    from textual.widgets import OptionList
+
+    from runfleet.models import JobState
+    from runfleet.ui.screens.attention import AttentionScreen
+    from tests.ui.fakes import slurm_job
+
+    app = _app(persist_state=False)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(0.3)
+        svc: Any = app.service
+        for i in range(20):
+            svc.put_job(slurm_job("vega", f"7250{i:02d}", f"orb-eval--voc--s47--a{i:02d}--a-long-name-that-wraps",
+                                  JobState.FAILED, elapsed=timedelta(hours=1), ended_ago=120 + i, exit_code=1))
+        await pilot.pause(0.3)
+        await pilot.press("a")
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, AttentionScreen)
+        menu = app.screen.query_one(OptionList)
+        box = app.screen.query_one("#attention-box")
+        assert menu.option_count >= 20
+        for _ in range(11):
+            await pilot.press("j")
+        await pilot.pause(0.2)
+        assert menu.region.bottom <= box.region.bottom - 1             # inside the bottom border
+        assert menu.max_scroll_y > 0 and menu.scroll_y > 0                # it scrolls to the highlighted entry
+        await pilot.resize_terminal(80, 40)
+        await pilot.pause(0.3)
+        assert menu.region.height == 24                                  # a tall terminal: the usual 24 rows

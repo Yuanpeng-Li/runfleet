@@ -11,6 +11,8 @@ State kept across ticks (sans-IO; time comes from `HostContext.now`):
 - `_usage`, `_stats`, `_nodes`: latest sstat / logstat / sinfo results;
 - `_smi_model`: the GPU model nvidia-smi reported for a job during Attach (§7.16.5): it overrides the job's gres type
   (`gpu_type_source="nvidia-smi"`) while the job is known, and so reaches jobmeta.
+- `_sprio`, `_shares`: the last `sprio` rows (by raw job id) and `sshare` rows of the user (§5.2.10), read by the
+  `slurm.priority` group only while an own job is pending.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from runfleet.backends.common import (GpuIdleTracker, StatInfo, complete, log_id
 from runfleet.backends.slurm import actions as slurm_actions
 from runfleet.backends.slurm import attach
 from runfleet.backends.slurm import commands as cmds
+from runfleet.backends.slurm import priority as prio
 from runfleet.backends.slurm.logpaths import JobNames, refs_from_paths, refs_from_templates
 from runfleet.backends.slurm.parse_occupants import Occupant, nodes_with_jobs, parse_names, parse_occupants
 from runfleet.backends.slurm.parse_sacct import gputres_seed, parse_sacct, parse_steps
@@ -41,9 +44,9 @@ from runfleet.backends.slurm.states import (explain, humanize_reason, min_job_ag
                                            short_summary)
 from runfleet.config import HostConfig
 from runfleet.errors import AttachBlocked
-from runfleet.models import (ActionResult, AttachMode, Capabilities, ErrorKind, HostError, Job, JobDetail, JobKey,
-                             JobKind, JobLive, JobState, JobStep, LogRef, NODE_JOBS_TTL, Node, NodeAlloc,
-                             PartitionSummary, StateGroup)
+from runfleet.models import (ActionResult, AttachMode, Capabilities, ErrorKind, FairShare, HostError, Job, JobDetail,
+                             JobKey, JobKind, JobLive, JobState, JobStep, LogRef, NODE_JOBS_TTL, Node, NodeAlloc,
+                             PartitionSummary, PendingPriority, StateGroup)
 from runfleet.probe.section import Section, SectionOutcome, SectionResult
 from runfleet.util.efficiency import efficiency
 from runfleet.util.efficiency import lines as efficiency_lines
@@ -59,6 +62,9 @@ MAX_VANISHED_IDS = 50
 MAX_VANISHED_TRIES = 6                                  # sacct -j lookups per vanished job (30 s … 10 min apart)
 DETAIL_JOBINFO_MAX_AGE = timedelta(seconds=30)
 OCCUPANTS_PERIOD = 30.0                                # every user's jobs on the nodes: while the detail is open
+PRIORITY_PERIOD = 600.0                                # sprio + sshare (§5.2.10): at most every 10 min, own pending jobs
+PRIORITY_HIDDEN = 6.0                                  # off screen: once an hour
+PRIORITY_MAX_BACKOFF = 3600.0                          # failures: 20, 40, 60 min
 
 _CTLD_DOWN = re.compile(r"Unable to contact slurm controller|Socket timed out|slurm_load_jobs error|"
                         r"Zero Bytes were transmitted", re.IGNORECASE)
@@ -118,6 +124,10 @@ class SlurmCollector(SchedulerCollector):
         self._real_names: dict[str, str | None] = {}       # user -> GECOS name (None: looked up, none known)
         self._occ_sep = cmds.SEP                           # separator of the last planned occupants squeue
         self._names_asked: list[str] = []                  # users of the last planned getent
+        self._sprio: dict[str, list[prio.SprioRow]] = {}   # raw job id -> sprio rows (one per partition), §5.2.10
+        self._sprio_at: datetime | None = None
+        self._shares: tuple[FairShare, ...] = ()           # the user's sshare rows
+        self._prio_unsupported = False                     # sprio said the cluster is not multifactor (stale caps)
 
     # ------------------------------------------------------------ detection
     @classmethod
@@ -153,7 +163,25 @@ class SlurmCollector(SchedulerCollector):
             Cadence("slurm.nodes", max(s.poll_nodes, 60.0), floor=60.0, hidden_factor=5.0),
             Cadence("slurm.occupants", OCCUPANTS_PERIOD, floor=OCCUPANTS_PERIOD, focused_only=True),
             Cadence("slurm.names", 0.0, mode="event"),
+            *([Cadence("slurm.priority", PRIORITY_PERIOD, floor=PRIORITY_PERIOD, hidden_factor=PRIORITY_HIDDEN,
+                       max_backoff=PRIORITY_MAX_BACKOFF)] if self._priority_wanted(ctx) else []),
         ]
+
+    def _priority_pending(self, ctx: HostContext) -> list[Job]:
+        """Own pending jobs that compete for a start (not held)."""
+        me = ctx.caps.remote_user
+        return [j for j in self._live.values()
+                if j.state in (JobState.PENDING, JobState.REQUEUED) and not j.held and j.is_mine
+                and (not me or j.user == me)]
+
+    def _priority_wanted(self, ctx: HostContext) -> bool:
+        """`slurm.priority` exists only while an own job is pending on a cluster that ranks by a multifactor priority
+        with some weight > 0 (§5.2.10) and sprio or sshare is there."""
+        st = prio.settings(ctx.caps.slurm_config)
+        tools = ctx.caps.tools
+        if not st.ranked or self._prio_unsupported or (tools and not {"sprio", "sshare"} & tools):
+            return False
+        return bool(self._priority_pending(ctx))
 
     def sections(self, due: frozenset[str], ctx: HostContext) -> list[Section]:
         out: list[Section] = []
@@ -175,6 +203,22 @@ class SlurmCollector(SchedulerCollector):
             out += self._occupant_sections(ctx)       # with sinfo: the GPU counts and the jobs of one moment
         if "slurm.names" in due and (sec := self._names_section()) is not None:
             out.append(sec)
+        if "slurm.priority" in due:
+            out += self._priority_sections(ctx)
+        return out
+
+    def _priority_sections(self, ctx: HostContext) -> list[Section]:
+        """sprio (own jobs) + sshare (own user; only where fair share has a weight), one round trip (§5.2.10)."""
+        if not self._priority_wanted(ctx):
+            return []
+        tools = ctx.caps.tools
+        out = []
+        if not tools or "sprio" in tools:
+            out.append(Section("slurm.sprio", cmds.SPRIO_CMD, timeout=15, requires=("sprio",),
+                               max_stdout=cmds.SPRIO_MAX_STDOUT, meta={"format": cmds.SPRIO_FORMAT}))
+        if prio.settings(ctx.caps.slurm_config).weight("fairshare") > 0 and (not tools or "sshare" in tools):
+            out.append(Section("slurm.sshare", cmds.SSHARE_CMD, timeout=15, requires=("sshare",),
+                               max_stdout=cmds.SSHARE_MAX_STDOUT, meta={"fields": cmds.SSHARE_FIELDS.split(",")}))
         return out
 
     def _squeue_section(self, ctx: HostContext) -> Section:
@@ -365,6 +409,7 @@ class SlurmCollector(SchedulerCollector):
             nodes, partitions = self._ingest_sinfo(r, ctx, errors)
         if self._ingest_occupants(results, ctx, errors) and self._unnamed():
             followups.add("slurm.names")
+        handled = self._ingest_priority(results, ctx, errors)
         if self._nodes is not None and ({"slurm.sinfo", "slurm.occupants", "slurm.names"} & set(results)):
             nodes = self._nodes_now(ctx)
 
@@ -381,7 +426,8 @@ class SlurmCollector(SchedulerCollector):
             followups.add("slurm.usage")                   # a job started running: its usage now, not in 60 s
         jobs = self._merge(ctx) if (ran and self._have_jobs) else None
         return CollectorOutput(jobs=jobs, nodes=nodes, partitions=partitions,
-                               caps_patch=caps_patch or None, errors=tuple(errors), followups=frozenset(followups))
+                               caps_patch=caps_patch or None, errors=tuple(errors), followups=frozenset(followups),
+                               handled=handled)
 
     def _ingest_scontrol(self, r: SectionResult, now: datetime, errors: list[HostError]) -> None:
         if not r.ok:
@@ -588,6 +634,62 @@ class SlurmCollector(SchedulerCollector):
                 errors.append(_err(r, ctx.now))
         return fresh
 
+    def _ingest_priority(self, results: Mapping[str, SectionResult], ctx: HostContext,
+                         errors: list[HostError]) -> frozenset[str]:
+        """sprio / sshare (§5.2.10). A failure keeps the last reading (the group backs off); sprio refusing a
+        non-multifactor cluster (capabilities older than a config change) stops the group for the session. Returns
+        the sections whose non-zero exit was such an answer (CollectorOutput.handled: no failure, no backoff)."""
+        now = ctx.now
+        handled: set[str] = set()
+        if (r := results.get("slurm.sprio")) is not None:
+            if not r.ok and prio.NO_JOBS in r.stderr + r.stdout and r.outcome is not SectionOutcome.TIMEOUT:
+                self._sprio, self._sprio_at = {}, now        # none pending any more (squeue is a tick behind)
+                handled.add(r.name)
+            elif not r.ok and prio.UNSUPPORTED in r.stderr:
+                handled.add(r.name)
+                log.info("%s: sprio: %s — no priority evidence this session", self.host.name,
+                         r.stderr.strip().replace("\n", " ")[:200])
+                self._prio_unsupported = True
+                self._sprio.clear()
+            else:
+                if not r.ok:
+                    errors.append(_err(r, now))
+                if usable(r):
+                    pr = prio.parse_sprio(r.stdout)
+                    if pr.mostly_bad:
+                        errors.append(parse_error(r.name, pr, now, "sprio"))
+                    else:
+                        rows = prio.index_rows(pr.items)
+                        if complete(r):
+                            self._sprio = rows
+                        else:
+                            self._sprio.update(rows)
+                        self._sprio_at = now
+        if (r := results.get("slurm.sshare")) is not None:
+            if not r.ok:
+                errors.append(_err(r, now))
+            if usable(r):
+                sp = prio.parse_sshare(r.stdout)
+                if sp.mostly_bad:
+                    errors.append(parse_error(r.name, sp, now, "sshare"))
+                elif r.ok or sp.items:
+                    self._shares = tuple(sp.items)
+        return frozenset(handled)
+
+    def _priority_of(self, job: Job, ctx: HostContext) -> PendingPriority | None:
+        """Priority evidence of an own pending job (§5.2.10); None where the cluster's priority setup is unknown."""
+        if job.state not in (JobState.PENDING, JobState.REQUEUED) or not job.is_mine or self._prio_unsupported:
+            return None
+        st = prio.settings(ctx.caps.slurm_config)
+        if st.type is None:
+            return None
+        if not st.ranked:
+            return prio.unranked(st)
+        p = prio.evidence(job, prio.rows_for(job, self._sprio), self._shares, st, sampled_at=self._sprio_at)
+        if ctx.caps.tools and "sprio" not in ctx.caps.tools:
+            p = dataclasses.replace(p, hints=(prio.NO_SPRIO_HINT, *p.hints)[:prio.MAX_HINTS])
+        return p
+
     def _nodes_now(self, ctx: HostContext) -> tuple[Node, ...]:
         """The last sinfo nodes, with every user's jobs when they were read lately (§5.2.9)."""
         nodes = self._nodes or ()
@@ -632,9 +734,10 @@ class SlurmCollector(SchedulerCollector):
                 self._vanished_last.pop(d, None)
                 continue
             if now - t < VANISHED_GRACE:
-                jobs[d] = dataclasses.replace(last, source="vanished", hints=("ended; waiting for accounting",))
+                jobs[d] = dataclasses.replace(last, source="vanished", hints=("ended; waiting for accounting",),
+                                              priority=None)
             else:
-                jobs[d] = dataclasses.replace(last, state=JobState.UNKNOWN, source="vanished",
+                jobs[d] = dataclasses.replace(last, state=JobState.UNKNOWN, source="vanished", priority=None,
                                               hints=("ended; final state unknown (accounting has no record)",))
         self._forget_unreferenced()
         return jobs
@@ -663,6 +766,9 @@ class SlurmCollector(SchedulerCollector):
             del self._sstat_rows[raw]
         for raw in [r for r in self._sstat_last if r not in live_raw]:
             del self._sstat_last[raw]
+        live_arrays = {j.array_job_id for j in self._live.values() if j.array_job_id}
+        for raw in [r for r in self._sprio if r not in live_raw and r not in live_arrays]:
+            del self._sprio[raw]
         paths = {r.path for j in (*self._live.values(), *self._history.values()) for r in self._logs_for(j) if r.path}
         for p in [p for p in self._stats if p not in paths]:
             del self._stats[p]
@@ -754,7 +860,8 @@ class SlurmCollector(SchedulerCollector):
             rss = usage.max_rss_bytes
         enriched = dataclasses.replace(job, alloc=alloc, workdir=workdir, logs=logs,
                                        gpu=usage.gpu if usage else (job.gpu if job.source == "vanished" else None),
-                                       hints=tuple(hints), raw=raw, cpu_pct=cpu_pct, rss_bytes=rss)
+                                       hints=tuple(hints), raw=raw, cpu_pct=cpu_pct, rss_bytes=rss,
+                                       priority=self._priority_of(job, ctx) if job.source == "squeue" else None)
         if job.source == "squeue":
             self._remember(enriched)
         return enriched

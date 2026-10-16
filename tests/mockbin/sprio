@@ -1,0 +1,6 @@
+#!/bin/sh
+# mock sprio: the sprio fixture (pending priority factors, §5.2.10); "Unable to find jobs …" when the host has none
+. "$RF_MOCK_BIN/_lib.sh"
+mock_log sprio "$@"; mock_env sprio; mock_fail SPRIO
+f=$(fixture SPRIO sprio)
+if [ -f "$f" ]; then cat "$f"; else echo "Unable to find jobs matching user/id(s) specified"; fi

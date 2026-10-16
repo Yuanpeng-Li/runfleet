@@ -7,6 +7,8 @@ import shlex
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
+
 from runfleet.backends.base import MonitorView
 from runfleet.backends.process.collector import ProcessCollector, parse_exitscan
 from runfleet.models import JobState, Proc
@@ -83,6 +85,7 @@ def test_fds_logs_and_logstat() -> None:
                                                    "opening home'; cd; }; exec \"$SHELL\" -l")
 
 
+@pytest.mark.posix                # runs the shell command under sh
 def test_task_shell_falls_back_to_home_when_the_workdir_is_gone(tmp_path: Path) -> None:
     """UI-41: `cd X && exec $SHELL` exited at once for a deleted workdir; now it opens a labelled home shell."""
     import os

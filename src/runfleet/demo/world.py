@@ -407,6 +407,10 @@ class SimCluster:
     node_ssh: Literal["adopt", "denied"] = "adopt"   # login → compute-node ssh: pam_slurm_adopt, or refused (lyra)
     gpu_buses: tuple[str, ...] = ("01", "41", "81", "c1", "21", "61", "a1", "e1")   # PCI bus of GPU IDX 0, 1, …
     attach_steps: dict[int, int] = field(default_factory=dict)   # job id -> rfprobe steps created this session
+    # pending priority (§5.2.10): `sshare -U` rows of the user (Account, RawShares, NormShares, RawUsage, EffectvUsage,
+    # FairShare, LevelFS) and the normalized partition factor sprio weights by PriorityWeightPartition
+    shares: tuple[tuple[str, str, str, str, str, str, str], ...] = ()
+    partition_tier: dict[str, float] = field(default_factory=dict)
 
     @property
     def preempt_mode(self) -> str:
@@ -1213,18 +1217,31 @@ def _item_sched(item: str) -> str:
     """Queue item `<data>/baseline-<sched>/s<seed>` -> its LR schedule."""
     return item.split("/")[1].removeprefix("baseline-")
 
-def _slurm_config(cluster: str, preempt: str, launch: str, prolog: str) -> dict[str, str]:
+def _slurm_config(cluster: str, preempt: str, launch: str, prolog: str,
+                  priority: dict[str, str] | None = None) -> dict[str, str]:
     # the keys the slurm.config section greps for, in `scontrol show config` order
-    return {"AccountingStorageType": "accounting_storage/slurmdbd", "ClusterName": cluster,
-            "JobAcctGatherFrequency": "30", "JobAcctGatherType": "jobacct_gather/cgroup",
-            "LaunchParameters": launch, "MinJobAge": "300 sec", "PreemptMode": preempt, "PrivateData": "none",
-            "PrologFlags": prolog}
+    cfg = {"AccountingStorageType": "accounting_storage/slurmdbd", "ClusterName": cluster,
+           "JobAcctGatherFrequency": "30", "JobAcctGatherType": "jobacct_gather/cgroup",
+           "LaunchParameters": launch, "MinJobAge": "300 sec", "PreemptMode": preempt, "PrivateData": "none",
+           "PrologFlags": prolog, **(priority or {})}
+    return dict(sorted(cfg.items()))
+
+
+def _priority(half_life: str, reset: str, **weights: str) -> dict[str, str]:
+    """The priority keys of `scontrol show config` (§5.2.10); weights not given are 0, TRES "(null)"."""
+    out = {"PriorityDecayHalfLife": half_life, "PriorityFlags": "", "PriorityMaxAge": "7-00:00:00",
+           "PriorityType": "priority/multifactor", "PriorityUsageResetPeriod": reset}
+    for factor in ("Age", "Assoc", "FairShare", "JobSize", "Partition", "QOS"):
+        out[f"PriorityWeight{factor}"] = weights.get(factor, "0")
+    out["PriorityWeightTRES"] = weights.get("TRES", "(null)")
+    return out
 
 
 # what `command -v` finds; detect.tools reports the subset it asks for (render.DETECT_TOOLS)
 BASE_TOOLS = frozenset({"sh", "awk", "cat", "cut", "date", "getent", "grep", "head", "id", "kill", "nproc", "paste",
                         "readlink", "sleep", "sort", "tail", "tr", "wc", "timeout", "less", "stat", "ps", "pgrep"})
-SLURM_TOOLS = BASE_TOOLS | {"squeue", "sacct", "sinfo", "scontrol", "sstat", "scancel", "sacctmgr", "srun", "ssh"}
+SLURM_TOOLS = BASE_TOOLS | {"squeue", "sacct", "sinfo", "scontrol", "sstat", "scancel", "sacctmgr", "srun", "ssh",
+                           "sprio", "sshare"}
 WS_TOOLS = BASE_TOOLS | {"nvidia-smi"}
 
 
@@ -1321,8 +1338,12 @@ def _build_k2(world: DemoWorld) -> None:
     t0 = world.t0
     c = SimCluster(name="k2", slurm_version="25.05.8", login_host="login02", user="alice", uid=10001,
                    group="rs", gid=500, tz=timedelta(hours=-5),
-                   config=_slurm_config("k2", "REQUEUE", "(null)", "Alloc,Contain"),
+                   config=_slurm_config("k2", "REQUEUE", "(null)", "Alloc,Contain",
+                                        _priority("14-00:00:00", "NONE", Age="1000", FairShare="100000",
+                                                  JobSize="1000", Partition="1000")),
                    associations=(("k2", "lab", "", "gpu-priority,normal,labpi"),), tools=SLURM_TOOLS,
+                   shares=(("lab", "1", "1.000000", "8123456", "0.833333", "0.030000", "1.200000"),),
+                   partition_tier={"lab": 1.0, "gpu-preempt": 0.0},
                    gpu_tres=True, merged_stderr="repeat", stat_verb="stat", latency=(0.05, 0.12), ncpu=32,
                    mem_total_kb=196_000_000, load=2.3, next_job_id=3372155, boot=t0 - 41 * 86400,
                    submit_templates=(("orb-swp--train--{bench}-{method}--s{seed}--a01", "gpu-preempt", 1,
@@ -1458,8 +1479,12 @@ def _build_vega(world: DemoWorld) -> None:
     t0 = world.t0
     c = SimCluster(name="vega", slurm_version="25.11.4", login_host="login-v01", user="alice", uid=10001,
                    group="rs", gid=500, tz=timedelta(hours=-5),
-                   config=_slurm_config("vega", "REQUEUE", "ulimit_pam_adopt", "Alloc,Contain"),
+                   config=_slurm_config("vega", "REQUEUE", "ulimit_pam_adopt", "Alloc,Contain",
+                                        _priority("00:00:00", "MONTHLY", Age="10000", FairShare="10000",
+                                                  QOS="10000")),
                    associations=(("vega", "lab", "", "normal"), ("vega", "dept", "", "normal")),
+                   shares=(("lab", "1", "0.500000", "123456", "0.010000", "1.000000", "50.000000"),
+                           ("dept", "1", "0.032258", "0", "0.000000", "0.950000", "inf")),
                    tools=SLURM_TOOLS, gpu_tres=True, merged_stderr="empty", stat_verb="statx", qos_max_running=4,
                    latency=(0.05, 0.12), ncpu=64, mem_total_kb=263_000_000, load=5.1, next_job_id=824547,
                    boot=t0 - 12 * 86400,
@@ -1539,7 +1564,8 @@ def _build_lyra(world: DemoWorld) -> None:
     t0 = world.t0
     c = SimCluster(name="lyra", slurm_version="26.05.3", login_host="login-a02", user="alice", uid=20001,
                    group="alice", gid=20001, tz=timedelta(hours=-7),
-                   config=_slurm_config("lyra", "CANCEL", "use_interactive_step", "Alloc,Contain,X11"),
+                   config=_slurm_config("lyra", "CANCEL", "use_interactive_step", "Alloc,Contain,X11",
+                                        _priority("7-00:00:00", "NONE")),    # every weight 0: submit order
                    associations=(("lyra", "alice", "", "high,low,normal,standard-mem"),
                                  ("lyra", "pilab_02", "", "high,low,normal,standard-mem"),
                                  ("lyra", "pilab_02_gpu", "", "gpu-highmem,high,low,normal")),

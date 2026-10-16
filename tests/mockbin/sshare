@@ -1,0 +1,7 @@
+#!/bin/sh
+# mock sshare: the sshare fixture (the user's fair share per account, §5.2.10)
+. "$RF_MOCK_BIN/_lib.sh"
+mock_log sshare "$@"; mock_env sshare; mock_fail SSHARE
+f=$(fixture SSHARE sshare)
+[ -f "$f" ] && cat "$f"
+exit 0

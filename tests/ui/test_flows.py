@@ -846,6 +846,7 @@ async def test_host_without_snapshot_is_waiting(clock: Any) -> None:
         assert not any(k.startswith("k2:") for k in table(app).order)
 
 
+@pytest.mark.posix                # asserts file mode 0600
 async def test_crash_report_written(tmp_path: Any) -> None:
     from runfleet.ui.app import write_crash_report
 

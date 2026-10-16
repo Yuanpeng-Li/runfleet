@@ -5,7 +5,6 @@ config file edits behind them."""
 from __future__ import annotations
 
 import asyncio
-import os
 import tomllib
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -19,7 +18,7 @@ from runfleet.errors import ConfigError
 from runfleet.models import ConnState, ErrorKind, JobKey
 from runfleet.transport.base import Transport
 from runfleet.transport.fake import FakeTransport
-from tests.conftest import CLOCK_START
+from tests.conftest import CLOCK_START, is_root
 from tests.unit.stubs import STUB_HOOKS, run_for, settle
 
 K2 = HostConfig(name="k2", ssh="k2", backend="slurm")
@@ -340,7 +339,8 @@ async def test_remember_hosts_respects_the_setting_and_known_aliases(world: Call
 
 
 # ---------------------------------------------------------------- unwritable config, restore within the session
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.posix                              # directory modes
+@pytest.mark.skipif(is_root(), reason="root ignores directory permissions")
 async def test_an_unwritable_config_raises_config_error_and_changes_nothing(world: Callable[..., World],
                                                                             tmp_path: Path) -> None:
     ro = tmp_path / "dotfiles"
@@ -364,7 +364,8 @@ async def test_an_unwritable_config_raises_config_error_and_changes_nothing(worl
         ro.chmod(0o755)
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.posix                              # directory modes
+@pytest.mark.skipif(is_root(), reason="root ignores directory permissions")
 async def test_remember_reports_an_unwritable_config(world: Callable[..., World], tmp_path: Path) -> None:
     ro = tmp_path / "dotfiles"
     ro.mkdir()

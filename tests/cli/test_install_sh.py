@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.posix                     # runs install.sh under /bin/sh with stub programs
+
 SCRIPT = Path(__file__).resolve().parents[2] / "install.sh"
 REPO = "git+https://github.com/Yuanpeng-Li/runfleet"
 

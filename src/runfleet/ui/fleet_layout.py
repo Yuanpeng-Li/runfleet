@@ -10,6 +10,9 @@ At T1 a card lists the jobs that need the user first (:func:`rank_slurm`, :func:
 fixed template (:func:`row_text`), and an orphan grid cell (or a full-width row under the grid) holds the fleet panel:
 free GPUs by type counted once per node (:func:`free_by_type`) and what changed lately (:func:`activity_rows`). All
 of it reads the store; nothing here asks a host for anything.
+
+Every list row and activity row keeps the :class:`JobKey` it shows (:func:`list_region`, :func:`activity_region`), so a
+click opens that job; :func:`attention` merges the cards' rankings into the fleet-wide "needs you" list (``a``).
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from rich.cells import cell_len
 from rich.text import Text
 
 from runfleet.core.events import BAD_END, JobEvent, count_line, end_summary, end_word, ended_since, time_low
-from runfleet.models import GPU, ConnState, HostSnapshot, Job, JobKind, JobState, StateGroup
+from runfleet.models import GPU, ConnState, HostSnapshot, Job, JobKey, JobKind, JobState, StateGroup
 from runfleet.ui import render, theme
 from runfleet.ui.query import _id_key, elapsed_s, ended_at, left_s
 from runfleet.ui.widgets.job_table import exit_summary, gpus_text, name_badges, runway_level
@@ -573,31 +576,101 @@ def row_text(item: Ranked, now: datetime, *, inner: int, wide: bool, label: str 
     return render.fit(out, inner)
 
 
-def list_lines(ranked: Sequence[Ranked], rows: int, now: datetime, *, inner: int, wide: bool,
-               watched: Callable[[Job], bool] | None = None,
-               util_t: tuple[float, float] = theme.DEFAULT_UTIL_THRESHOLDS,
-               starts: Mapping[str, int] | None = None) -> list[Text]:
-    """The list region of a T1 card: at most ``rows`` lines (shown rows, then the overflow line). ``starts``: the
-    cached :func:`humanize.distinct_starts` of the whole ranked list (computed here when None)."""
+def list_region(ranked: Sequence[Ranked], rows: int, now: datetime, *, inner: int, wide: bool,
+                watched: Callable[[Job], bool] | None = None,
+                util_t: tuple[float, float] = theme.DEFAULT_UTIL_THRESHOLDS,
+                starts: Mapping[str, int] | None = None) -> tuple[list[Text], list[JobKey | None]]:
+    """The list region of a T1 card: at most ``rows`` lines (shown rows, then the overflow line), and the job each
+    line opens on a click (a folded array row: its first job; the overflow line: None). ``starts``: the cached
+    :func:`humanize.distinct_starts` of the whole ranked list (computed here when None)."""
     shown, hidden = select(ranked, rows)
     if starts is None:
         starts = ranked_starts(ranked)
     out: list[Text] = []
+    keys: list[JobKey | None] = []
     last: str | None = None
     for item in shown:
         label = item.group if item.group != last else ""
         last = item.group
         out.append(row_text(item, now, inner=inner, wide=wide, label=label, starts=starts,
                             watched=bool(watched and watched(item.job)), util_t=util_t))
+        keys.append(item.job.key)
     if hidden:
         line = overflow_line(hidden, now, inner - (LABEL_W if wide else 0))
         out.append(Text(" " * LABEL_W) + line if wide else line)
-    return out
+        keys.append(None)
+    return out, keys
+
+
+def list_lines(ranked: Sequence[Ranked], rows: int, now: datetime, *, inner: int, wide: bool,
+               watched: Callable[[Job], bool] | None = None,
+               util_t: tuple[float, float] = theme.DEFAULT_UTIL_THRESHOLDS,
+               starts: Mapping[str, int] | None = None) -> list[Text]:
+    """The lines of :func:`list_region`."""
+    return list_region(ranked, rows, now, inner=inner, wide=wide, watched=watched, util_t=util_t, starts=starts)[0]
 
 
 def ranked_starts(ranked: Sequence[Ranked]) -> dict[str, int]:
     """Where each name of a card's ranked list starts to differ from its siblings (hidden rows included)."""
     return humanize.distinct_starts([r.job.name for r in ranked])
+
+
+# ---------------------------------------------------------------- fleet-wide: what needs you (``a``)
+TIER_WHY = ("failed lately", "running, needs you", "pending, will not start", "failed earlier")
+
+
+@dataclass(frozen=True, slots=True)
+class Attention:
+    """One entry of the "needs you" picker: a card's ranked row that asks for the user."""
+    host: str
+    item: Ranked
+    tier: int                    # 0 fresh failure, 1 running with a hint / low on time, 2 never runs / held, 3 older
+
+    @property
+    def key(self) -> JobKey:
+        return self.item.job.key
+
+
+def attention_tier(item: Ranked, cluster: bool) -> int | None:
+    """The tier of a ranked row that needs the user, None for the rest (normal running / pending, others' tasks):
+    Slurm ranks 0-3 as they are; a workstation's fresh failure 0, task with a hint 1, older failure (rank 4) 3."""
+    if item.group == "failed":
+        return 0 if item.rank == 0 else 3
+    if cluster:
+        return item.rank if item.rank in (1, 2) else None
+    return 1 if item.rank == 1 and item.group == "running" else None
+
+
+def attention(ranked: Iterable[tuple[str, bool, Sequence[Ranked]]]) -> list[Attention]:
+    """Merge the cards' rankings ``(host, is cluster, ranked list)`` (in host order) into one list: by tier, failures
+    newest first across the fleet, the rest in host order, then in each card's rank order. Array siblings are never
+    folded here: each is its own entry."""
+    keyed: list[tuple[tuple[object, ...], Attention]] = []
+    for h, (host, cluster, items) in enumerate(ranked):
+        for pos, item in enumerate(items):
+            tier = attention_tier(item, cluster)
+            if tier is None:
+                continue
+            newest = _newest(item.job) if item.group == "failed" else 0.0
+            keyed.append(((tier, newest, h, pos), Attention(host, item, tier)))
+    keyed.sort(key=lambda p: p[0])
+    return [a for _k, a in keyed]
+
+
+def attention_why(entry: Attention, now: datetime,
+                  util_t: tuple[float, float] = theme.DEFAULT_UTIL_THRESHOLDS) -> Text:
+    """Why an entry needs the user, from the card row's cells: ``exit 1 · 3h ago``, ``log idle 49m · 20m left``,
+    ``low on time · 12m left``, ``never: dependency failed · no est.``, ``held · no est.``."""
+    item = entry.item
+    cells = row_cells(item, now, util_t)
+    detail = cells.detail
+    if item.group == "running" and not _warn_hint(item.job):
+        detail = Text("low on time", style=theme.warn())      # ranked for its runway: the detail is just its GPUs
+    out = detail.copy()
+    if cells.time is not None:
+        out.append(" · ", style=theme.dim())
+        out.append_text(cells.time)
+    return out
 
 
 # ---------------------------------------------------------------- workstation owner column
@@ -702,6 +775,34 @@ def sinfo_bound_s(state: HostState, rate: float = 1.0) -> float:
     return 2 * max(period, NODES_MAX_BACKOFF_S) + 5.0
 
 
+FreeSource = Literal["skip", "unknown", "cluster", "ws"]
+
+
+def free_source(state: HostState, now: datetime, rate: float = 1.0) -> tuple[FreeSource, float | None]:
+    """Whether a host's free GPUs may be counted, and the age of its ``slurm.sinfo`` sample (clusters): ``skip``
+    (disabled, or a cluster with no partition in scope: nothing to count, nothing unknown), ``unknown`` (a problem or
+    stale host, or a fresh cluster whose last sinfo failed, is missing while nodes come from the cache, or is older than
+    :func:`sinfo_bound_s`: the panel's ``host ?``), else ``cluster`` / ``ws``. The fleet panel and the GPU watches
+    (:mod:`runfleet.ui.gpu_watch`) share this rule."""
+    from runfleet.ui.widgets.host_card import is_cluster
+
+    st = state.status
+    if st.state is ConnState.DISABLED:
+        return "skip", None
+    snap = state.snapshot
+    if snap is None or st.state not in _FRESH or state.stale(now):
+        return "unknown", None
+    if not is_cluster(state):
+        return "ws", None
+    sec = st.sections.get("slurm.sinfo")
+    if sec is None and not snap.nodes:
+        return "skip", None
+    age = (now - sec.last_ok).total_seconds() if sec is not None and sec.last_ok is not None else None
+    if sec is None or not sec.ok or age is None or age > sinfo_bound_s(state, rate):
+        return "unknown", None                # free counts we cannot vouch for: "host ?", not stale numbers
+    return "cluster", age
+
+
 def _cluster_free(name: str, snap: HostSnapshot) -> list[_NodeFree]:
     """Per (type, first listed partition) sums over a cluster's nodes (the node scan :func:`free_by_type` caches)."""
     listed = [p.name for p in snap.partitions]
@@ -732,28 +833,21 @@ def free_by_type(hosts: Mapping[str, HostState], now: datetime,
     ``slurm.sinfo`` failed or is older than :func:`sinfo_bound_s` (``rate``: the +/- poll rate), or that has nodes
     from the cache but no sinfo sample yet. MIG slices stay apart per host. ``memo``: the node scan is redone only
     when a host's nodes or partitions change."""
-    from runfleet.ui.widgets.host_card import is_cluster
-
     memo = memo or Memo()
     types: dict[str, TypeFree] = {}
     unknown: list[str] = []
     oldest: float | None = None
     for name, state in hosts.items():
-        st = state.status
-        if st.state is ConnState.DISABLED:
+        source, age = free_source(state, now, rate)
+        if source == "skip":
             continue
-        snap = state.snapshot
-        if snap is None or st.state not in _FRESH or state.stale(now):
+        if source == "unknown":
             unknown.append(name)
             continue
-        if is_cluster(state):
-            sec = st.sections.get("slurm.sinfo")
-            if sec is None and not snap.nodes:
-                continue                              # no partition in scope: nothing to count, nothing unknown
-            age = (now - sec.last_ok).total_seconds() if sec is not None and sec.last_ok is not None else None
-            if sec is None or not sec.ok or age is None or age > sinfo_bound_s(state, rate):
-                unknown.append(name)                  # free counts we cannot vouch for: "host ?", not stale numbers
-                continue
+        snap = state.snapshot
+        assert snap is not None
+        if source == "cluster":
+            assert age is not None
             oldest = age if oldest is None else max(oldest, age)
             sums = memo.get(name, "free", (snap.nodes, snap.partitions), (),
                             lambda: _cluster_free(name, snap))      # noqa: B023 (called at once)
@@ -909,7 +1003,7 @@ def _where(t: TypeFree, wide: bool, order: Mapping[str, int]) -> Text:
 
 
 # ---------------------------------------------------------------- fleet panel: what changed
-GLYPHS = {"bad": "✖", "ok": "✓", "end": "■", "time_low": "◷", "restarted": "↻", "gpu_idle": "◌"}
+GLYPHS = {"bad": "✖", "ok": "✓", "end": "■", "time_low": "◷", "restarted": "↻", "gpu_idle": "◌", "gpu_free": "◎"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -921,14 +1015,16 @@ class Activity:
     summary: str
     bad: bool
     old: bool                     # before ``since``: shown dim
+    key: JobKey | None = None     # the job a click on the row opens
 
 
 def activity_rows(jobs: Iterable[Job], history: Iterable[JobEvent], now: datetime, window: float,
-                  since: datetime) -> list[Activity]:
-    """What changed within ``window``, newest first: own job ends from the store (complete, survive a restart) and
-    this session's ``time_low`` / ``restarted`` / ``gpu_idle`` events (one row per job and kind)."""
+                  since: datetime, extra: Iterable[Activity] = ()) -> list[Activity]:
+    """What changed within ``window``, newest first: own job ends from the store (complete, survive a restart),
+    this session's ``time_low`` / ``restarted`` / ``gpu_idle`` events (one row per job and kind) and ``extra`` rows
+    (GPU watches that fired, :mod:`runfleet.ui.gpu_watch`) inside the window."""
     start = now - timedelta(seconds=window)
-    out: list[Activity] = []
+    out: list[Activity] = [a for a in extra if a.at >= start]
     for j in ended_since(jobs, start):
         end = ended_at(j)
         assert end is not None
@@ -938,7 +1034,7 @@ def activity_rows(jobs: Iterable[Job], history: Iterable[JobEvent], now: datetim
             glyph, summary, bad = GLYPHS["bad"], end_summary(j) or j.state.name.lower(), True
         else:
             glyph, summary, bad = GLYPHS["end"], end_summary(j) or exit_summary(j), False
-        out.append(Activity(end, j.key.host, glyph, j.name + array_suffix(j), summary, bad, end <= since))
+        out.append(Activity(end, j.key.host, glyph, j.name + array_suffix(j), summary, bad, end <= since, j.key))
     seen: set[tuple[str, str, str]] = set()
     for e in sorted(history, key=lambda e: e.at, reverse=True):
         if e.kind not in ("time_low", "restarted", "gpu_idle") or e.at < start:
@@ -947,7 +1043,7 @@ def activity_rows(jobs: Iterable[Job], history: Iterable[JobEvent], now: datetim
         if key in seen:
             continue
         seen.add(key)
-        out.append(Activity(e.at, e.key.host, GLYPHS[e.kind], e.name, e.summary, True, e.at <= since))
+        out.append(Activity(e.at, e.key.host, GLYPHS[e.kind], e.name, e.summary, True, e.at <= since, e.key))
     out.sort(key=lambda a: a.at, reverse=True)
     return out
 
@@ -992,8 +1088,15 @@ def activity_lines(rows: Sequence[Activity], counts: str, head: str, n: int, wid
     """The panel's activity part in ``n`` lines: the count line, then rows newest first (older than ``since`` dim).
     Columns are padded by terminal cells (CJK names keep the summary column in place); with ``now``, a row older than
     20 h shows its day (:func:`when_label`)."""
+    return activity_region(rows, counts, head, n, width, wide=wide, host_style=host_style, now=now)[0]
+
+
+def activity_region(rows: Sequence[Activity], counts: str, head: str, n: int, width: int, *, wide: bool,
+                    host_style: Callable[[str], str] | None = None,
+                    now: datetime | None = None) -> tuple[list[Text], list[JobKey | None]]:
+    """:func:`activity_lines` and the job each line opens on a click (the count line: None)."""
     if n <= 0:
-        return []
+        return [], []
     first = Text(head, style=theme.label())
     first.append(counts or "nothing ended", style="" if counts else theme.dim())
     if any(r.old for r in rows[:n - 1]):
@@ -1003,11 +1106,13 @@ def activity_lines(rows: Sequence[Activity], counts: str, head: str, n: int, wid
             first = first + Text(" " * gap) + tail
     out = [render.fit(first, width)]
     shown = rows[:n - 1]
+    keys: list[JobKey | None] = [None, *(r.key for r in shown)]
     whens = [when_label(r.at, now) if now is not None else humanize.local_hm(r.at) for r in shown]
     when_w = max((cell_len(w) for w in whens), default=5)
     host_w = min(10, max((cell_len(r.host) for r in rows), default=4))
     name_w = 28 if wide else max(10, width - 16 - host_w - 12 - (when_w - 5))
-    glyph_style = {GLYPHS["bad"]: theme.error(), GLYPHS["ok"]: theme.ok(), GLYPHS["end"]: theme.muted()}
+    glyph_style = {GLYPHS["bad"]: theme.error(), GLYPHS["ok"]: theme.ok(), GLYPHS["end"]: theme.muted(),
+                   GLYPHS["gpu_free"]: theme.ok()}
     for r, when in zip(shown, whens, strict=True):
         line = Text("  " if wide else " ")
         line.append_text(_cell(Text(when, style=theme.muted()), when_w))
@@ -1022,16 +1127,17 @@ def activity_lines(rows: Sequence[Activity], counts: str, head: str, n: int, wid
         if r.old:
             line.stylize(theme.dim())
         out.append(render.fit(line, width))
-    return out
+    return out, keys
 
 
 def activity_expiry(jobs: Iterable[Job], history: Iterable[JobEvent], now: datetime,
-                    window: float) -> datetime | None:
-    """When :func:`activity_rows` / :func:`count_text` of a rolling ``window`` change on their own: the first own end
-    or event (still inside the window) that leaves it. None: never."""
+                    window: float, extra: Iterable[Activity] = ()) -> datetime | None:
+    """When :func:`activity_rows` / :func:`count_text` of a rolling ``window`` change on their own: the first own end,
+    event or ``extra`` row (still inside the window) that leaves it. None: never."""
     span = timedelta(seconds=window)
     ats = [end + span for j in jobs if (end := ended_at(j)) is not None and end + span > now]
     ats += [e.at + span for e in history if e.at + span > now]
+    ats += [a.at + span for a in extra if a.at + span > now]
     return min(ats, default=None)
 
 

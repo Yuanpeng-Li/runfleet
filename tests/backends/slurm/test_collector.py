@@ -559,6 +559,7 @@ def test_shell_command_not_running_stays_on_login_node() -> None:
     assert c.shell_command(dataclasses.replace(job, workdir=None), cx) is None
 
 
+@pytest.mark.posix                # runs the shell command under sh
 @pytest.mark.parametrize("rc, pauses", [(0, False), (130, False), (1, True)])
 def test_shell_command_script_runs_under_sh(tmp_path: Path, rc: int, pauses: bool) -> None:
     """The script really runs in POSIX sh: srun gets the job/node, a failed srun waits for Enter before returning."""

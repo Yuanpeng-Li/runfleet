@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import signal
 import time
 from collections.abc import Callable
@@ -23,6 +24,7 @@ from runfleet.sshconfig import SshSettings, resolve
 from runfleet.transport import classify, mux, spawn
 from runfleet.transport.mux import MuxPlan
 from runfleet.transport.base import ProbeResult, RunResult, StreamHandle
+from runfleet.util import platform
 
 log = logging.getLogger("runfleet.transport.openssh")
 
@@ -134,7 +136,14 @@ class OpenSSHTransport:
         if self.settings is None:          # interactive argv before resolution: the user's config applies as is
             return ()
         log = self._log_path if (hop_log or not batch) else None
+        if platform.IS_WINDOWS:            # the hop is started without a shell: it needs the absolute ssh.exe
+            return mux.jump_rewrite(self.settings, batch=batch, log=log, ssh=self._ssh_exe())
         return mux.jump_rewrite(self.settings, batch=batch, log=log)
+
+    def _ssh_exe(self) -> str:
+        """The client's absolute path (Windows ProxyCommand); the name itself when it is not on PATH."""
+        found = shutil.which(self._ssh)
+        return os.path.abspath(found) if found else self._ssh
 
     def _user_opts(self) -> tuple[str, ...]:
         return tuple(w for opt in self.config.ssh_options for w in ("-o", opt))
@@ -398,6 +407,8 @@ class OpenSSHTransport:
     def forward_blocker(self) -> str | None:
         if self.plan is None:
             return "not connected yet"
+        if platform.IS_WINDOWS:
+            return "port forwards need a shared connection, which Windows ssh lacks (use WSL for forwards)"
         if not self.plan.uses_master:
             return 'no ssh master to forward through (mux = "user" without a ControlPath, or mux = "off")'
         return None
@@ -434,8 +445,11 @@ async def _pids_with_args(argv: list[str]) -> list[int]:
     """Our own ssh processes started with `argv` (`ps -ww`, Linux and macOS). Matched on everything after argv[0]
     (it carries `-fN` and the literal ControlPath), so an `ssh` wrapper that execs the real binary still matches."""
     tail = " ".join(argv[1:])
+    uid = platform.current_uid()
+    if uid is None:                        # Windows: no `ps`, and no backgrounded masters to find (sharing is off)
+        return []
     try:
-        res = await spawn.run(["ps", "-ww", "-o", "pid=,args=", "-U", str(os.getuid())], timeout=CHECK_TIMEOUT)
+        res = await spawn.run(["ps", "-ww", "-o", "pid=,args=", "-U", str(uid)], timeout=CHECK_TIMEOUT)
     except spawn.SpawnError:
         return []
     out = []
@@ -452,8 +466,11 @@ async def _pids_with_args(argv: list[str]) -> list[int]:
 async def _detached_ssh_with(fragment: str) -> list[int]:
     """Our own ssh processes without a controlling terminal whose command line contains `fragment`: the background
     master an interactive `ControlMaster=auto` + `ControlPersist` session forked (the session itself keeps its tty)."""
+    uid = platform.current_uid()
+    if uid is None:
+        return []
     try:
-        res = await spawn.run(["ps", "-ww", "-o", "pid=,tty=,args=", "-U", str(os.getuid())], timeout=CHECK_TIMEOUT)
+        res = await spawn.run(["ps", "-ww", "-o", "pid=,tty=,args=", "-U", str(uid)], timeout=CHECK_TIMEOUT)
     except spawn.SpawnError:
         return []
     out = []

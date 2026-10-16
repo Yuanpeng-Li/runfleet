@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import pty
 import select
 import subprocess
 import sys
@@ -16,6 +15,8 @@ from pathlib import Path
 import pytest
 
 from runfleet.transport import classify, spawn
+
+pytestmark = pytest.mark.posix                     # ptys, sh children, process groups and /proc
 
 FAKE_PROMPTING_SSH = """#!/bin/sh
 # Behaves like ssh asking for a passphrase: it needs the controlling terminal.
@@ -53,6 +54,8 @@ def test_spawned_ssh_cannot_prompt_on_the_terminal(tmp_path: Path) -> None:
     fake.write_text(FAKE_PROMPTING_SSH, encoding="utf-8")
     fake.chmod(0o755)
     out = tmp_path / "result.json"
+    import pty                                     # POSIX only: imported here, not at collection
+
     master, slave = pty.openpty()
     slave_name = os.ttyname(slave)
     src = str(Path(spawn.__file__).resolve().parents[2])

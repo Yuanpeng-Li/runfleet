@@ -15,6 +15,7 @@ landed in another job. Workstation tasks keep their own GPU / Procs views.
 from __future__ import annotations
 
 import re
+import textwrap
 from collections import deque
 from datetime import datetime
 from typing import Any
@@ -28,8 +29,8 @@ from textual.widgets import DataTable, Static, TabbedContent, TabPane
 
 from runfleet.core.service import LogUpdate
 from runfleet.errors import AttachBlocked, AttachConsentRequired, AttachError
-from runfleet.models import (AttachMode, AttachState, ConnState, Job, JobDetail, JobGpuUsage, JobKey, JobKind,
-                             JobState, JobStep, LogRef, StateGroup, Visibility)
+from runfleet.models import (AttachMode, AttachState, ConnState, FairShare, Job, JobDetail, JobGpuUsage, JobKey,
+                             JobKind, JobState, JobStep, LogRef, StateGroup, Visibility)
 from runfleet.ui import keymap, render, theme
 from runfleet.ui.messages import FleetChanged
 from runfleet.ui.query import elapsed_s, ended_at, left_s
@@ -302,6 +303,81 @@ def gpu_lines(job: Job, detail: JobDetail | None, caps_gpu_tres: bool | None, wi
     lines.append(render.label_value("hints", hints, width=6))
     if usage.note:
         lines.append(Text(usage.note, style=theme.dim()))
+    return [render.fit(x, width) for x in lines]
+
+
+def priority_box_title(job: Job, now: datetime) -> str:
+    p = job.priority
+    if p is None or p.sampled_at is None:
+        return "Priority"
+    return f"Priority · sprio {humanize.ago(p.sampled_at, now)}"
+
+
+def _wrapped(text: str, width: int, *, first: str = "• ", style: str = "") -> list[Text]:
+    rows = textwrap.wrap(text, max(10, width - len(first)), break_on_hyphens=False) or [""]
+    return [Text((first if i == 0 else " " * len(first)) + row, style=style) for i, row in enumerate(rows)]
+
+
+def _share_row(share: FairShare, account: str | None, room: int) -> Text:
+    """`lab  0.03 · usage 83.3% of share 100.0%` — shorter forms when the box is narrow."""
+    fs = f"{share.fairshare:.2f}" if share.fairshare is not None else humanize.NA
+    usage = share.effective_usage is not None and share.norm_shares is not None
+    for long in (True, False):
+        row = Text(share.account, style="bold" if share.account == account else "")
+        row.append(f"  {fs}", style=render.fairshare_style(share.fairshare))
+        if usage and long:
+            row.append(f" · usage {share.effective_usage:.1%} of share {share.norm_shares:.1%}", style=theme.muted())
+        elif usage:
+            row.append(f" · {share.effective_usage:.0%} of {share.norm_shares:.0%}", style=theme.muted())
+        if not share.raw_usage:
+            row.append(" · no recent usage" if long else " · no usage", style=theme.dim())
+        if row.cell_len <= room:
+            break
+    return row
+
+
+def priority_box_lines(job: Job, width: int) -> list[Text]:
+    """The Summary's Priority box of an own pending Slurm job (in place of its "n/a — job pending" GPU box, §5.2.10):
+    the job's priority and each factor as the cluster weights it (bar = share of that factor's weight), the user's
+    fair share per account, then the hints. Evidence only: no start time, no queue position."""
+    p = job.priority
+    if p is None:
+        return [Text("n/a — job pending", style=theme.dim())]
+    lines: list[Text] = []
+    if not p.ranked:
+        for hint in p.hints:
+            lines += _wrapped(hint, width, style=theme.muted())
+        return [render.fit(x, width) for x in lines]
+    if p.priority is None:
+        lines.append(render.label_value("priority", Text("not read yet — sprio runs at most every 10 min while a "
+                                                         "job of yours waits", style=theme.dim()), width=LW))
+    else:
+        head = Text(render.prio_num(p.priority), style="bold")
+        if p.partition:
+            head.append(f" in {p.partition}", style=theme.muted())
+        for part, value in p.others[:3]:
+            head.append(f" · {part} {render.prio_num(value)}", style=theme.dim())
+        lines.append(render.label_value("priority", head, width=LW))
+        nums = max((len(render.prio_num(f.value)) for f in p.factors), default=1)
+        tail = max((len(render.prio_num(f.weight)) for f in p.factors if f.weight), default=0)
+        marker = "  ◀ dominates" if width - LW - nums - tail - 18 >= 14 else " ◀"
+        bar = max(4, min(14, width - LW - nums - tail - 4 - len(marker)))
+        for f in p.factors:
+            row = Text()
+            if f.weight:
+                row.append_text(render.share_bar(f.value / f.weight, bar))
+                row.append(f" {render.prio_num(f.value):>{nums}} / {render.prio_num(f.weight)}")
+            else:
+                row.append(" " * bar)
+                row.append(f" {render.prio_num(f.value):>{nums}}")
+            if f.name == p.dominant:
+                row.append(marker, style=theme.accent())
+            lines.append(render.label_value(render.PRIORITY_LABELS.get(f.name, f.name), row, width=LW))
+    for share in p.fairshare:
+        lines.append(render.label_value("share" if share is p.fairshare[0] else "",
+                                        _share_row(share, job.account, width - LW), width=LW))
+    for hint in p.hints:
+        lines += _wrapped(hint, width, style=theme.muted())
     return [render.fit(x, width) for x in lines]
 
 
@@ -864,6 +940,8 @@ class JobDetailScreen(FleetScreen):
             clines = compact_lines(job, detail, caps.gpu_tres if caps else None, now, total - 4)
             if job.state.is_terminal and detail is not None and (summary := efficiency_summary(eff)) is not None:
                 clines.append(render.fit(summary, total - 4))
+            if job.priority is not None:                     # pending: the priority evidence in one line (§5.2.10)
+                clines.append(render.fit(render.priority_summary(job.priority, job.account, now), total - 4))
             compact.update(Text("\n").join(clines))
         if self.has_class("-narrow"):
             left_w = right_w = total - 4
@@ -880,6 +958,9 @@ class JobDetailScreen(FleetScreen):
         if job.kind is JobKind.SLURM and job.state.is_terminal and detail is not None:
             gpu_box.border_title = "Efficiency"              # an ended job's GPU box only said "n/a — job ended"
             lines = efficiency_box_lines(eff, right_w)
+        elif job.priority is not None:                       # a pending job's GPU box only said "n/a — job pending"
+            gpu_box.border_title = priority_box_title(job, now)
+            lines = priority_box_lines(job, right_w)
         else:
             gpu_box.border_title = gpu_box_title(job, detail, now)
             lines = gpu_lines(job, detail, caps.gpu_tres if caps else None, right_w, ui.gpu_util_thresholds,

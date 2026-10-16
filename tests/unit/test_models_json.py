@@ -104,3 +104,21 @@ def test_out_of_range_duration_is_a_value_error() -> None:
     for bad in (1e30, float("inf")):
         with pytest.raises(ValueError):
             from_json(timedelta, bad)
+
+
+def test_pending_priority_round_trip_and_old_rows() -> None:
+    """§5.2.10: a pending job's priority evidence survives the cache / snapshot --json; rows written before it decode
+    with priority None."""
+    prio = m.PendingPriority(
+        ranked=True, priority=3017.0, partition="gpu-preempt",
+        factors=(m.PriorityFactor("fairshare", 3000.0, 100000.0), m.PriorityFactor("nice", -50.0)),
+        dominant="fairshare", others=(("lab", 2017.0),),
+        fairshare=(m.FairShare("lab", "u", "parent", 0.5, 123456, 0.01, 0.03, None),),
+        hints=("fairshare 0.03: …",), sampled_at=T0, half_life_s=0.0)
+    job = m.Job(key=m.JobKey("k2", "2334564"), kind=m.JobKind.SLURM, name="n", user="u", state=m.JobState.PENDING,
+                raw_state="PENDING", job_id_raw="2334564", priority=prio)
+    data = json.loads(json.dumps(m.to_json(job)))
+    assert m.from_json(m.Job, data) == job
+    assert data["priority"]["others"] == [["lab", 2017.0]] and data["priority"]["fairshare"][0]["level_fs"] is None
+    del data["priority"]
+    assert m.from_json(m.Job, data).priority is None

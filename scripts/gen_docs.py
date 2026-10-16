@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
     if fresh != current:
-        GUIDE.write_text(fresh, encoding="utf-8")
+        GUIDE.write_text(fresh, encoding="utf-8", newline="\n")   # LF on Windows too (.gitattributes: -text)
         print(f"updated {GUIDE}")
     return 0
 

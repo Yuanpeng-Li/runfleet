@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import time
 
 TIMEOUT = 2.0                    # wait for the DA reply (slow ssh links answer well within this)
@@ -74,6 +75,8 @@ def _read(fd: int, until: float, done: bool, data: bytes, quiet: float | None = 
 
 
 def _push_back(fd: int, keys: bytes) -> None:
+    if sys.platform == "win32":                         # never reached (no termios); keeps mypy --platform win32 honest
+        return
     try:
         import fcntl
         import termios
@@ -85,7 +88,9 @@ def _push_back(fd: int, keys: bytes) -> None:
 
 def query_background(timeout: float = TIMEOUT, *, tty: str = "/dev/tty") -> str | None:
     """The terminal's background as #rrggbb, or None (no tty, background job, not answered, not POSIX). Never
-    raises."""
+    raises. Native Windows: None (P1 asks nothing; `RUNFLEET_THEME=light` picks the light palette)."""
+    if sys.platform == "win32":
+        return None
     try:
         import termios
     except ImportError:
@@ -103,6 +108,8 @@ def query_background(timeout: float = TIMEOUT, *, tty: str = "/dev/tty") -> str 
 
 
 def _query(fd: int, timeout: float) -> str | None:
+    if sys.platform == "win32":
+        return None
     import termios
 
     if os.tcgetpgrp(fd) != os.getpgrp():                 # `runfleet doctor &`: SIGTTOU would stop us

@@ -16,7 +16,7 @@ from runfleet.models import (GPU, ConnState, ErrorKind, GPUProcess, GresCount, H
                              SectionStatus)
 from runfleet.ui import fleet_layout as fl
 from runfleet.ui.fleet_layout import NO_DATA, HighWater, Shape, plan
-from runfleet.ui.widgets.host_card import card_lines
+from runfleet.ui.widgets.host_card import card_body, card_lines
 from tests.ui.fakes import T0, build_world, slurm_job, task_job
 
 SLURM = Shape(6, 5, fl.SLURM_LIST_CAP, "slurm", 1)
@@ -462,6 +462,7 @@ def test_legend_shows_panel_glyphs_only_with_the_panel() -> None:
     assert "what changed" in "\n".join(roomy) and not any(x.endswith("…") for x in roomy)
     starts = {x.index(" ", len("✖ ✓ ■ ◷ ↻ ◌")) for x in roomy}
     assert len(starts) == 1, roomy                                  # every description starts in the same cell
+    assert any(x.startswith("◎ ") and "GPU watch fired" in x for x in roomy)   # review fix: the watches' glyph too
 
 
 # ---------------------------------------------------------------- deep review (B E F G J K L U V)
@@ -701,3 +702,107 @@ def test_free_by_type_adds_up_to_the_partition_summaries() -> None:
                     per[part] = per.get(part, 0) + n
         want = {p.name: p.gpus_free for p in st.snapshot.partitions}
         assert sum(per.values()) == sum(want.values()) and all(per.get(p, 0) == n for p, n in want.items()), host
+
+
+# ---------------------------------------------------------------- opening entries (job keys, "needs you")
+def test_list_region_keeps_the_job_of_each_row() -> None:
+    """Every shown list row carries its JobKey (a folded array row: its first job), the overflow line None."""
+    fails = [slurm_job("k2", f"5{i}", f"f{i}", JobState.FAILED, elapsed=timedelta(hours=1), ended_ago=600 * (i + 1),
+                       exit_code=1) for i in range(2)]
+    arr = [dataclasses.replace(slurm_job("k2", f"900_{t}", "orb-sweep", JobState.RUNNING, elapsed=timedelta(hours=1)),
+                               array_job_id="900", array_task=str(t)) for t in (3, 4, 5)]
+    pend = [slurm_job("k2", "77", "queued", JobState.PENDING, reason="Priority")]
+    ranked = fl.rank_slurm([*pend, *arr, *fails], T0, DAY)
+    lines, keys = fl.list_region(ranked, 4, T0, inner=60, wide=False)
+    assert keys == [JobKey("k2", "50"), JobKey("k2", "51"), JobKey("k2", "900_3"), JobKey("k2", "77")]
+    assert len(lines) == len(keys) and "orb-sweep [3-5] ×3" in lines[2].plain
+    lines, keys = fl.list_region(ranked, 3, T0, inner=60, wide=False)
+    assert keys[-1] is None and lines[-1].plain.startswith("+4 more") and len(lines) == len(keys) == 3
+    assert [x.plain for x in fl.list_lines(ranked, 3, T0, inner=60, wide=False)] == [x.plain for x in lines]
+
+
+def test_activity_rows_keep_their_job() -> None:
+    ended = slurm_job("k2", "7", "crashed", JobState.FAILED, elapsed=timedelta(hours=1), ended_ago=600, exit_code=1)
+    key = JobKey("vega", "9")
+    hist = [JobEvent("time_low", key, "short", JobState.RUNNING, T0 - timedelta(minutes=5), "8m left of 2:00:00")]
+    rows = fl.activity_rows([ended], hist, T0, DAY, T0 - timedelta(hours=1))
+    assert [r.key for r in rows] == [key, JobKey("k2", "7")]
+    lines, keys = fl.activity_region(rows, "1 failed", "last 24h: ", 4, 60, wide=False)
+    assert keys == [None, key, JobKey("k2", "7")] and len(lines) == 3
+    assert "short" in lines[1].plain and "crashed" in lines[2].plain
+    assert fl.activity_region(rows, "", "", 0, 60, wide=False) == ([], [])
+
+
+def test_card_body_keys_match_the_list_rows() -> None:
+    """A T1 card's keys sit on the lines that show those jobs; the summary lines and a T0 card have none."""
+    _cfg, states = build_world()
+    for st in states:
+        if st.snapshot is None:
+            continue
+        shape = fl.shape_of(st, 55, HighWater())
+        lines, keys = card_body(st, T0, width=55, list_rows=6, wide=False, fixed=shape.fixed)
+        assert len(lines) == len(keys)
+        assert all(k is None for k in keys[:shape.t1])
+        listed = [(line.plain, k) for line, k in zip(lines, keys, strict=True) if k is not None]
+        assert listed, st.config.name
+        for plain, k in listed:
+            job = st.snapshot.jobs[k.id]
+            stem = job.name.split(" (")[0]
+            assert stem[:3] in plain or stem[-3:] in plain, (plain, job.name)        # a cut name keeps one end
+        t0_lines, t0_keys = card_body(st, T0, width=55)
+        assert t0_keys == [None] * len(t0_lines)
+
+
+def _needs() -> tuple[list[tuple[str, bool, fl.RankedList]], dict[str, object]]:
+    k2 = [
+        slurm_job("k2", "10", "fresh-old", JobState.FAILED, elapsed=timedelta(hours=1), ended_ago=3000, exit_code=1),
+        slurm_job("k2", "11", "earlier", JobState.FAILED, elapsed=timedelta(hours=1), ended_ago=fl.FRESH_FAIL_S + 60,
+                  exit_code=2),
+        slurm_job("k2", "12", "short", JobState.RUNNING, elapsed=timedelta(minutes=55), limit=timedelta(hours=1)),
+        slurm_job("k2", "13", "fine", JobState.RUNNING, elapsed=timedelta(hours=1)),
+        slurm_job("k2", "14", "never", JobState.PENDING, reason="DependencyNeverSatisfied"),
+        slurm_job("k2", "15", "queued", JobState.PENDING, reason="Priority"),
+    ]
+    vega = [
+        slurm_job("vega", "20", "fresh-new", JobState.OUT_OF_MEMORY, elapsed=timedelta(hours=1), ended_ago=60),
+        slurm_job("vega", "21", "stalled", JobState.RUNNING, elapsed=timedelta(hours=3), hints=("log idle 51m",)),
+    ]
+
+    def task(pid: int, *, mine: bool = True, hints: tuple[str, ...] = (), ended: float | None = None,
+             state: JobState = JobState.RUNNING):
+        j = task_job("ws", pid, f"t{pid}", elapsed=timedelta(hours=1), gpus=(0,), gpu_model="NVIDIA RTX A6000",
+                     util=50, mem_mib=1024, mem_total_mib=49140, pids=(pid,), mine=mine, state=state,
+                     user="alice07" if mine else "carol")
+        if ended is not None:
+            j = dataclasses.replace(j, end_time=T0 - timedelta(seconds=ended))
+        return dataclasses.replace(j, hints=hints)
+
+    ws = [task(1, hints=("GPU idle 20m",)), task(2), task(3, mine=False),
+          task(4, state=JobState.FAILED, ended=fl.FRESH_FAIL_S + 600)]
+    per_host = [("k2", True, fl.rank_slurm(k2, T0, DAY)), ("vega", True, fl.rank_slurm(vega, T0, DAY)),
+                ("ws", False, fl.rank_ws(ws, T0, DAY))]
+    return per_host, {j.key.id: j for j in [*k2, *vega, *ws]}
+
+
+def test_attention_merges_the_rankings_in_rank_order() -> None:
+    """Fresh failures newest first across hosts, then running jobs that need you, pending ones that will never run,
+    older failures (newest first); normal running / pending and other users' tasks are not listed."""
+    per_host, jobs = _needs()
+    got = fl.attention(per_host)
+    names = [(a.host, a.item.job.name, a.tier) for a in got]
+    assert names == [("vega", "fresh-new", 0), ("k2", "fresh-old", 0),
+                     ("k2", "short", 1), ("vega", "stalled", 1), ("ws", "t1", 1),
+                     ("k2", "never", 2),
+                     ("k2", "earlier", 3), ("ws", "t4", 3)]
+    assert got[0].key == JobKey("vega", "20")
+    assert fl.attention([]) == []
+
+
+def test_attention_says_why() -> None:
+    per_host, _jobs = _needs()
+    why = {a.item.job.name: fl.attention_why(a, T0).plain for a in fl.attention(per_host)}
+    assert why["fresh-new"].endswith(" · 1m ago") and why["earlier"].startswith("exit 2")
+    assert why["short"] == "low on time · 5m left"
+    assert why["stalled"].startswith("log idle 51m · ")
+    assert why["never"] == "never: dependency failed · no est."
+    assert why["t1"].startswith("GPU idle 20m")

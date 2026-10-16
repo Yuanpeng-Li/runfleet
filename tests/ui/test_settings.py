@@ -4,7 +4,6 @@ FakeService."""
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -20,6 +19,7 @@ from runfleet.ui.screens.settings import (FAILURES, GENERAL, SettingsPanel, Sett
                                           host_name_for, probe_summary)
 from runfleet.ui.widgets.header import FleetHeader
 from runfleet.ui.widgets.host_card import HostCard
+from tests.conftest import is_root
 from tests.ui.fakes import FakeService
 
 MakeApp = Callable[..., tuple[RunFleetApp, FakeService]]
@@ -445,7 +445,7 @@ async def test_settings_fit_small_terminals(make_app: MakeApp) -> None:
 # ---------------------------------------------------------------- helpers
 def test_helpers() -> None:
     assert host_name_for("me@box:22") == "me_box_22" and host_name_for("k2") == "k2"
-    assert editor_argv(Path("/c.toml"))[-1] == "/c.toml"
+    assert editor_argv(Path("/c.toml"))[-1] == str(Path("/c.toml"))
     ok = DetectReport("k2", ConnState.OK, None, None, "user", {}, 0.21)
     assert probe_summary(ok) == "ok · 0.21s · mux user"
     auth = DetectReport("lynx", ConnState.NEEDS_AUTH, None, None, "none", {}, None)
@@ -506,7 +506,8 @@ async def test_a_failed_save_is_a_message_never_a_crash_or_a_stuck_line(make_app
         assert "lyra" in svc.store.hosts
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.posix                              # directory modes
+@pytest.mark.skipif(is_root(), reason="root ignores directory permissions")
 async def test_an_unwritable_config_on_the_real_service_shows_the_error(tmp_path: Path) -> None:
     """The real FleetService (demo world, file-backed config) in a read-only directory: checking a host reports
     'cannot write' in the panel and the app keeps running (it used to exit with PermissionError)."""

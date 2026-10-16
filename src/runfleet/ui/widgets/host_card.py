@@ -6,7 +6,8 @@ host and task lines for a workstation. A host with a problem keeps its last data
 classified error and the key that fixes it.
 
 In a roomy Fleet view (tier T1, :mod:`runfleet.ui.fleet_layout`) the same summary keeps fixed slots and a list of the
-jobs that need the user fills the rest of the card; a workstation's GPU lines then say who holds each GPU.
+jobs that need the user fills the rest of the card; a workstation's GPU lines then say who holds each GPU. A click on
+one of those rows opens its job; a click elsewhere on the card selects it (double-click: host detail).
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from textual import events
 from textual.widgets import Static
 
 from runfleet.core.store import HostState
-from runfleet.models import ConnState, ErrorKind, HostSnapshot, HostStatus, Job, JobKind, StateGroup
+from runfleet.models import ConnState, ErrorKind, HostSnapshot, HostStatus, Job, JobKey, JobKind, StateGroup
 from runfleet.ui import fleet_layout, render, theme
 from runfleet.ui.fleet_layout import Ranked
 from runfleet.ui.query import ended_at
@@ -266,9 +267,10 @@ def _slurm_lines(state: HostState, snap: HostSnapshot, now: datetime, width: int
 def _slurm_roomy(state: HostState, snap: HostSnapshot, now: datetime, width: int, window: float,
                  thresholds: tuple[float, float], list_rows: int, wide: bool, fixed: int,
                  ranked: Sequence[Ranked] | None, watched: Callable[[Job], bool] | None,
-                 starts: Mapping[str, int] | None = None) -> list[Text]:
+                 starts: Mapping[str, int] | None = None) -> tuple[list[Text], list[JobKey | None]]:
     """T1 (§7.4): the summary with the free block padded to ``fixed`` lines, ``login`` (or the first error line),
-    then exactly ``list_rows`` rows of ranked jobs (the second error line takes the first of them)."""
+    then exactly ``list_rows`` rows of ranked jobs (the second error line takes the first of them); and the job of
+    each line (None but on the list rows)."""
     lines = _slurm_summary(snap, now, width, window, thresholds, free_rows=fixed)[:3 + fixed]
     lines += [Text("")] * max(0, 3 + fixed - len(lines))
     errors = _error_lines(state, now, width)
@@ -276,9 +278,9 @@ def _slurm_roomy(state: HostState, snap: HostSnapshot, now: datetime, width: int
     area = errors[1:]
     if ranked is None:
         ranked = fleet_layout.rank_slurm(snap.jobs.values(), now, window)
-    area += fleet_layout.list_lines(ranked, list_rows - len(area), now, inner=width, wide=wide, watched=watched,
-                                    util_t=thresholds, starts=starts)
-    return [render.fit(x, width) for x in lines] + area[:max(0, list_rows)]
+    rows, keys = fleet_layout.list_region(ranked, list_rows - len(area), now, inner=width, wide=wide,
+                                          watched=watched, util_t=thresholds, starts=starts)
+    return _with_keys([render.fit(x, width) for x in lines], area, rows, keys, list_rows)
 
 
 # ---------------------------------------------------------------- workstation
@@ -370,9 +372,10 @@ def _ws_lines(state: HostState, snap: HostSnapshot, now: datetime, width: int,
 def _ws_roomy(state: HostState, snap: HostSnapshot, now: datetime, width: int, window: float,
               util_t: tuple[float, float], mem_t: tuple[float, float], list_rows: int, wide: bool, fixed: int,
               ranked: Sequence[Ranked] | None, watched: Callable[[Job], bool] | None,
-              starts: Mapping[str, int] | None = None) -> list[Text]:
+              starts: Mapping[str, int] | None = None) -> tuple[list[Text], list[JobKey | None]]:
     """T1 (§7.4): GPU lines with an owner column (padded to ``fixed``), the host line (or the first error line),
-    then exactly ``list_rows`` rows: the second error line or ``host2`` (from 8 rows), then the ranked tasks."""
+    then exactly ``list_rows`` rows: the second error line or ``host2`` (from 8 rows), then the ranked tasks; and
+    the job of each line (None but on the task rows)."""
     gpus = sorted(snap.gpus, key=lambda g: g.index)
     ow = fleet_layout.OWNER_WIDE if wide else fleet_layout.OWNER_NARROW
     lines: list[Text] = []
@@ -396,9 +399,18 @@ def _ws_roomy(state: HostState, snap: HostSnapshot, now: datetime, width: int, w
             area.append(Text(" " * LABEL_W) + extra if wide else extra)
     if ranked is None:
         ranked = fleet_layout.rank_ws(snap.jobs.values(), now, window)
-    area += fleet_layout.list_lines(ranked, list_rows - len(area), now, inner=width, wide=wide, watched=watched,
-                                    util_t=util_t, starts=starts)
-    return [render.fit(x, width) for x in lines] + area[:max(0, list_rows)]
+    rows, keys = fleet_layout.list_region(ranked, list_rows - len(area), now, inner=width, wide=wide,
+                                          watched=watched, util_t=util_t, starts=starts)
+    return _with_keys([render.fit(x, width) for x in lines], area, rows, keys, list_rows)
+
+
+def _with_keys(fixed: list[Text], area: list[Text], rows: list[Text], keys: list[JobKey | None],
+               list_rows: int) -> tuple[list[Text], list[JobKey | None]]:
+    """The fixed lines, then the list region cut to ``list_rows`` (its own lines first, then the ranked rows), with
+    the job of every line in step."""
+    region = (area + rows)[:max(0, list_rows)]
+    region_keys = ([None] * len(area) + keys)[:len(region)]
+    return fixed + region, [None] * len(fixed) + region_keys
 
 
 def owner_text(snap: HostSnapshot, gpu: Any, *, old: bool, wide: bool) -> Text:
@@ -415,23 +427,37 @@ def card_lines(state: HostState, now: datetime, *, width: int, window: float = 8
     """A card's body. ``list_rows`` None: today's card (T0); else the T1 card of ``fixed`` + 1 summary lines (see
     :func:`fleet_layout.shape_of`) and a list region of exactly ``list_rows`` rows (``ranked``: a cached ranking,
     ``starts``: its cached :func:`fleet_layout.ranked_starts`)."""
+    return card_body(state, now, width=width, window=window, util_t=util_t, mem_t=mem_t, list_rows=list_rows,
+                     wide=wide, fixed=fixed, ranked=ranked, starts=starts, watched=watched)[0]
+
+
+def card_body(state: HostState, now: datetime, *, width: int, window: float = 86400,
+              util_t: tuple[float, float] = theme.DEFAULT_UTIL_THRESHOLDS,
+              mem_t: tuple[float, float] = theme.DEFAULT_MEM_THRESHOLDS,
+              list_rows: int | None = None, wide: bool = False, fixed: int = 0,
+              ranked: Sequence[Ranked] | None = None, starts: Mapping[str, int] | None = None,
+              watched: Callable[[Job], bool] | None = None) -> tuple[list[Text], list[JobKey | None]]:
+    """:func:`card_lines` and the job each line opens on a click (a T1 card's list rows; None elsewhere)."""
     snap = state.snapshot
+    lines: list[Text]
     if snap is None:
         if state.status.state is ConnState.DISABLED:
-            return [Text("polling disabled", style=theme.dim())] + _error_lines(state, now, width)
-        errors = _error_lines(state, now, width)
-        if errors:                   # probed and failed: the error explains the empty card
-            return [Text("no data yet", style=theme.dim())] + errors
-        return [Text("waiting for the first probe…", style=theme.dim())]
-    if list_rows is not None:
+            lines = [Text("polling disabled", style=theme.dim())] + _error_lines(state, now, width)
+        elif errors := _error_lines(state, now, width):     # probed and failed: the error explains the empty card
+            lines = [Text("no data yet", style=theme.dim())] + errors
+        else:
+            lines = [Text("waiting for the first probe…", style=theme.dim())]
+    elif list_rows is not None:
         if is_cluster(state):
             return _slurm_roomy(state, snap, now, width, window, util_t, list_rows, wide, fixed, ranked, watched,
                                 starts)
         return _ws_roomy(state, snap, now, width, window, util_t, mem_t, list_rows, wide, fixed, ranked, watched,
                          starts)
-    if is_cluster(state):
-        return _slurm_lines(state, snap, now, width, window, util_t)
-    return _ws_lines(state, snap, now, width, util_t, mem_t)
+    elif is_cluster(state):
+        lines = _slurm_lines(state, snap, now, width, window, util_t)
+    else:
+        lines = _ws_lines(state, snap, now, width, util_t, mem_t)
+    return lines, [None] * len(lines)
 
 
 def _right(left: Text, right: Text, width: int) -> Text:
@@ -454,17 +480,32 @@ class HostCard(Static, can_focus=True):
         self.host = host
         self.index = index
         self.lines: list[Text] = []
+        self.row_keys: list[JobKey | None] = []    # the job each content line opens on a click (list rows only)
 
-    def set_lines(self, title: Text, lines: list[Text], pad_to: int, *, stale: bool, problem: bool) -> None:
-        """Replace the content; rows of a grid are padded to the same height so borders line up."""
+    def set_lines(self, title: Text, lines: list[Text], pad_to: int, *, stale: bool, problem: bool,
+                  keys: Sequence[JobKey | None] = ()) -> None:
+        """Replace the content; rows of a grid are padded to the same height so borders line up. ``keys``: the job
+        of each line (a click on it opens the job)."""
         self.border_title = title
         self.lines = lines
+        self.row_keys = list(keys)[:len(lines)]
         self.update(Text("\n").join(lines + [Text("")] * max(0, pad_to - len(lines))))
         self.set_class(stale, "-stale")
         self.set_class(problem, "-problem")
 
+    def key_at(self, event: events.MouseEvent) -> JobKey | None:
+        """The job of the list row under the mouse (None: not on a job row)."""
+        offset = event.get_content_offset(self)
+        if offset is None or not 0 <= offset.y < len(self.row_keys):
+            return None
+        return self.row_keys[offset.y]
+
     def on_click(self, event: events.Click) -> None:
         # select only: a click (or the first click of a double-click) must not silently scope the whole app
         self.focus()
-        if event.chain >= 2:
+        key = self.key_at(event)
+        if key is not None:                       # a job row of the list: open that job
+            event.stop()
+            self.app.open_listed_job(key)  # type: ignore[attr-defined]
+        elif event.chain >= 2:
             self.app.action_open_host(self.host)  # type: ignore[attr-defined]

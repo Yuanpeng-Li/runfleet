@@ -20,6 +20,7 @@ from runfleet.probe import framing
 from runfleet.transport import mux as muxpolicy
 from runfleet.transport.base import Transport
 from runfleet.transport.openssh import OpenSSHTransport
+from runfleet.util import platform
 
 log = logging.getLogger("runfleet.core.doctor")
 
@@ -49,8 +50,10 @@ async def run_doctor(host: HostConfig, transport: Transport, *, hooks: BackendHo
         checks.append(DoctorCheck("ssh -G", True, " ".join(f"{k}={v}" for k, v in s.summary().items())))
         rewrite = ("ProxyJump rewritten to a BatchMode ProxyCommand" if muxpolicy.needs_rewrite(s)
                    else "no jump rewrite")
-        checks.append(DoctorCheck("mux", None, f"{transport.plan.mode} ({transport.plan.control_path or 'no socket'});"
-                                               f" {rewrite}"))
+        where = "Windows" if platform.IS_WINDOWS else transport.plan.control_path or "no socket"
+        checks.append(DoctorCheck("mux", None, f"{transport.plan.mode} ({where}); {rewrite}"))
+        if platform.IS_WINDOWS:
+            warnings.append(muxpolicy.WINDOWS_NO_MUX)
     else:
         checks.append(DoctorCheck("ssh -G", None, f"{transport.kind} transport (no ssh)"))
         checks.append(DoctorCheck("mux", None, transport.mux))

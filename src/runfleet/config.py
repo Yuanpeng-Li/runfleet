@@ -249,6 +249,18 @@ def _pair(value: object, key: str) -> tuple[float, float]:
 
 _names = _str_list(_matching(_HOST_NAME_RE, "name"))
 
+
+def _host_name(value: str, key: str) -> str:
+    """A host name: `_HOST_NAME_RE`, and on Windows not a name Windows refuses for a file or directory (`con`,
+    `nul`, `aux`, `com1`, a trailing dot): host names become file and directory names (§8.1)."""
+    name = _matching(_HOST_NAME_RE, "host name")(value, key)
+    from runfleet.util import platform
+
+    if platform.IS_WINDOWS and platform.windows_reserved_name(name):
+        raise ConfigError(key, f"host name {_show(name)} is reserved on Windows (a device name or a trailing dot); "
+                               "pick another name")
+    return name
+
 GENERAL_SCHEMA: Mapping[str, Reader] = {
     "readonly": _bool, "mouse": _bool, "default_view": _choice("fleet", "jobs", "gpus"),
     "recent_window": parse_duration, "stall_after": parse_duration, "idle_after": parse_duration,
@@ -289,7 +301,7 @@ WORKSTATION_SCHEMA: Mapping[str, Reader] = {
     "kill_grace": parse_duration,
 }
 HOST_SCHEMA: Mapping[str, Reader] = {
-    "name": _matching(_HOST_NAME_RE, "host name"),     # type: ignore[dict-item]
+    "name": _host_name,                                 # type: ignore[dict-item]
     "ssh": _str, "enabled": _bool, "backend": _choice("auto", "slurm", "workstation"), "color": _opt_str,
     "group": _str, "mux": _choice("auto", "user", "managed", "off"), "connect_timeout": parse_duration,
     "ssh_options": _str_list(_matching(_SSH_OPTION_RE, "ssh option (expected Key=Value)")),
@@ -404,9 +416,12 @@ def _parse_host(table: object, key: str, slurm_d: SlurmSettings, ws_d: Workstati
 
 
 def host_name_for(alias: str, fill: str = "_") -> str:
-    """A valid host name for an ssh alias or destination: other characters, and a name of only dots, become `fill`."""
+    """A valid host name for an ssh alias or destination: other characters, and a name of only dots, become `fill`;
+    on Windows a reserved name gets a `_` (`con` -> `con_`)."""
+    from runfleet.util import platform
+
     name = re.sub(r"[^A-Za-z0-9_.\-]", fill, alias)
-    return fill * len(name) if not name.strip(".") else name
+    return fill * len(name) if not name.strip(".") else platform.safe_file_name(name)
 
 
 def select_hosts(configured: Sequence[HostConfig], wanted: Sequence[str], data: Mapping[str, Any],

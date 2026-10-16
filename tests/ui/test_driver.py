@@ -11,6 +11,8 @@ from textual.messages import InBandWindowResize  # noqa: E402
 
 from runfleet.ui.app import _cell_mouse_driver  # noqa: E402
 
+pytestmark = pytest.mark.posix                     # Textual's Linux driver (termios)
+
 
 class _Recorder:
     def __init__(self) -> None:

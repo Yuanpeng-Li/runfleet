@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Literal
 
 from runfleet import __version__, paths
+from runfleet.util import platform
 
 log = logging.getLogger("runfleet.update")
 
@@ -64,16 +65,19 @@ class Install:
 
 
 def find_uv(which: Callable[[str], str | None] = shutil.which, home: Path | None = None) -> str | None:
-    """`uv` on PATH, else where its installer puts it (a shell started from a desktop may not have ~/.local/bin)."""
+    """`uv` on PATH, else where its installer puts it (a shell started from a desktop may not have ~/.local/bin).
+    Windows: `uv.exe` (`which` honours PATHEXT; the directory fallback names the file itself)."""
     found = which("uv")
     if found:
         return found
     home = home or Path.home()
+    name = "uv.exe" if platform.IS_WINDOWS else "uv"
     dirs = [os.environ.get("UV_INSTALL_DIR"), os.environ.get("XDG_BIN_HOME"), str(home / ".local" / "bin"),
             str(home / ".cargo" / "bin")]
     for d in dirs:
-        if d and (Path(d) / "uv").is_file() and os.access(Path(d) / "uv", os.X_OK):
-            return str(Path(d) / "uv")
+        cand = Path(d) / name if d else None
+        if cand is not None and cand.is_file() and (platform.IS_WINDOWS or os.access(cand, os.X_OK)):
+            return str(cand)
     return None
 
 
@@ -115,7 +119,8 @@ def _uv_install(prefix: Path, which: Callable[[str], str | None], home: Path | N
         steps: list[tuple[str, ...]] = [pull] if pull else []
         if not editable and uv:                         # --reinstall: uv caches the build of a directory by version
             steps.append((uv, "tool", "install", "--force", "--reinstall", local))
-        manual = f"git -C {local} pull" + ("" if editable else f" && uv tool install --force --reinstall {local}")
+        manual = platform.chain([f"git -C {local} pull", *(() if editable else
+                                                             (f"uv tool install --force --reinstall {local}",))])
         complete = bool(pull) and (editable or bool(uv))
         return Install("uv", local, tuple(steps) if complete else (), manual, "", env)
     return Install("uv", "PyPI", ((uv, "tool", "upgrade", "runfleet"),) if uv else (),

@@ -3,8 +3,9 @@
 # Environment (RF_MOCK_* survives the probe prelude, which unsets SQUEUE_*/SACCT_*/...):
 #   RF_MOCK_SAMPLES   tests/fixtures/samples       RF_MOCK_HOST  fixture host (k2, vega, lyra, lynx, ...)
 #   RF_MOCK_LOG       file receiving one line per call: NAME<TAB>arg<TAB>arg... (+ an ENV line for Slurm mocks)
-#   RF_MOCK_FILE_<X>  absolute path overriding fixture X (SQUEUE, SACCT, SINFO, SSTAT, GPU, APPS)
-#   RF_MOCK_<CMD>_ERR make <cmd> print this to stderr and exit 1 (SQUEUE, SACCT, SCONTROL, SINFO, SSTAT, SCANCEL)
+#   RF_MOCK_FILE_<X>  absolute path overriding fixture X (SQUEUE, SACCT, SINFO, SSTAT, GPU, APPS, SPRIO, SSHARE)
+#   RF_MOCK_<CMD>_ERR make <cmd> print this to stderr and exit 1 (SQUEUE, SACCT, SCONTROL, SINFO, SSTAT, SCANCEL,
+#                     SPRIO, SSHARE)
 : "${RF_MOCK_SAMPLES:?RF_MOCK_SAMPLES not set}" "${RF_MOCK_HOST:?RF_MOCK_HOST not set}"
 S="$RF_MOCK_SAMPLES/$RF_MOCK_HOST"
 

@@ -3,7 +3,8 @@
 Follows the Jobs-table cursor (lazygit style). Full form: a title rule, a metadata line, a GPU line with the stdout
 path, then the last log lines from a cached one-shot ``peek_log`` (requested by the Jobs view after 1 s of cursor
 dwell — never a stream). Compact form (< 30 rows): the title rule with the essentials plus one log line. An ended job
-shows its cause chip (``OOM-GPU`` + the peeked line that shows it), a pending one what to do about its reason.
+shows its cause chip (``OOM-GPU`` + the peeked line that shows it), a pending one what to do about its reason and,
+for an own pending Slurm job, its priority evidence in one line (§5.2.10: polled, no extra remote command).
 """
 
 from __future__ import annotations
@@ -238,6 +239,8 @@ class JobPreview(Static):
         chip = cause_text(job, peek, width)
         if chip is not None:
             lines.append(chip)
+        if job.priority is not None:
+            lines.append(render.fit(render.priority_summary(job.priority, job.account, now), width))
         for hint in job.hints if chip is None or not job.state.is_terminal else ():    # the chip says it already
             level = render.hint_level(hint)
             lines.append(Text(("! " if level != "info" else "· ") + hint, style=render.hint_style(hint)))
@@ -262,6 +265,9 @@ class JobPreview(Static):
         chip = cause_text(job, peek, width)
         if chip is not None:
             lines.append(chip)
+        if job.priority is not None:
+            lines += wrap_parts(render.priority_summary(job.priority, job.account, now).plain.split(" · "), width,
+                                style=theme.muted())
         for hint in job.hints if chip is None or not job.state.is_terminal else ():
             lines.append(render.fit(Text("! " + hint, style=render.hint_style(hint)), width))
         lines.append(Text(""))

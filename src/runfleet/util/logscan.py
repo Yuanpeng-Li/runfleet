@@ -9,12 +9,12 @@ to one cause chip (OOM-GPU, TIMEOUT, NCCL, …) from its state, exit status and 
 from __future__ import annotations
 
 import re
-import signal
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 from runfleet.models import Job, JobDetail, JobState, StateGroup
+from runfleet.util import platform
 
 EXIT_PATTERN = re.compile(r"Traceback \(most recent call last\)|CUDA out of memory|OutOfMemoryError|MemoryError|"
                           r"Killed|Segmentation fault|core dumped|^\S*Error:")
@@ -130,14 +130,11 @@ def _first(lines: Sequence[str], rx: re.Pattern[str], limit: int) -> str | None:
 
 
 def _signal_name(n: int) -> str:
-    try:
-        return signal.Signals(n).name
-    except ValueError:
-        return f"signal {n}"
+    return platform.linux_signal_name(n)          # the process ran on a Linux host, whatever the local OS
 
 
 def _by_signal(n: int) -> Cause:
-    if n == signal.SIGSEGV:
+    if n == platform.SIGSEGV_LINUX:
         return Cause("SEGV", f"killed by SIGSEGV (signal {n}) — a native crash")
     return Cause(f"SIGNAL {n}", f"killed by {_signal_name(n)} (signal {n}){_SIGNAL_NOTES.get(n, '')}")
 

@@ -160,7 +160,7 @@ class ConfigFile:
         cannot be locked: the atomic rename swaps its inode. The lock file exists only while held (unlinked before
         the lock is released; a waiter that then holds a stale inode retries). Without a writable directory there is
         no lock, and the write that follows reports the real problem; any other lock failure is an error."""
-        import fcntl
+        from runfleet.util import platform
 
         target = self.path.resolve() if self.path.is_symlink() else self.path
         lock = target.parent / f".{target.name}.lock"
@@ -175,8 +175,7 @@ class ConfigFile:
                     raise ConfigError("", f"{self.path}: cannot lock: {e.strerror or e}") from None
                 break
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                if os.fstat(fd).st_ino == os.stat(lock).st_ino:
+                if platform.try_lock(fd) and os.fstat(fd).st_ino == os.stat(lock).st_ino:
                     break                                   # ours, and still the file at that path
             except (BlockingIOError, FileNotFoundError):
                 pass
@@ -190,8 +189,9 @@ class ConfigFile:
         finally:
             if fd is not None:
                 with contextlib.suppress(OSError):
-                    os.unlink(lock)
-                os.close(fd)                                # closing releases the lock
+                    os.unlink(lock)                         # Windows: refused while open; the file stays
+                platform.unlock(fd)
+                os.close(fd)                                # closing releases the lock (POSIX)
 
 
 def parse_document(text: str, path: Path | None = None) -> TOMLDocument:

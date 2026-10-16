@@ -17,6 +17,7 @@ from runfleet.config import FleetConfig, HostConfig
 from runfleet.demo.transport import DemoTransport
 from runfleet.errors import ConfigError
 from runfleet.models import ConnState, DoctorCheck, DoctorReport, JobState
+from runfleet.util import platform
 from tests.cli.fakes import FakeService, host_state, job, report
 
 DEMO_HOSTS = ["k2", "vega", "lyra", "labstation", "lynx"]
@@ -42,6 +43,7 @@ class Harness:
         monkeypatch.setattr(cli, "ask", self._ask)
         monkeypatch.setattr(cli, "run_command", self._run_command)
         monkeypatch.setattr(cli, "terminal_report", lambda **kw: ["terminal", "  (test)"])   # never queries /dev/tty
+        monkeypatch.setattr(cli, "windows_report", lambda: [])       # Windows: never runs `ssh -V`
         monkeypatch.setattr(cli.paths, "config_file", lambda: self.config_path)
         monkeypatch.setattr(cli.paths, "log_file", lambda: self.log_path)
         monkeypatch.setattr(cli.paths, "cache_file", lambda: tmp_path / "cache.sqlite")
@@ -549,6 +551,7 @@ def test_snapshot_timeout_must_be_a_positive_number(value: str, capsys: pytest.C
 
 def test_terminal_check_uses_the_streams_textual_uses(monkeypatch: pytest.MonkeyPatch) -> None:
     """BACK-37: Textual reads stdin and draws on stderr; the check looked at stdout only and ignored TERM=dumb."""
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)       # the POSIX behaviour (Windows: test_windows_*.py)
     class Tty:
         def __init__(self, tty: bool) -> None:
             self.tty = tty

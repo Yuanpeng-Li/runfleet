@@ -13,8 +13,8 @@ from runfleet.backends.base import CollectorOutput
 from runfleet.config import HostConfig
 from runfleet.core.cache import Cache, JobMeta, enrich_from_meta
 from runfleet.core.store import ChangeSet, FleetStore, HostState, job_material_eq
-from runfleet.models import (DETECT_REV, Capabilities, ConnState, HostMetrics, HostSnapshot, HostStatus, Job, JobKey,
-                             JobKind, JobState, LogRef, NodeAlloc, ResourceAlloc, StateGroup)
+from runfleet.models import (DETECT_REV, Capabilities, ConnState, ErrorKind, HostError, HostMetrics, HostSnapshot,
+                             HostStatus, Job, JobKey, JobKind, JobState, LogRef, NodeAlloc, ResourceAlloc, StateGroup)
 
 T0 = datetime(2026, 9, 7, 10, 42, 37, tzinfo=UTC)
 CAPS = Capabilities(remote_user="me", uid=1, login_host="l", tz_offset=timedelta(0), clock_skew=timedelta(0),
@@ -170,6 +170,33 @@ def test_failed_flush_keeps_the_batch_for_retry(tmp_path: Path) -> None:
     assert Cache(path).load_ended_tasks("lynx", T0 - timedelta(hours=1)) == {"p1-2": newer}
 
 
+def test_host_status_is_written_and_kept_on_a_failed_flush(tmp_path: Path) -> None:
+    """`runfleet status` reads each host's connection state from the cache (host_status, §5.5); a failed batch
+    keeps it for the next flush like every other pending write."""
+    path = tmp_path / "c.sqlite"
+    c = Cache(path)
+    auth = HostStatus(name="lynx", state=ConnState.NEEDS_AUTH, error=HostError(ErrorKind.AUTH, "permission denied"))
+    c.put_status("lynx", auth, T0)
+    assert c.has_pending()
+    real = c._write
+
+    def broken(*a: object) -> None:
+        raise sqlite3.OperationalError("database or disk is full")
+    c._write = broken  # type: ignore[method-assign]
+    c.flush_sync()
+    assert c.has_pending()
+    c.put_status("k2", HostStatus(name="k2", state=ConnState.OK), T0 + timedelta(seconds=5))
+    c._write = real  # type: ignore[method-assign]
+    c.flush_sync()
+    assert not c.has_pending()
+    db = sqlite3.connect(path)
+    rows = sorted(db.execute("SELECT host, at, state, error_kind, error FROM host_status"))
+    db.close()
+    assert rows == [("k2", T0.timestamp() + 5, "ok", None, None),
+                    ("lynx", T0.timestamp(), "needs_auth", "auth", "permission denied")]
+
+
+@pytest.mark.posix                # umask and file modes
 def test_state_files_are_private_whatever_the_umask(tmp_path: Path) -> None:
     import os
     import stat

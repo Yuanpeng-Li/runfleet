@@ -23,7 +23,8 @@ from runfleet.probe.section import SectionOutcome
 from tests.backends.factories import ctx
 from tests.integration.harness import MockEnv, run_script, script_for, shells
 
-pytestmark = pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs Linux /proc")
+pytestmark = [pytest.mark.posix,                  # real sh, /proc and mock nvidia-smi
+              pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs Linux /proc")]
 
 ME = getpass.getuser()
 

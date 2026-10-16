@@ -22,7 +22,7 @@ from runfleet.backends.base import ActionPlan, ActionSpec, HostContext, Schedule
 from runfleet.config import FleetConfig, GeneralSettings, HostConfig, NotifySettings, host_name_for
 from runfleet.core.cache import Cache, JobMeta
 from runfleet.core.clock import Clock
-from runfleet.core.store import FleetStore
+from runfleet.core.store import ChangeSet, FleetStore
 from runfleet.errors import ConfigError, RunFleetError
 from runfleet.models import (ActionResult, AttachMode, AttachState, Capabilities, ConnState,
                              DetectReport, DoctorReport, ErrorKind, HostError, Job, JobDetail, JobKey, JobLive, LogRef,
@@ -32,6 +32,7 @@ from runfleet.transport.base import ProbeResult, Transport
 
 if TYPE_CHECKING:
     from runfleet.core.actions import ActionService
+    from runfleet.core.logsearch import LogQuery, LogSearchResult
     from runfleet.core.forwards import PortForward
     from runfleet.core.logs import LogService
     from runfleet.core.poller import BackendHooks, HostLanes, HostPoller
@@ -87,10 +88,15 @@ class FleetAPI(Protocol):
     async def job_detail(self, key: JobKey, *, max_age_s: float = 30) -> JobDetail: ...
     async def peek_log(self, host: str, ref: LogRef, *, nbytes: int = 4096) -> LogPeek: ...
         # preview pane; cached per (host, path); re-fetched only if >= 15 s old and logstat size/mtime changed
-    async def stream_log(self, host: str, ref: LogRef, *, tail_bytes: int = 65536) -> LogSession: ...
-        # JobDetail log pane and LogScreen only; opening one beyond the host's stream lane closes the oldest
+    async def stream_log(self, host: str, ref: LogRef, *, tail_bytes: int = 65536,
+                         start: int | None = None) -> LogSession: ...
+        # JobDetail log pane and LogScreen only; opening one beyond the host's stream lane closes the oldest.
+        # start: from that absolute byte offset instead of the last tail_bytes (a log search hit, §4.7.1)
     async def fetch_log(self, host: str, ref: LogRef, *, nbytes: int = 4 << 20) -> Path: ...
         # last nbytes into a private temp file (local $PAGER fallback)
+    async def search_logs(self, host: str, query: LogQuery, *, max_matches: int = 200) -> LogSearchResult: ...
+        # palette › Search logs… only (never a timer): one `log.search` probe over the host's own recent log files
+        # (logsearch.plan: ≤ 20 files, last 256 KiB each, ≤ 1 MiB, ≤ max_matches excerpts); never raises (§4.7.1)
     # actions
     def actions_for(self, keys: Sequence[JobKey]) -> list[ActionSpec]: ...
         # merged per action id across hosts; disabled_reason precedence: read-only mode -> host not OK/DEGRADED
@@ -200,6 +206,9 @@ class FleetService(FleetAPI):
         self.hooks: BackendHooks = BackendHooks.default()
         self.rng = random.Random()
         self.notices: list[str] = list(cache.warnings) if cache is not None else []
+        self._status_cached: dict[str, tuple[str, str | None, str | None]] = {}
+        if cache is not None:                   # `runfleet status` reads each host's connection state from the cache
+            self.store.subscribe(self._cache_status)
         # Per-host instance locks: <lock_path>.<host key> (default <mux_dir>/instance.lock.*); False: none (demo).
         self.lock_path: Path | None | Literal[False] = None
         self._factory = transports
@@ -248,6 +257,21 @@ class FleetService(FleetAPI):
             last_input=lambda: self._last_input, focused=lambda: self._focused)
 
     # ================================================================ plumbing
+    def _cache_status(self, change: ChangeSet) -> None:
+        """Queue a host's connection state for the cache when it changes (§5.5 host_status, read by `runfleet
+        status`). NEW / CONNECTING are no observation and are not written; flushed with the normal batch."""
+        if not change.status or self.cache is None:
+            return
+        hs = self.store.hosts.get(change.host)
+        if hs is None or hs.status.state in (ConnState.NEW, ConnState.CONNECTING):
+            return
+        st = hs.status
+        key = (st.state.value, st.error.kind.value if st.error else None, st.error.summary if st.error else None)
+        if self._status_cached.get(change.host) == key:
+            return
+        self._status_cached[change.host] = key
+        self.cache.put_status(change.host, st, self.clock.now())
+
     def _host_cfg(self, host: str) -> HostConfig:
         hs = self.store.hosts.get(host)
         if hs is None:
@@ -436,8 +460,9 @@ class FleetService(FleetAPI):
 
     def _lock_host(self, name: str, base: Path) -> str | None:
         """Take the host's instance lock; returns the pid text of the instance holding it, else None."""
-        import fcntl
         import hashlib
+
+        from runfleet.util import platform
 
         if name in self._host_locks:
             return None
@@ -449,9 +474,14 @@ class FleetService(FleetAPI):
             log.info("instance lock for %s unavailable: %s", name, e)
             return None
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = platform.try_lock(fd)
         except OSError:
-            other = os.read(fd, 32).decode(errors="replace").strip() or "?"
+            locked = False
+        if not locked:
+            try:
+                other = os.read(fd, 32).decode(errors="replace").strip() or "?"
+            except OSError:
+                other = "?"
             os.close(fd)
             return other
         os.ftruncate(fd, 0)
@@ -662,11 +692,19 @@ class FleetService(FleetAPI):
     async def peek_log(self, host: str, ref: LogRef, *, nbytes: int = 4096) -> LogPeek:
         return await self.logs.peek(host, ref, nbytes=nbytes)
 
-    async def stream_log(self, host: str, ref: LogRef, *, tail_bytes: int = 65536) -> LogSession:
-        return await self.logs.stream(host, ref, tail_bytes=tail_bytes)
+    async def stream_log(self, host: str, ref: LogRef, *, tail_bytes: int = 65536,
+                         start: int | None = None) -> LogSession:
+        return await self.logs.stream(host, ref, tail_bytes=tail_bytes, start=start)
 
     async def fetch_log(self, host: str, ref: LogRef, *, nbytes: int = 4 << 20) -> Path:
         return await self.logs.fetch(host, ref, nbytes=nbytes)
+
+    async def search_logs(self, host: str, query: LogQuery, *, max_matches: int = 200) -> LogSearchResult:
+        from runfleet.core import logsearch
+
+        search = logsearch.plan(host, self.store.jobs([host]) if host in self.store.hosts else (), self.clock.now(),
+                                self.config.general.recent_window)
+        return await self.logs.search(host, search, query, max_matches=max_matches)
 
     # ================================================================ actions
     def actions_for(self, keys: Sequence[JobKey]) -> list[ActionSpec]:

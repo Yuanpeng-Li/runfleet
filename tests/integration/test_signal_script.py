@@ -23,7 +23,8 @@ from runfleet.probe.section import Section
 from tests.backends.factories import ctx
 from tests.integration.harness import MockEnv, run_script, script_for, shells
 
-pytestmark = pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs Linux /proc")
+pytestmark = [pytest.mark.posix,                  # real processes, signals and process groups
+              pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs Linux /proc")]
 
 POLITE = "while :; do sleep 300 & wait $!; done\n"
 # ignores TERM, and so does its child (ignored dispositions survive exec)

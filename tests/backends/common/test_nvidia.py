@@ -194,6 +194,7 @@ def test_apps_failing_for_longer_drops_stale_processes() -> None:
     assert out.gpus is not None and {p.pid for g in out.gpus for p in g.processes} == {642234, 786345}
 
 
+@pytest.mark.posix                # runs the wrapper under sh with a fake nvidia-smi script
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs sh")
 def test_instant_payload_failure_keeps_its_rc(tmp_path: Path) -> None:
     """Review BACK-12: `|| exit $?` in the apps payload ended the wrapper's subshell before the rc file was written,
@@ -220,6 +221,7 @@ def test_mig_profile_wins_over_the_parent_card(gpu_type: str) -> None:
 _WRAPPER = "sh -c [ \"$(ps -ww -u me -o pid=,ppid=,stat=,args= …)\" -ge 2 ] && { … }; rf_nv() { nvidia-smi --query-gpu=…"
 
 
+@pytest.mark.posix                # sh with fake ps / nvidia-smi scripts
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs sh")
 @pytest.mark.parametrize("rows,refused", [
     # two healthy instances of the user's own (`nvidia-smi -l` in a job, `nvidia-smi dmon` in tmux): not hung
@@ -253,6 +255,7 @@ def test_guard_counts_only_stuck_or_abandoned_instances(tmp_path: Path, rows: li
         assert proc.returncode == 0 and proc.stdout == "ran\n"
 
 
+@pytest.mark.posix                # sh with fake ps / nvidia-smi scripts
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs sh")
 @pytest.mark.parametrize("pgrep,refused", [
     ("echo 101; echo 102", "already running"),       # two instances of the user's: refuse, as before
@@ -277,6 +280,7 @@ def test_guard_without_a_capable_ps_counts_every_instance(tmp_path: Path, pgrep:
         assert proc.returncode == 0 and proc.stdout == "ran\n"
 
 
+@pytest.mark.posix                # sh with fake ps / awk scripts
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs sh")
 def test_guard_refuses_when_awk_fails(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"

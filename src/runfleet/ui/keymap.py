@@ -16,6 +16,8 @@ from typing import Literal
 
 from textual.binding import Binding, BindingType
 
+from runfleet.util import platform
+
 Group = Literal["nav", "act", "view"]
 
 GROUP_TITLES: dict[Group, str] = {"nav": "NAVIGATION", "act": "SELECTION & ACTIONS", "view": "VIEW"}
@@ -92,6 +94,8 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("left", "h"), "move('left')", "previous host", "nav", in_help=False),
         Key(("right", "l"), "move('right')", "next host", "nav", in_help=False),
         Key(("enter",), "open_host", "host detail", "nav", "↵ / double-click", hint="host detail"),
+        Key(("a",), "attention", "jobs that need you, fleet-wide: failed, low on time, never start (↵ opens one)",
+            "nav", hint="needs you"),
         Key(("space",), "scope_host", "scope to this host", "act", "space", hint="scope"),
         Key(("c",), "app.connect_host", "connect (log in: Duo / password prompts)", "act", hint="connect"),
         Key(("C",), "app.login_all", "log in to every host needing auth (one terminal session)", "act"),
@@ -109,6 +113,7 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("enter",), "open", "job detail", "nav", "↵", hint="detail"),
         Key(("l",), "app.log_viewer", "log viewer", "nav", hint="logs"),
         Key(("p",), "app.pager", "log in $PAGER", "nav"),
+        Key(("ctrl+f",), "app.search_logs", "search recent jobs' logs", "nav"),
         Key(("x",), "app.action_menu", "action menu", "act", hint="actions"),
         Key(("ctrl+k",), "app.quick_kill", "cancel job / terminate task", "act", hint="cancel",
             mutating=True),
@@ -260,7 +265,7 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
     "notifications": (
         Key(("j",), "cursor_down", "move down", "nav", "j/k", summary="move"),
         Key(("k",), "cursor_up", "move up", "nav", in_help=False),
-        Key(("enter",), "noop", "open the job", "nav", "↵", bind=False),
+        Key(("enter",), "noop", "open the job (a GPU watch: its host)", "nav", "↵", bind=False),
         Key(("escape", "q"), "close", "close", "nav", "esc"),
         Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
     ),
@@ -272,11 +277,42 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("escape", "q"), "close", "close", "nav", "esc"),
         Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
     ),
+    "attention": (
+        Key(("j",), "cursor_down", "move down", "nav", "j/k", summary="move"),
+        Key(("k",), "cursor_up", "move up", "nav", in_help=False),
+        Key(("enter",), "noop", "open the job", "nav", "↵", bind=False),
+        Key(("escape", "q"), "close", "close", "nav", "esc"),
+        Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
+    ),
+    "watches": (
+        Key(("j",), "cursor_down", "move down", "nav", "j/k", summary="move"),
+        Key(("k",), "cursor_up", "move up", "nav", in_help=False),
+        Key(("n",), "new_watch", "new watch: N free GPUs of a type on one node", "act"),
+        Key(("d", "delete"), "remove_watch", "remove the selected watch", "act"),
+        Key(("escape", "q"), "close", "close", "nav", "esc"),
+        Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
+    ),
     "forwards": (
         Key(("j",), "cursor_down", "move down", "nav", "j/k", summary="move"),
         Key(("k",), "cursor_up", "move up", "nav", in_help=False),
         Key(("enter",), "noop", "copy the local URL again", "act", "↵", bind=False),
         Key(("ctrl+k",), "cancel_forward", "cancel the forward (ssh -O cancel, local)", "act"),
+        Key(("escape", "q"), "close", "close", "nav", "esc"),
+        Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
+    ),
+    "search_prompt": (
+        Key(("enter",), "noop", "search (in the pattern field)", "act", "↵", bind=False),
+        Key(("tab",), "noop", "move to the options: regular expression, match case", "nav", bind=False),
+        Key(("space",), "noop", "toggle the option under the cursor", "act", bind=False),
+        Key(("escape",), "close", "cancel", "nav", "esc"),
+        Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
+    ),
+    "log_hits": (
+        Key(("j",), "cursor_down", "move down", "nav", "j/k", summary="move"),
+        Key(("k",), "cursor_up", "move up", "nav", in_help=False),
+        Key(("enter",), "noop", "open the log viewer at this match (esc there comes back here)", "nav", "↵",
+            bind=False),
+        Key(("slash",), "again", "edit the search and run it again", "act", "/"),
         Key(("escape", "q"), "close", "close", "nav", "esc"),
         Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
     ),
@@ -318,7 +354,9 @@ CONTEXT_TITLES: dict[str, str] = {
     "attach_confirm": "srun confirmation (live readings)",
     "action_menu": "Action menu", "help": "Help", "host_error": "Host error", "modal": "Dialogs",
     "settings": "Settings", "notifications": "Notifications", "digest": "Since you were away",
-    "forwards": "Port forwards", "prompt": "Prompt",
+    "attention": "Needs you (Fleet a)", "watches": "GPU watches",
+    "forwards": "Port forwards", "prompt": "Prompt", "search_prompt": "Search logs (prompt)",
+    "log_hits": "Search logs (results)",
 }
 
 
@@ -326,11 +364,17 @@ def keys_of(context: str) -> tuple[Key, ...]:
     return KEYMAP[context]
 
 
+def _unsupported(k: Key) -> bool:
+    """Keys this platform cannot honour: ^z (suspend to the shell) needs job control, which Windows consoles lack
+    (Textual makes it a no-op there). The USER_GUIDE table stays the same everywhere (`markdown`)."""
+    return platform.IS_WINDOWS and k.action == "app.suspend_process"
+
+
 def bindings(context: str) -> list[BindingType]:
-    """Textual bindings of one context (documented-only entries are skipped)."""
+    """Textual bindings of one context (documented-only entries and keys the platform lacks are skipped)."""
     out: list[BindingType] = []
     for k in KEYMAP[context]:
-        if not k.bind:
+        if not k.bind or _unsupported(k):
             continue
         for key in k.keys:
             out.append(Binding(key, k.action, k.description, show=False, priority=k.priority))
@@ -366,8 +410,8 @@ def help_entries(contexts: Sequence[str]) -> dict[Group, list[tuple[str, str]]]:
     taken: set[str] = set()
     for ctx in contexts:
         for k in KEYMAP[ctx]:
-            if k.action.startswith("app.scope_index"):
-                continue                 # summarised by the "0 / 1-9" row
+            if k.action.startswith("app.scope_index") or _unsupported(k):
+                continue                 # summarised by the "0 / 1-9" row; or not on this platform
             new_keys = [key for key in k.keys if key not in taken]
             if not new_keys:
                 continue

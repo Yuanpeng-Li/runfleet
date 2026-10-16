@@ -35,11 +35,13 @@ from runfleet.core.store import ChangeSet, HostState
 from runfleet.errors import ActionError
 from runfleet.transport import spawn
 from runfleet.models import ActionResult, ConnState, Job, JobKey, JobKind, JobState, LogRef, Visibility
-from runfleet.ui import keymap, theme
+from runfleet.ui import keymap, saved_views, theme
 from runfleet.ui.commands import RunFleetCommands
 from runfleet.ui.messages import ClockTick, FleetChanged, ScopeChanged
 from runfleet.ui.notify import Alerts
+from runfleet.ui.saved_views import SavedView
 from runfleet.ui.screens import FleetScreen
+from runfleet.util import platform as rfplatform
 
 log = logging.getLogger("runfleet.ui.app")
 
@@ -193,6 +195,7 @@ class RunFleetApp(App[None]):
         self.check_updates = check_updates      # ask GitHub for a newer RunFleet at start (§8.6; never --demo/tests)
         self.update_status: Any = None          # update.Status of the last check this run (None: not asked yet)
         self.update_checking = False
+        self.log_search_query: Any = None       # the last Search logs… query this run (the prompt starts with it)
 
     # ------------------------------------------------------------------ lifecycle
     def get_theme_variable_defaults(self) -> dict[str, str]:
@@ -593,8 +596,9 @@ class RunFleetApp(App[None]):
         self._update_changed(status if force else None)
         if not force and update.should_notify(status):
             update.mark_notified(status.latest)
-            self.toast(f"RunFleet {status.latest} is out (this is {status.current}) — Update RunFleet in the palette "
-                       "(ctrl+p) updates and restarts", timeout=12.0)
+            how = ("quit it, then run " + update.detect_install().manual if rfplatform.IS_WINDOWS
+                   else "Update RunFleet in the palette (ctrl+p) updates and restarts")
+            self.toast(f"RunFleet {status.latest} is out (this is {status.current}) — {how}", timeout=12.0)
 
     def _update_changed(self, answer: Any = None) -> None:
         from runfleet.ui.screens.settings import SettingsScreen
@@ -604,9 +608,13 @@ class RunFleetApp(App[None]):
                 screen.update_changed(answer)
 
     def request_update(self) -> None:
-        """Quit; the CLI updates this install in the plain terminal and starts RunFleet again (same arguments)."""
+        """Quit; the CLI updates this install in the plain terminal and starts RunFleet again (same arguments).
+        Never on Windows (Settings › About shows the manual steps there instead)."""
         from runfleet import update
 
+        if rfplatform.IS_WINDOWS:
+            self.toast(f"quit RunFleet, then run {update.detect_install().manual}", severity="warning")
+            return
         self.exit(return_code=update.RESTART_CODE)
 
     def set_mouse(self, enabled: bool) -> None:
@@ -1026,6 +1034,102 @@ class RunFleetApp(App[None]):
         elif kind == "group":
             main.jobs.set_group(value)
 
+    # ------------------------------------------------------------------ log search (§4.7.1)
+    def action_search_logs(self) -> None:
+        """Palette › Search logs… / ``^f`` in the Jobs view: the prompt, then one probe per host in scope (on demand
+        only) and the results list."""
+        from runfleet.ui.screens.log_search import LogSearchScreen, SearchPromptScreen
+
+        if isinstance(self.screen, (SearchPromptScreen, LogSearchScreen)):
+            return
+        hosts = self.scope_hosts()
+
+        def chosen(query: Any) -> None:
+            if query is None:
+                return
+            self.log_search_query = query
+
+            def done(result: Any) -> None:
+                if result == "again":
+                    self.action_search_logs()
+
+            self.push_screen(LogSearchScreen(query, hosts), done)
+
+        self.push_screen(SearchPromptScreen(self.log_search_query, hosts), chosen)
+
+    def open_log_hit(self, hit: Any, query: Any = None) -> None:
+        """A search result's ``enter``: the log viewer above the results, on the hit's line (§4.7.1)."""
+        from runfleet.ui.screens.log_viewer import LogScreen
+
+        job = self.store.job(hit.key)
+        if job is None:
+            self.toast(f"{hit.key} is no longer listed", severity="warning")
+            return
+        ref = self.log_ref(job, hit.file.stream)
+        screen = LogScreen(hit.key, hit.file.stream)
+        if ref is not None and ref.path == hit.file.path:
+            screen.hit, screen.hit_query = hit, query
+        else:
+            self.toast(f"{hit.key.label}: its {hit.file.stream} path changed since the search — showing the current "
+                       "log", severity="warning")
+        self.push_screen(screen)
+
+    # ------------------------------------------------------------------ saved Jobs views (§7.6)
+    def saved_jobs_views(self) -> dict[str, SavedView]:
+        """The usable saved Jobs views of ui.json, by name (§7.6)."""
+        return saved_views.load_views(self.ui_state)
+
+    def prompt_save_view(self) -> None:
+        """Palette › Save view as…: name the Jobs view's filter, preset, sort and grouping (kept in ui.json)."""
+        from runfleet.ui.screens.save_view import SaveViewScreen
+
+        main = self.main_screen()
+        if main is None:
+            return
+        jobs = main.jobs
+
+        def chosen(name: str | None) -> None:
+            if name:
+                self.save_view(name)
+
+        self.push_screen(SaveViewScreen(jobs.current_view(), self.saved_jobs_views(), jobs.active_view or ""), chosen)
+
+    def save_view(self, name: str) -> bool:
+        """Store the Jobs view's current settings as ``name`` (replacing a view of that name in any case)."""
+        main = self.main_screen()
+        problem = saved_views.save_problem(self.saved_jobs_views(), name)
+        if main is None or problem is not None:
+            if problem is not None:
+                self.toast(f"view not saved: {problem}", severity="warning")
+            return False
+        view = main.jobs.current_view()
+        self.save_ui_state(views=saved_views.with_view(self.ui_state, name, view))
+        main.jobs.view_saved(name)
+        self.toast(f"saved view “{name}” — palette › View: {name} applies it")
+        return True
+
+    def apply_saved_view(self, name: str) -> None:
+        """Palette › View: <name>: switch to the Jobs view and apply the saved filter, preset, sort and grouping."""
+        views = self.saved_jobs_views()
+        stored = saved_views.find(views, name)
+        if stored is None:
+            self.toast(f"no saved view “{name}” any more", severity="warning")
+            return
+        main = self.go_main("jobs")
+        if main is not None:
+            main.jobs.apply_view(stored, views[stored])
+
+    def delete_saved_view(self, name: str) -> None:
+        """Palette › Delete view: <name>."""
+        stored = saved_views.find(self.saved_jobs_views(), name)
+        if stored is None:
+            return
+        self.save_ui_state(views=saved_views.without_view(self.ui_state, stored))
+        main = self.main_screen()
+        if main is not None:
+            main.jobs.view_deleted(stored)
+        self.toast(f"deleted view “{stored}”")
+
     @work(exit_on_error=False, group="doctor")
     async def show_doctor(self, host: str) -> None:
         from runfleet.ui.screens.host_error import DoctorScreen
@@ -1084,7 +1188,7 @@ class RunFleetApp(App[None]):
                 return
             what, key = result
             if what == "open" and key is not None:
-                self._open_from_alert(key)
+                self.open_listed_job(key)
             elif what == "filter":
                 main = self.go_main("jobs")
                 if main is not None:
@@ -1093,13 +1197,45 @@ class RunFleetApp(App[None]):
         self.push_screen(DigestScreen(since, jobs, self.host_names(), self.now()), chosen)
 
     def show_notifications(self) -> None:
-        """Palette › Notifications: this session's alert history (``enter`` opens the job)."""
+        """Palette › Notifications: this session's alert history and GPU watches that fired (``enter`` opens the job,
+        or the host of a watch)."""
         from runfleet.ui.screens.notifications import NotificationsScreen
 
-        self.push_screen(NotificationsScreen(list(self.alerts.history)),
-                         lambda key: self._open_from_alert(key) if key is not None else None)
+        def chosen(picked: JobKey | str | None) -> None:
+            if isinstance(picked, JobKey):
+                self.open_listed_job(picked)
+            elif picked and picked not in self.store.hosts:     # a watch's host removed in Settings since
+                self.toast(f"{picked} is no longer in the fleet", severity="warning")
+            elif picked:                       # a GPU watch that fired: its host
+                self.action_open_host(picked)
 
-    def _open_from_alert(self, key: JobKey) -> None:
+        self.push_screen(NotificationsScreen([*self.alerts.history, *self.alerts.watch_events]), chosen)
+
+    def prompt_gpu_watch(self) -> None:
+        """Palette › Watch free GPUs…: the prompt; a usable watch is kept (ui.json ``watches``) and evaluated."""
+        from runfleet.ui.screens.gpu_watch import WatchPromptScreen
+
+        def chosen(watch: Any) -> None:
+            if watch is None:
+                return
+            problem = self.alerts.add_gpu_watch(watch)
+            if problem is not None:
+                self.toast(f"watch not added: {problem}", severity="warning")
+                return
+            self.toast(f"watching for {watch.describe()} — palette › Watches lists it")
+
+        self.push_screen(WatchPromptScreen(), chosen)
+
+    def show_gpu_watches(self) -> None:
+        """Palette › Watches: the GPU watches and what each is doing (``d`` removes one)."""
+        from runfleet.ui.screens.gpu_watch import WatchesScreen
+
+        if not isinstance(self.screen, WatchesScreen):
+            self.push_screen(WatchesScreen())
+
+    def open_listed_job(self, key: JobKey) -> None:
+        """Open a job picked from a list that may be older than the store (alerts, the Fleet cards and panel, the
+        "needs you" picker): a job that is gone by now gets a toast instead of nothing."""
         if self.store.job(key) is None:
             self.toast(f"{key} is no longer listed", severity="warning")
             return
@@ -1125,7 +1261,8 @@ class RunFleetApp(App[None]):
                     print(banner, flush=True)
                 started = time.monotonic()
                 try:
-                    rc = subprocess.run(argv, check=False).returncode
+                    # Windows: `more` is more.com, `code` code.cmd (CreateProcess only adds .exe)
+                    rc = subprocess.run(rfplatform.resolve_program(argv), check=False).returncode
                 except OSError as exc:
                     print(f"runfleet: cannot run {argv[0]}: {exc}", flush=True)
                     rc = 127
@@ -1160,7 +1297,7 @@ class RunFleetApp(App[None]):
                 for argv, banner, fail_log in steps:
                     print(banner, flush=True)
                     try:
-                        rc = subprocess.run(argv, check=False).returncode
+                        rc = subprocess.run(rfplatform.resolve_program(argv), check=False).returncode
                     except OSError as exc:
                         print(f"runfleet: cannot run {argv[0]}: {exc}", flush=True)
                         rc = 127

@@ -21,7 +21,7 @@ from runfleet.core.store import HostState
 from runfleet.models import ConnState, DoctorReport, ErrorKind
 from runfleet.ui import keymap, render, theme
 from runfleet.ui.widgets.host_card import busy_note
-from runfleet.util import humanize
+from runfleet.util import humanize, platform
 
 LOG_TAIL = 20
 
@@ -37,6 +37,11 @@ _ADVICE: dict[ErrorKind, str] = {
     ErrorKind.MUX: "The shared ssh master is unresponsive. Connect restarts it.",
     ErrorKind.REMOTE: "The remote shell could not run the probe (try remote_shell = \"login\" for this host).",
 }
+
+
+# P1: no shared connection on Windows, so a login done with Connect does not carry over to the background probes
+WINDOWS_AUTH = ("Windows ssh cannot keep a login open: key/agent hosts work, but a Duo or password host stays here "
+                "after Connect. For those hosts run RunFleet in WSL until the session transport.")
 
 
 def read_tail(path: str | None, n: int = LOG_TAIL) -> list[str]:
@@ -77,6 +82,8 @@ def error_report(state: HostState, now: datetime, width: int) -> Text:
         advice = _ADVICE.get(err.kind)
         if advice:
             lines.append(Text(advice.replace("<host>", state.config.ssh), style=theme.muted()))
+        if err.kind is ErrorKind.AUTH and platform.IS_WINDOWS:
+            lines.append(Text(WINDOWS_AUTH, style=theme.warn()))
         if err.detail:
             lines.append(Text(""))
             lines.append(Text("stderr", style="bold"))

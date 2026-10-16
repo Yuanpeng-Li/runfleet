@@ -3,6 +3,8 @@
 Reads happen at startup; writes are queued in memory and flushed in one transaction (every 10 s by the service and at
 exit) on a worker thread via `asyncio.to_thread`. A corrupt or unreadable database is renamed to
 `cache.sqlite.corrupt-<ts>` and replaced by a fresh one (§9 row 27); `Cache(None)` is an in-memory cache.
+`host_status` (each host's connection state) is written for `runfleet status`, which reads the file without this class
+(read-only, `runfleet.status`).
 """
 
 from __future__ import annotations
@@ -21,7 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from runfleet import paths
-from runfleet.models import DETECT_REV, Capabilities, HostSnapshot, Job, JobKind, LogRef, NodeAlloc, from_json, to_json
+from runfleet.models import (DETECT_REV, Capabilities, HostSnapshot, HostStatus, Job, JobKind, LogRef, NodeAlloc,
+                             from_json, to_json)
 
 log = logging.getLogger("runfleet.core.cache")
 
@@ -38,6 +41,7 @@ CREATE TABLE IF NOT EXISTS jobmeta     (host TEXT, job_id TEXT, job_id_raw TEXT,
                                         first_seen REAL, last_seen REAL, last_state TEXT,
                                         PRIMARY KEY (host, job_id));
 CREATE TABLE IF NOT EXISTS ended_tasks (host TEXT, job_id TEXT, ended_at REAL, json TEXT, PRIMARY KEY (host, job_id));
+CREATE TABLE IF NOT EXISTS host_status (host TEXT PRIMARY KEY, at REAL, state TEXT, error_kind TEXT, error TEXT);
 """
 
 
@@ -110,6 +114,7 @@ class Cache:
         self._pending_caps: dict[str, tuple[Capabilities, float]] = {}
         self._pending_meta: dict[tuple[str, str], JobMeta] = {}
         self._pending_ended: dict[tuple[str, str], tuple[Job, float]] = {}
+        self._pending_status: dict[str, tuple[float, str, str | None, str | None]] = {}
         self._db = self._open()
 
     # ------------------------------------------------------------ connection
@@ -235,9 +240,17 @@ class Cache:
         with self._lock:
             self._pending_ended[(host, job.key.id)] = (job, ended_at.timestamp())
 
+    def put_status(self, host: str, status: HostStatus, at: datetime) -> None:
+        """The host's connection state since `at`, for `runfleet status` (§8.5); the TUI never reads it back."""
+        err = status.error
+        with self._lock:
+            self._pending_status[host] = (at.timestamp(), status.state.value, err.kind.value if err else None,
+                                          err.summary if err else None)
+
     def has_pending(self) -> bool:
         with self._lock:
-            return bool(self._pending_snapshots or self._pending_caps or self._pending_meta or self._pending_ended)
+            return bool(self._pending_snapshots or self._pending_caps or self._pending_meta or self._pending_ended
+                        or self._pending_status)
 
     def flush_sync(self) -> None:
         # _db_lock first (flushes stay ordered: an older batch never overwrites a newer one), then _lock only for
@@ -248,11 +261,12 @@ class Cache:
                 caps, self._pending_caps = self._pending_caps, {}
                 metas, self._pending_meta = self._pending_meta, {}
                 ended, self._pending_ended = self._pending_ended, {}
-            if not (snaps or caps or metas or ended):
+                status, self._pending_status = self._pending_status, {}
+            if not (snaps or caps or metas or ended or status):
                 return
             try:
                 with self._db:
-                    self._write(snaps, caps, metas, ended)
+                    self._write(snaps, caps, metas, ended, status)
             except sqlite3.Error as e:
                 # Keep the batch for the next flush (disk full, read-only fs, a locked db): ended workstation tasks
                 # and job log paths are queued only on change, so dropping them would lose them for good. Newer
@@ -263,9 +277,11 @@ class Cache:
                     self._pending_caps = {**caps, **self._pending_caps}
                     self._pending_meta = {**metas, **self._pending_meta}
                     self._pending_ended = {**ended, **self._pending_ended}
+                    self._pending_status = {**status, **self._pending_status}
 
     def _write(self, snaps: Mapping[str, HostSnapshot], caps: Mapping[str, tuple[Capabilities, float]],
-               metas: Mapping[tuple[str, str], JobMeta], ended: Mapping[tuple[str, str], tuple[Job, float]]) -> None:
+               metas: Mapping[tuple[str, str], JobMeta], ended: Mapping[tuple[str, str], tuple[Job, float]],
+               status: Mapping[str, tuple[float, str, str | None, str | None]]) -> None:
         db = self._db
         db.executemany("INSERT OR REPLACE INTO snapshots VALUES (?, ?, ?)",
                        [(h, s.taken_at.timestamp(), json.dumps(to_json(s))) for h, s in snaps.items()])
@@ -277,6 +293,8 @@ class Cache:
                         for (h, _), m in metas.items()])
         db.executemany("INSERT OR REPLACE INTO ended_tasks VALUES (?, ?, ?, ?)",
                        [(h, j.key.id, t, json.dumps(to_json(j))) for (h, _), (j, t) in ended.items()])
+        db.executemany("INSERT OR REPLACE INTO host_status VALUES (?, ?, ?, ?, ?)",
+                       [(h, *row) for h, row in status.items()])
 
     async def flush(self) -> None:
         if self.has_pending():

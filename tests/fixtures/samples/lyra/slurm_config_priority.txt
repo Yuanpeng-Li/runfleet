@@ -1,0 +1,12 @@
+PriorityDecayHalfLife   = 7-00:00:00
+PriorityFlags           =
+PriorityMaxAge          = 7-00:00:00
+PriorityType            = priority/multifactor
+PriorityUsageResetPeriod = NONE
+PriorityWeightAge       = 0
+PriorityWeightAssoc     = 0
+PriorityWeightFairShare = 0
+PriorityWeightJobSize   = 0
+PriorityWeightPartition = 0
+PriorityWeightQOS       = 0
+PriorityWeightTRES      = (null)

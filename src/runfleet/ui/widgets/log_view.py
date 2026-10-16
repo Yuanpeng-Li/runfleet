@@ -3,7 +3,8 @@
 ``LogView`` = ``RichLog(max_lines=20000, wrap=True, markup=False)`` fed ``Text.from_ansi`` per completed line, plus a
 one-line footer showing the current unterminated line (tqdm ``\\r`` progress, §4.7) and the follow state. The raw lines
 are kept too (as many as the RichLog holds), so a theme switch can draw them again in the new colours
-(:meth:`LogView.forget_rendered`: the RichLog stores rendered strips).
+(:meth:`LogView.forget_rendered`: the RichLog stores rendered strips), and the RichLog notes where each raw line's
+display lines start, so a log search hit lands on its line (:meth:`LogView.land`, §4.7.1).
 ``LogFollower`` owns one ``LogSession`` and fans its updates out to one or more views (the job detail Summary pane
 and its Logs tab share a single stream). It tracks whether the stream is alive, so a dead stream never reads as
 "following" and the owning screen can reopen it (:meth:`LogFollower.reconnect_due`, bounded backoff).
@@ -14,7 +15,7 @@ from __future__ import annotations
 import re
 from collections import deque
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, Literal, Self
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -29,6 +30,47 @@ from runfleet.util.logscan import line_level
 MAX_LINES = 20_000
 RECONNECT_DELAYS = (5.0, 15.0, 60.0, 60.0, 60.0)   # automatic reopen of a dead stream, then only on request
 LIVE_RESETS_BACKOFF = 60.0                        # a stream that stayed up this long starts the backoff afresh
+
+
+class _Log(RichLog):
+    """RichLog that remembers where each write's display lines start, so a raw line can be found among the wrapped
+    display lines (a log search hit lands on its line, §4.7.1). Writes made before the size is known are replayed
+    by RichLog later and counted then."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.starts: deque[int] = deque(maxlen=MAX_LINES)   # absolute display line of each rendered write
+        self.rendered = 0                                    # writes rendered since the last clear
+
+    @property
+    def _end(self) -> int:
+        return int(getattr(self, "_start_line", 0)) + len(self.lines)   # absolute index past the last display line
+
+    def write(self, content: Any, *args: Any, **kwargs: Any) -> Self:
+        before = self._end
+        super().write(content, *args, **kwargs)
+        if self._end != before:           # rendered now (every rendered write adds at least one line)
+            self.starts.append(before)
+            self.rendered += 1
+        return self
+
+    def clear(self) -> Self:
+        super().clear()
+        self.starts.clear()
+        self.rendered = 0
+        return self
+
+    def display_line(self, write_no: int) -> int | None:
+        """Display line (scroll y) where write number ``write_no`` (since the last clear) starts; None when it is not
+        rendered yet or no longer held."""
+        first = self.rendered - len(self.starts)
+        if not first <= write_no < self.rendered:
+            return None
+        y = self.starts[write_no - first] - int(getattr(self, "_start_line", 0))
+        return y if y >= 0 else None
+
+
+Landing = Literal["landed", "pending", "missing"]
 
 
 class LogView(Widget):
@@ -53,23 +95,25 @@ class LogView(Widget):
         self._scroll_paused = False        # follow was paused by scrolling up (scrolling back down resumes it)
         self._err_hit = -1                 # display line of the last `]` / `[` jump
         self._raw: deque[str] = deque(maxlen=MAX_LINES)   # the lines as received, for forget_rendered
+        self._write_base = 0               # line number (since reset) of the first line written since the RichLog's clear
         self._redrawing = False            # forget_rendered: the RichLog's scroll moves are not the user's
 
     def compose(self) -> ComposeResult:
-        yield RichLog(max_lines=MAX_LINES, wrap=True, markup=False, highlight=False, min_width=20,
-                      auto_scroll=True, id="log")
+        yield _Log(max_lines=MAX_LINES, wrap=True, markup=False, highlight=False, min_width=20, auto_scroll=True,
+                   id="log")
         yield Static("", id="live")
 
     def on_mount(self) -> None:
         self.watch(self.richlog, "scroll_y", self._scrolled, init=False)
 
     @property
-    def richlog(self) -> RichLog:
-        return self.query_one(RichLog)
+    def richlog(self) -> _Log:
+        return self.query_one(_Log)
 
     def reset(self) -> None:
         self.richlog.clear()
         self._raw.clear()
+        self._write_base = 0
         self.count = 0
         self._err_hit = -1
         self.live = None
@@ -102,6 +146,7 @@ class LogView(Widget):
         self._redrawing = True
         try:
             log.clear()
+            self._write_base = self.count - len(self._raw)
             for line in self._raw:
                 log.write(_highlight(line), scroll_end=False)
             if self.follow:
@@ -223,6 +268,49 @@ class LogView(Widget):
         self._render_live()
         return hit
 
+    # ------------------------------------------------------------------ a log search hit (§4.7.1)
+    def land(self, line: int | None, needle: str, label: str, *, again: str = "") -> Landing:
+        """Scroll to raw line ``line`` (0-based since the stream started; a search hit's ``grep -n`` line when the
+        stream began at the hit's window) and pause following. ``needle`` confirms it: when that line lacks it (the
+        file changed, a ``\r`` progress update overwrote it), the nearest line holding it wins, else the line itself;
+        ``line`` None = the last line holding it. ``again``: a literal pattern ``n`` / ``N`` continue with.
+        Returns "pending" while the line is not loaded or drawn yet, "missing" when it is not in the buffer."""
+        raw = list(self._raw)
+        first = self.count - len(raw)
+        cands = [first + i for i, text in enumerate(raw) if needle and needle in text]
+        note = ""
+        if line is None:
+            target = cands[-1] if cands else None
+            note = " (the hit's window was not loaded: last line with its text)"
+        elif line >= self.count:
+            return "pending"
+        elif line < first:
+            target = None
+        elif needle and needle not in raw[line - first]:
+            target = min(cands, key=lambda g: abs(g - line)) if cands else line
+            note = (" (the file changed since the search: nearest line with the text)" if cands
+                    else " (its text is gone: overwritten by a \r update or the file changed)")
+        else:
+            target = line
+        if target is None:
+            self.search_note = f"{label}: no longer in the loaded log (p opens the whole file)"
+            self._render_live()
+            return "missing"
+        y = self.richlog.display_line(target - self._write_base)
+        if y is None:
+            if target - self._write_base >= self.richlog.rendered:
+                return "pending"
+            self.search_note = f"{label}: no longer in the loaded log (p opens the whole file)"
+            self._render_live()
+            return "missing"
+        self.set_follow(False)
+        self.richlog.scroll_to(y=max(0, y - 2), animate=False)
+        if again:
+            self._needle, self._hit = again, y
+        self.search_note = f"{label} · line {y + 1}{note}" + (" · n next · N previous" if again else "")
+        self._render_live()
+        return "landed"
+
     def bottom(self) -> None:
         self.set_follow(True)
 
@@ -288,7 +376,8 @@ class LogFollower:
         self.session = None
         self.state = "idle"
 
-    def start(self, host: str, ref: LogRef, *, retry: bool = False) -> None:
+    def start(self, host: str, ref: LogRef, *, retry: bool = False, start: int | None = None) -> None:
+        """Follow ``ref`` (the last 64 KiB first); ``start``: from that absolute byte offset instead (§4.7.1)."""
         self.stop()
         self.attempts = self.attempts + 1 if retry else 0
         self.host, self.ref = host, ref
@@ -300,7 +389,7 @@ class LogFollower:
             self.state = "waiting"
             return
         self.state = "connecting"
-        self.owner.run_worker(self._run(host, ref, self._gen), group="log-follow", exclusive=True,
+        self.owner.run_worker(self._run(host, ref, self._gen, start), group="log-follow", exclusive=True,
                               exit_on_error=False)
 
     def reconnect_due(self) -> bool:
@@ -326,10 +415,11 @@ class LogFollower:
         if self.on_update is not None:
             self.on_update(update)
 
-    async def _run(self, host: str, ref: LogRef, gen: int) -> None:
+    async def _run(self, host: str, ref: LogRef, gen: int, start: int | None = None) -> None:
         service = self.owner.app.service   # type: ignore[attr-defined]
         try:
-            session = await service.stream_log(host, ref)
+            session = await (service.stream_log(host, ref) if start is None
+                             else service.stream_log(host, ref, start=start))
         except Exception as exc:   # a broken stream is a note in the pane, never an app error
             self._died(gen, "failed")
             self._fan_out(gen, LogUpdate(note=f"cannot follow log: {exc}", eof=True))

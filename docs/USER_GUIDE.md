@@ -16,6 +16,7 @@ Configuration keys are in [CONFIG.md](CONFIG.md); the design and its reasoning i
 | `runfleet hosts import [--all \| ALIAS …] [--write]` | Probes aliases read-only (`BatchMode`, at most `max_parallel_ssh` at a time, one line per host as it answers) and prints what each one is (Slurm version, workstation, needs auth, unreachable). `--write` saves the usable ones (including hosts that only need a login) to the config; an existing file is appended to, never rewritten, and aliases already in it are reported as "already configured". Unreachable hosts are listed with the command to add them later. |
 | `runfleet doctor [HOST …] [--reset]` | Per host: `ssh -G` summary, multiplexing mode, ProxyJump rewrite, master check, probe latency, detected profile, capabilities, missing tools, clock skew, GPU accounting. `--reset` closes RunFleet-managed ssh masters first. |
 | `runfleet snapshot [HOST …] [--json] [--timeout SEC]` | Polls every host once and prints a table (your jobs by state; your GPUs: allocated GPUs on a cluster, `in use/total` on a workstation), or with `--json` a document with schema `runfleet.snapshot/1` (status, capabilities, jobs, GPUs, processes, nodes and partitions per host). |
+| `runfleet status [HOST …] [--short \| --json]` | What the last RunFleet run saw, for your shell prompt or tmux status bar: your jobs by state, hosts that need you, and how old the data is. Reads only the cache — never ssh, never a write — in well under 150 ms. A table per host by default; `--short` one line, `R4 PD2 F1 · lynx:auth · 3m`; `--json` a `runfleet.status/1` document. See [In your prompt or status bar](#in-your-prompt-or-status-bar). |
 | `runfleet update [--check] [--force]` | Updates RunFleet to the newest version on GitHub: finds out how it was installed (uv tool, pipx, a git clone), lists what changed since your version (from CHANGELOG.md), runs the matching command and prints the new version. `--check` only says whether a newer version exists; `--force` runs the update even when none is known (GitHub unreachable, or new commits without a new version number). A copy run with `uvx` or installed with plain pip prints the command to run instead. Exit `1` when the update failed. |
 | `runfleet wait HOST:JOBID … [--timeout SEC] [--json]` | Waits until the jobs end, for scripts and agents (`runfleet wait k2:2332861 && ./eval.sh`). Polls just those hosts like an unattended RunFleet (normal cadence, 4× slower after 10 minutes, never paused), read-only, and prints every state change (`--json`: one `runfleet.wait/1` object per line). `k2:31270818` waits for every task of that array; `lynx:p642229` names a workstation task. Exit `0` all ended COMPLETED · `1` one ended otherwise (failed, cancelled, timeout, a task's unknown exit) · `2` `--timeout` passed · `3` error (unknown host or job, a host that needs a login — run `runfleet connect` first — or is unreachable for 10 minutes). |
 
@@ -27,6 +28,65 @@ directory on stderr), `--version`.
 Exit codes: `0` ok · `1` runtime error · `2` configuration or usage error · `3` no `ssh` client found (never with
 `--demo`) · `4` `snapshot`/`doctor`: at least one host failed (unreachable, needs auth, a failed check). `wait` has its
 own, above: every error, a bad configuration included, is `3` (an argument error caught by the parser stays `2`).
+`status`: `0` a summary (even a stale one) · `1` no data · `2` usage (an unknown host, `--demo`, `--no-cache`).
+
+### In your prompt or status bar
+
+`runfleet status` summarises what RunFleet last saw, straight from its cache (`~/.local/state/runfleet/cache.sqlite`),
+so it is fast and costs the clusters nothing. The data is as fresh as the last RunFleet that ran on this machine: the
+TUI saves it every 10 s, `runfleet snapshot` once.
+
+```console
+$ runfleet status --short
+R4 PD2 F1 · lynx:auth · 3m
+$ runfleet status
+HOST   STATE                                     R  PD  F  AGE
+k2     ok                                        3  1   1  3m
+vega   ok                                        0  1   0  3m
+lynx   needs_auth (permission denied (publicke…  1  0   0  2h stale
+total                                            4  2   1  3m
+```
+
+`R4 PD2 F1` are your running, pending and failed jobs across the hosts (failed: within `general.recent_window`, 24 h
+by default — the header's totals). `lynx:auth` lists the hosts that need you: `auth` (press `c` in RunFleet or run
+`runfleet connect lynx`), `hostkey`, `down`, `dns`. Last comes the age of the newest data; past 10 minutes it reads
+`14m stale` — RunFleet is not running, or paused after 2 hours without input. With no cache yet (or one that cannot be
+read right now) it prints `no data` and exits `1`. The hosts are those of your config (enabled ones, in config order)
+unless you name some; `--json` (schema `runfleet.status/1`) has the same numbers per host plus each host's state, error
+and data time, for your own scripts.
+
+tmux (`~/.tmux.conf`):
+
+```tmux
+set -g status-interval 15
+set -g status-right '#(runfleet status --short) | %H:%M'
+```
+
+zsh (`~/.zshrc`), refreshed at most every 30 s and hidden while there is no data:
+
+```zsh
+zmodload zsh/datetime
+typeset -g _rf_status='' _rf_at=0
+_rf_precmd() {
+  if (( EPOCHSECONDS - _rf_at >= 30 )); then
+    _rf_status=$(runfleet status --short 2>/dev/null) || _rf_status=''
+    _rf_at=$EPOCHSECONDS
+  fi
+}
+autoload -Uz add-zsh-hook && add-zsh-hook precmd _rf_precmd
+setopt prompt_subst
+RPROMPT='${_rf_status}'
+```
+
+starship (`~/.config/starship.toml`):
+
+```toml
+[custom.runfleet]
+command = "runfleet status --short"
+when = "runfleet status --short >/dev/null"   # hidden while there is no data (exit 1); `when = true` saves a run
+format = "[$output]($style) "
+style = "dimmed"
+```
 
 ## Screens
 
@@ -49,12 +109,20 @@ its list shows your tasks and other users'. The empty cell after the last card b
 right now by type across the whole fleet, your GPU types first (`H200  9  vega h200 6 (5 planned) · k2 gpu-preempt
 3`), and what changed since your last visit: failures and completions from the store (they survive a restart), plus
 jobs that ran low on time, restarted or left a GPU idle, which come from this session's alerts and so only appear
-for the events selected in `[notify]`. "Free" is what
+for the events selected in `[notify]`, and your GPU watches that fired (`◎`). "Free" is what
 `sinfo` and `nvidia-smi` last reported (up to a few minutes old, `sinfo 2m ago`), not your quota: a partition limit,
 a QOS or someone faster may still take them. A cluster whose last `sinfo` failed or is much older than its polling
 pace is listed as `k2 ?` instead of counted, like a host that is down. Rows older than 20 h show their day
 (`Mon 11:00`), and events of a host you removed in Settings disappear from the panel. None of this polls anything new. Palette › *Fleet: compact cards* keeps
 the cards at their summary size; *Fleet: roomy cards* brings the roomy layout back (remembered in `ui.json`).
+
+Click a job row in a card, or a row under *what changed* in the fleet panel, to open that job; a click anywhere else
+on a card selects it as before (double-click: host detail). `a` lists everything that needs you across the whole
+fleet in one dialog, most urgent first, in any layout (roomy, compact cards or the narrow table): failures of the last
+4 h, running jobs with a warning (`log idle 51m`) or low on time, pending jobs that will never start or are held, then
+older failures of the recent window. Each row shows the host, the job id, the full name and why (`exit 1 · 12m ago`,
+`low on time · 18m left`, `never: dependency failed · no est.`); `j`/`k` move, `enter` opens the job, `esc` closes.
+The list is the cards' own ranking, so it never disagrees with them (array tasks are listed one by one).
 
 **Jobs view** (`tab`). Every job of every host in one table. By default it shows the *fresh* preset: active and queued
 jobs plus anything that ended in the last 24 h (failed, cancelled and "ended" tasks stay visible). Long names keep the
@@ -74,7 +142,7 @@ the job ended — led by the failure line of the log tail, e.g. `torch.OutOfMemo
 running Slurm job the node's processes with their Slurm step) and *Raw* (every field as reported). Under
 the title an ended job that did not succeed shows its **cause chip** and a pending job what to do about its reason;
 the Summary's right column shows an ended job's **Efficiency** box instead of its GPU box (see *Why did it fail?*
-below).
+below) and a pending job's **Priority** box (see *Why isn't it starting?* under *States and hints*).
 
 **Host detail** (`enter` on a host). Workstations: per-GPU bars, host CPU/memory, and processes (GPU holders
 of all users plus the members of your tasks; `u` toggles other users). Click a GPU row (or step with `[` / `]`) to
@@ -96,9 +164,32 @@ the loaded buffer (`n`/`N`); `]`/`[` jump to the next / previous error or warnin
 of memory, NCCL errors, `Killed`, OOM kills, `slurmstepd: error`, `DUE TO TIME LIMIT`, preemption, segmentation
 faults, NaN losses, disk quota), which are shown in red (warnings in yellow) here and in the job detail log panes.
 
+**Search logs** (palette › *Search logs…*, or `ctrl+f` in the Jobs view). Finds text in the logs of several jobs at
+once: your own jobs on the hosts in scope (`0` all, `1`–`9` one host) that are running or ended within the recent
+window (24 h by default), stdout and stderr, each file once. Type the text — it is matched literally, ignoring the case
+of ASCII letters; `tab` reaches *regular expression* (POSIX extended, as `grep -E`; no back-references, and `{n,m}` counts stay small: at most 255, not nested into
+thousands) and *match
+case*, `space` ticks them, `enter` in the text field searches. The prompt says which jobs and files that is.
+
+The results group the matches per job and file (`k2  2332861  orb-swp…  stdout+stderr  …/logs/…out  3 matches`), one
+line each, the matched text highlighted, cut to the window around it (`…` where text is left out). The top lines say
+exactly what was read — `searched 12 files on k2, vega · 1,024 KiB · 37 matches` — and every limit that cut it short:
+only the last 256 KiB of a big file, the 1 MiB read limit per host, the 20-file limit per host, the 200-match limit
+(shared between the hosts searched), a host that timed out or needs a login, files missing or not readable. `enter`
+opens the log viewer on that line, paused (`F` follows again; for literal text `n`/`N` step through further matches);
+`esc` there brings you back to the results, `/` edits the search. The viewer loads the file from where the search
+read it, so it lands on the same line even if the job has written more since; if the file was rewritten meanwhile it
+lands on the nearest line with the text and says so.
+
+A search runs only when you start it — one read-only `ssh` round trip per host, never repeated in the background:
+`stat`, `tail`, `head` and `grep` over at most 20 files, at most 1 MiB read, 30 s at most. File names and the pattern
+are quoted; nothing is globbed or searched recursively.
+
 **Command palette** (`ctrl+p` or `:`). Fuzzy commands: switch views and scope, open a host, connect, refresh,
-enable/disable hosts, state presets, sort/group, *Doctor &lt;host&gt;*, *Settings*, *Action log*, *RunFleet log*,
-*Log in to all hosts needing auth*, *Forward a port…*, *Forwards*, *Fleet: roomy cards* / *Fleet: compact cards*.
+enable/disable hosts, state presets, sort/group, saved Jobs views (*Save view as…*, *View: &lt;name&gt;*, *Delete
+view: &lt;name&gt;*), GPU watches (*Watch free GPUs…*, *Watches*), *Search logs…*, *Doctor &lt;host&gt;*,
+*Settings*, *Action log*, *RunFleet log*, *Log in to all hosts needing auth*, *Forward a port…*, *Forwards*, *Fleet:
+roomy cards* / *Fleet: compact cards*.
 
 **Settings** (`,`, the `⚙` at the top right, or the palette). A panel with three sections (`tab` or `←`/`→`, or click
 a tab):
@@ -146,6 +237,14 @@ directory, a full disk) the panel says so and nothing changes. With `--demo` not
 `f` cycles the state presets *fresh → active → queued → failed (failed + ended) → all*; `o` cycles the sort column and
 `O` reverses it (or click a column header); `z` groups by nothing → host → array. Scope with `0` (all hosts) and `1`–`9`
 (host N in config order). Filter text, preset, sort and grouping are remembered in `~/.local/state/runfleet/ui.json`.
+
+**Saved views.** Set up the Jobs view the way you like it (filter, preset, sort, grouping), then palette › *Save view
+as…* and give it a name, e.g. `k2 failures`. Later, palette › *View: k2 failures* switches to the Jobs view and puts
+all of it back at once; *Delete view: k2 failures* forgets it. While a saved view is in effect the status line under
+the tabs starts with `view: k2 failures`; once you change any part of it (`f`, `o`, `z`, the filter …) the name goes
+away, and saving again under the same name updates the view. Names are up to 24 characters of letters, digits,
+spaces, `.`, `_` and `-` (ignoring upper/lower case when they are compared), and you can keep up to 20 views. They
+are stored in `ui.json` under `views`; an entry RunFleet cannot read there is skipped, not an error.
 
 ## Live GPU readings (Attach)
 
@@ -202,8 +301,8 @@ Every view lists its keys with `?`. The table below is generated from the same s
 |---|---|
 | Global | `?`/`f1` help (this view) · `^p`/`:` command palette · `,` settings (hosts, defaults) · `q` back · quit on the main screen · `^c` quit now · `esc` close / clear filter, marks / back · `0` all hosts (1-9: host N) · `/` filter jobs · `r` refresh hosts in scope (>= 3 s apart) · `^r` refresh all hosts · `+` poll faster (down to 0.5×) · `-` poll slower (up to 4×) · `^z` suspend to the shell · `D` since you were away: what ended, failures first |
 | Main screen | `tab` next view (Fleet→Jobs→GPUs) · `S-tab` previous view |
-| Fleet view | `↑`/`k` host above · `↓`/`j` host below · `←`/`h` previous host · `→`/`l` next host · `↵` host detail · `space` scope to this host · `c` connect (log in: Duo / password prompts) · `C` log in to every host needing auth (one terminal session) · `s` shell on the host · `t` enable / disable polling · `e` error details |
-| Jobs view | `j` move down · `k` move up · `g`/`home` first row · `G`/`end` last row · `^d`/`pgdn` half page down · `^u`/`pgup` half page up · `↵` job detail · `l` log viewer · `p` log in $PAGER · `x` action menu · `^k` cancel job / terminate task · `space` mark / unmark · `V` mark all / clear marks · `A` mark the whole array of this row (cancel / hold act on all of it) · `y` copy id · `Y` copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle · Y again = stdout path · `s` shell · `P` forward a port (TensorBoard, Jupyter …) to localhost · `c` connect host · `/` filter jobs · `f` next state preset · `o` next sort column · `O` reverse sort · `z` group by · `u` other users · `w` watch / unwatch (notify on start, end, GPU idle; marked rows too) |
+| Fleet view | `↑`/`k` host above · `↓`/`j` host below · `←`/`h` previous host · `→`/`l` next host · `↵` host detail · `a` jobs that need you, fleet-wide: failed, low on time, never start (↵ opens one) · `space` scope to this host · `c` connect (log in: Duo / password prompts) · `C` log in to every host needing auth (one terminal session) · `s` shell on the host · `t` enable / disable polling · `e` error details |
+| Jobs view | `j` move down · `k` move up · `g`/`home` first row · `G`/`end` last row · `^d`/`pgdn` half page down · `^u`/`pgup` half page up · `↵` job detail · `l` log viewer · `p` log in $PAGER · `^f` search recent jobs' logs · `x` action menu · `^k` cancel job / terminate task · `space` mark / unmark · `V` mark all / clear marks · `A` mark the whole array of this row (cancel / hold act on all of it) · `y` copy id · `Y` copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle · Y again = stdout path · `s` shell · `P` forward a port (TensorBoard, Jupyter …) to localhost · `c` connect host · `/` filter jobs · `f` next state preset · `o` next sort column · `O` reverse sort · `z` group by · `u` other users · `w` watch / unwatch (notify on start, end, GPU idle; marked rows too) |
 | GPUs view | `j` move down · `k` move up · `g`/`home` first row · `G`/`end` last row · `↵` owning job / task (or host) · `x` actions of the owning task · `^k` terminate the owning task · `c` connect host · `a` copy CUDA_VISIBLE_DEVICES for N free GPUs of this workstation · `o` next sort column · `O` reverse sort · `/` filter jobs (Jobs view) |
 | Job detail | `[` previous tab · `]` next tab · `o` stdout · `e` stderr · `F` follow on / off · `l` full log viewer · `L` log viewer at the failure line (cause chip) · `/` search the log (opens the log viewer) · `p` log in $PAGER · `r` refresh detail · `x` action menu · `^k` cancel / terminate · `s` shell · `c` connect host · `y` copy id · `Y` copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle · Y again = stdout path · `P` forward a port (TensorBoard, Jupyter …) to localhost · `w` watch / unwatch (notify on start, end, GPU idle) · `a` live readings: auto-refresh on / off (GPU / Procs tab) · `S` live readings: read this job's own GPUs with srun (asks first; one permanent sacct row) |
 | Job detail · GPU / Procs tab (running Slurm job) | `r` read the node now (srun asks first) and refresh the detail · `a` auto-refresh on / off (ssh: every attach_refresh while the tab is open) · `S` read this job's own GPUs with srun when ssh landed in another job (asks first) |
@@ -216,16 +315,20 @@ Every view lists its keys with `?`. The table below is generated from the same s
 | Action menu | `j` move down · `k` move up · `↵` run the action · `letter` pick the entry by its key (copy menu: Y again = stdout path) · `esc`/`q` close · `f1` help (this dialog) |
 | Help | `esc` close · `?` close · `f1` close |
 | Host error | `c` connect (log in) · `r` retry now · `t` enable / disable the host · `esc`/`q` close · `f1` help (this dialog) |
-| Notifications | `j` move down · `k` move up · `↵` open the job · `esc`/`q` close · `f1` help (this dialog) |
+| Notifications | `j` move down · `k` move up · `↵` open the job (a GPU watch: its host) · `esc`/`q` close · `f1` help (this dialog) |
 | Since you were away | `j` move down · `k` move up · `↵` open the failed job · `f` show everything that ended since then in the Jobs view · `esc`/`q` close · `f1` help (this dialog) |
+| Needs you (Fleet a) | `j` move down · `k` move up · `↵` open the job · `esc`/`q` close · `f1` help (this dialog) |
+| GPU watches | `j` move down · `k` move up · `n` new watch: N free GPUs of a type on one node · `d`/`delete` remove the selected watch · `esc`/`q` close · `f1` help (this dialog) |
 | Port forwards | `j` move down · `k` move up · `↵` copy the local URL again · `^k` cancel the forward (ssh -O cancel, local) · `esc`/`q` close · `f1` help (this dialog) |
+| Search logs (prompt) | `↵` search (in the pattern field) · `tab` move to the options: regular expression, match case · `space` toggle the option under the cursor · `esc` cancel · `f1` help (this dialog) |
+| Search logs (results) | `j` move down · `k` move up · `↵` open the log viewer at this match (esc there comes back here) · `/` edit the search and run it again · `esc`/`q` close · `f1` help (this dialog) |
 | Prompt | `↵` use this value · `esc` cancel · `f1` help (this dialog) |
 | Dialogs | `esc`/`q` close · `f1` help (this dialog) |
 | Settings | `tab`/`→` next section (Hosts → General → About) · `S-tab`/`←` previous section · `↓`/`j` move down · `↑`/`k` move up · `space`/`↵` toggle host (save + poll / remove) · change value · open · `t` test the host now (read-only probe) · `a` add an ssh target that is not in ~/.ssh/config · `p` poll a saved host this run left out (its saved settings, file unchanged) · `J`/`S-↓` move host down (card order, number keys) · `K`/`S-↑` move host up · `/` filter hosts · `e` open config.toml in $EDITOR · `?`/`f1` these keys · `esc`/`q`/`,` close |
 <!-- keymap:end -->
 
-**Mouse.** Click selects rows, cards, tabs and header chips; the `RunFleet` logo at the top left goes back to the Fleet view
-from any screen; double-click drills in; right-click opens the action menu;
+**Mouse.** Click selects rows, cards, tabs and header chips (a job row in a Fleet card or the fleet panel opens that
+job); the `RunFleet` logo at the top left goes back to the Fleet view from any screen; double-click drills in; right-click opens the action menu;
 clicking a column header sorts. To select text hold `Shift` while dragging (most terminals), or start with
 `--no-mouse`; `y` copies the id and `Y` opens the copy menu (below) without selecting. Copying uses OSC 52, which the
 terminal never acknowledges, so the toast says what was sent and shows the text for you to select if nothing arrived:
@@ -234,8 +337,8 @@ tmux set `set -g set-clipboard on` (and `set -g mouse on` for the mouse); inside
 paste buffer (`tmux load-buffer -w`). Clicking a hint at the bottom acts like its key in the view, also while the
 filter has the focus.
 
-Inside a dialog (confirm, action menu, copy menu, host error, doctor, notifications, since you were away, port
-forwards) only its own keys work, plus `F1` for a list of them; the palette, scope and refresh keys wait until it is
+Inside a dialog (confirm, action menu, copy menu, host error, doctor, notifications, since you were away, needs you,
+GPU watches, port forwards) only its own keys work, plus `F1` for a list of them; the palette, scope and refresh keys wait until it is
 closed. The help overlay searches whatever you type (`?`, `F1` or `esc` close it).
 
 ## Actions
@@ -320,6 +423,35 @@ preview (`→ you hold as many GPUs as this QOS allows per user; starts when one
 squeue has a start estimate it is shown as Slurm's backfill guess: it moves when running jobs end early or
 higher-priority jobs arrive, and `Priority`-pending jobs often have none.
 
+**Why isn't it starting? Priority evidence.** A pending job's detail shows a *Priority* box where a running job has
+its GPU box — what Slurm itself says, not a promise of a start time or a place in the queue:
+
+```
+priority  3,017 in gpu-preempt · lab 2,017
+fairshare ▕▍       ▏    3,000 / 100,000  ◀ dominates
+job size  ▕▏       ▏       15 / 1,000
+age       ▕        ▏        2 / 1,000
+share     lab  0.03 · usage 83.3% of share 100.0%
+• fairshare carries most of its priority (3,000 of 3,017): the fair-share standing of you and your account
+• fairshare 0.03: your group (lab) used much more than its share recently; it recovers with a half-life of 14 days
+• waiting raises it: age adds up to 1,000 after 7 days in the queue
+```
+
+Each factor is shown as the cluster weights it: the number is what it adds to the job's priority, after the slash
+the most it could add (`PriorityWeight…`), the bar how much of that the job gets. `share` lists your fair share per
+account (1.0 = you used little lately, near 0 = your group used far more than its share) and how your recent usage
+compares to your share. The hints say what matters: which factor dominates; that the job waits on something else
+(`held back by per-user job cap (QOS), not by priority`), is held, or will never start as submitted; how fair share
+recovers (the cluster's half-life, or "usage does not decay; it is reset monthly"); that waiting itself raises the
+priority. On a cluster that does not rank by priority (every weight 0, or `priority/basic`) the box says so instead:
+pending jobs start in submit order as resources free up, and backfill can start short jobs earlier. The Jobs preview
+and the compact detail (below 110×30) show one line: `prio 3,017 · fairshare dominates · fairshare 0.03 · 4m ago`.
+
+The numbers come from `sprio` (your pending jobs) and `sshare` (your user), read together at most every 10 minutes
+(hourly while the host is off screen) and only while a job of yours is pending on a cluster that ranks by priority;
+`sprio Nm ago` in the box title says how old they are, and a job submitted after the last reading says so. The
+cluster's weights come with the configuration RunFleet reads once when it connects.
+
 `LEFT` turns amber when less than 10 % of the time limit or 30 minutes are left and red below 2 % or 5 minutes (for short jobs the minute floors shrink to a quarter / a tenth of the limit, so a 30-minute job is not amber all along). `↻2`
 before a name means Slurm restarted the job twice (requeue, preemption); `◉` marks a job you watch.
 
@@ -365,6 +497,22 @@ session; `enter` opens the job. Nothing extra runs on the clusters for this.
 `w` (Jobs view, job detail) **watches** the job under the cursor, or all marked jobs; `w` again stops. For a watched
 job RunFleet also tells you when it starts, completes or its GPUs sit idle. Watches are kept in `ui.json` and
 forgotten a week after the job is gone. A watched pending array covers its tasks.
+
+**Waiting for free GPUs.** Palette › *Watch free GPUs…* and type what you need, e.g. `2 h200 k2` (two H200 on one
+node of k2), `4x a100 k2/gpu-preempt`, `8 gpus` (any type, anywhere) or `1 mig vega` (a MIG slice). While you type
+the dialog shows how it read the text and what matches right now (`matches now: k2 n-38-01 3 free`); `enter` keeps the
+watch. RunFleet then tells you — toast, terminal notification and your `[notify] command`, like a failed job — when
+enough GPUs are free **on one node**, because a job needs them there (two nodes with two free each do not make four).
+It only uses what it already polls (`sinfo` on clusters, `nvidia-smi` on workstations), so no extra load: a host
+whose numbers are not fresh (`k2 ?` in the fleet panel) is not counted, and a watch fires only after two readings
+in a row agree, then stays quiet for at least 15 minutes and until the GPUs are taken again. GPUs that the scheduler
+has set aside for a pending job (shown as `planned`) do not count unless you add `planned`; MIG slices count only
+for a `mig` watch. Palette › *Watches* lists your watches with what each is doing (`holds on k2 (1 of 2 readings in a
+row)`, `fired 14:03`, `quiet until 14:18`); `d` removes one, `n` adds one. A watch that fired also appears in
+*Notifications* (`enter` opens the host) and, with a `◎`, in the fleet panel's *what changed*. When polling pauses
+after `idle_pause_after` (2 h) without input, the watches cannot fire: RunFleet says so once (`GPU watches paused`)
+instead of staying silent, and any key resumes. Up to 10 watches, kept in `ui.json`; "free" is what the cluster last
+reported, not a reservation, so someone may still be faster.
 
 **Since you were away.** When you start RunFleet again (or press the first key after `idle_after`, 10 minutes, without
 input), it waits until the hosts have answered and shows one note: `since 21:40: 3 failed · 12 completed · 1 timeout
@@ -434,21 +582,51 @@ a third of that. Workstations are polled every 5 s while visible. After 10 minut
 loses focus) everything polls 4× slower; after 2 hours without input polling stops until you press a key. `+`/`-`
 change the pace (floors always apply). Background polling never runs anything on compute nodes and never starts job
 steps; only the interactive `s` shell into a running Slurm job does (one `srun --overlap` step, visible in `sacct`).
-When a Slurm controller is busy (`squeue` / `sacct` / `sinfo` report `Socket timed out`, `Rate limit`, … or answer
+While one of your jobs is pending, `sprio` and `sshare` run once every 10 minutes (hourly when the host is off
+screen; never where the cluster does not rank by priority). *Search logs…* adds one round trip per host only when you
+start a search (no Slurm call; at most 1 MiB read from the end of at most 20 of your log files). When a Slurm controller is busy (`squeue` / `sacct` / `sinfo` report `Socket timed out`, `Rate limit`, … or answer
 three times slower than usual and over 5 s) RunFleet polls that cluster 2× slower per busy round, up to 8×, and speeds
 up again after a few healthy rounds; the host card and `e` say `controller busy — slowed 4×`.
 
+## Windows (preview)
+
+RunFleet runs natively on Windows 10 and 11 (install: `install.ps1`, see the README) with the built-in OpenSSH client
+(8.1 or newer; `runfleet doctor` shows the version it found) and works best in Windows Terminal. Your
+`%USERPROFILE%\.ssh\config`, keys and the Windows `ssh-agent` service are used as they are.
+
+What is different, because the Windows `ssh` has no ControlMaster (connection sharing):
+
+| | Windows (preview) | under WSL, Linux, macOS |
+|---|---|---|
+| connection | every refresh is a separate ssh login (`mux: off (Windows)` in the host screen and `runfleet doctor`); `mux` settings and ControlPath in your ssh config are ignored | one shared connection per host |
+| hosts with a key or ssh-agent | work | work |
+| hosts with Duo, password or OTP | stay at `✖ auth`: a login with `c` is only a check and does not carry over to the background probes | `c` logs in once; RunFleet reuses it |
+| port forwards (`f`) | not available | available |
+| `ssh = "local"` (this machine) | not available: run RunFleet in WSL to monitor the Windows machine's own WSL side | available |
+| `ctrl+z` | not bound (no job control); not listed in help | suspends to the shell |
+| `runfleet update`, Settings › About | prints the command (quit RunFleet, then `uv tool upgrade runfleet`): a running `runfleet.exe` cannot be replaced | updates in place |
+| background colour | not asked; dark palette unless `RUNFLEET_THEME=light` | asked from the terminal |
+
+For hosts behind Duo or a password, run RunFleet inside [WSL](https://learn.microsoft.com/windows/wsl/install) (the
+Linux install line); WSL has its own `~/.ssh`. Other Windows details: the pager is `less` when one is installed (Git
+for Windows brings one), else `more`; the editor (`e` in Settings) is `notepad` unless `EDITOR` or `VISUAL` is set
+(a name such as `code` is found on `PATH` the way the console finds it, `code.cmd` included); a
+`[notify] command` given as a string runs through `cmd.exe /c`. Host names Windows cannot use as file names (`con`,
+`nul`, `aux`, `com1`, a trailing dot) are refused in the config. To select text with the mouse while RunFleet has the
+mouse, hold `shift` while dragging (Windows Terminal), or start with `--no-mouse`.
+
 ## Files
 
-| Path | Purpose |
-|---|---|
-| `~/.config/runfleet/config.toml` | your configuration (optional); Settings (`,`) edits it, keeping your comments |
-| `~/.local/state/runfleet/cache.sqlite` | warm start: last snapshots, capabilities, job metadata (`--no-cache` to skip) |
-| `~/.local/state/runfleet/ui.json` | view, sort, filter, preset, grouping, theme, Fleet card size; watched jobs and the last visit |
-| `~/.local/state/runfleet/runfleet.log` | log (5 MB × 3); `--debug` adds `debug/` raw dumps; lines from `--demo` carry `[demo]` |
-| `~/.local/state/runfleet/bundles/` | support bundles from the copy menu (`HOST-ID.md`, secrets scrubbed) |
-| `~/.local/state/runfleet/ssh-HOST.log` | ssh's own messages when making a connection |
-| `$XDG_RUNTIME_DIR/runfleet/` | RunFleet-managed ssh master sockets, per-host instance locks |
+| Path (Linux, WSL) | Windows | Purpose |
+|---|---|---|
+| `~/.config/runfleet/config.toml` | `%APPDATA%\runfleet\config.toml` | your configuration (optional); Settings (`,`) edits it, keeping your comments |
+| `~/.local/state/runfleet/cache.sqlite` | `%LOCALAPPDATA%\runfleet\cache.sqlite` | warm start: last snapshots, capabilities, job metadata, each host's connection state (`--no-cache` to skip); `runfleet status` reads it |
+| `~/.local/state/runfleet/ui.json` | `%LOCALAPPDATA%\runfleet\ui.json` | view, sort, filter, preset, grouping, saved Jobs views, theme, Fleet card size; watched jobs, GPU watches and the last visit |
+| `~/.local/state/runfleet/runfleet.log` | `%LOCALAPPDATA%\runfleet\runfleet.log` | log (5 MB × 3); `--debug` adds `debug/` raw dumps; lines from `--demo` carry `[demo]` |
+| `~/.local/state/runfleet/bundles/` | `%LOCALAPPDATA%\runfleet\bundles\` | support bundles from the copy menu (`HOST-ID.md`, secrets scrubbed) |
+| `~/.local/state/runfleet/ssh-HOST.log` | `%LOCALAPPDATA%\runfleet\ssh-HOST.log` | ssh's own messages when making a connection |
+| `$XDG_RUNTIME_DIR/runfleet/` | `%LOCALAPPDATA%\runfleet\Cache\cm\` | RunFleet-managed ssh master sockets (none on Windows), per-host instance locks |
 
 The state directory is private (0700, files 0600) whatever your umask: it holds job names, paths and command lines.
+On Windows the folders under your profile are private to your account already.
 Two RunFleet instances polling the same host warn once about the doubled load; instances with different hosts do not.

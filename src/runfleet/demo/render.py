@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
+from runfleet.core import logsearch
 from runfleet.demo.world import (MIN_JOB_AGE_S, SimCluster, SimGPU, SimHost, SimJob, SimNode, SimProc,
                                  SimWorkstation, StepUsage, compress_ranges, expand_pattern, free_gpus, gpu_type_at,
                                  node_cpus_used, stable_hash)
@@ -47,7 +48,7 @@ SINFO_FIELDS = ["NodeList", "Partition", "StateLong", "CPUsState", "Memory", "Al
 NVIDIA_GPU_FIELDS = ["index", "uuid", "name", "utilization.gpu", "memory.used", "memory.total", "temperature.gpu",
                      "power.draw", "power.limit", "fan.speed", "pstate", "utilization.memory"]
 DETECT_TOOLS = ["squeue", "sacct", "sinfo", "scontrol", "sstat", "scancel", "sacctmgr", "nvidia-smi", "timeout",
-                "less", "stat", "ps", "pgrep", "srun", "ssh"]
+                "less", "stat", "ps", "pgrep", "srun", "ssh", "sprio", "sshare"]
 ENV_ALLOW = ("CUDA_VISIBLE_DEVICES", "VIRTUAL_ENV", "CONDA_DEFAULT_ENV", "OMP_NUM_THREADS", "WANDB_PROJECT",
              "WANDB_RUN_ID")
 
@@ -729,6 +730,48 @@ def getent_names(c: SimCluster, *, users: Sequence[str]) -> Out:
     return Out("".join(f"{u}:{known[u]},,,\n" for u in users if u in known))
 
 
+# ====================================================================================================== priority
+def _weight(c: SimCluster, factor: str) -> float:
+    try:
+        return float(c.config.get(f"PriorityWeight{factor}", "0"))
+    except ValueError:                      # "(null)" TRES weights
+        return 0.0
+
+
+def _fairshare(c: SimCluster, account: str) -> float:
+    row = next((r for r in c.shares if r[0] == account), None)
+    return float(row[5]) if row is not None else 0.5
+
+
+def sprio(c: SimCluster, now: float) -> Out:
+    """`sprio -h -u <me> -o '%i|%u|%r|%Y|%A|%B|%F|%J|%P|%Q|%T|%N'`: the user's pending jobs, one row per partition,
+    weighted as the cluster's PriorityWeight* say (age over PriorityMaxAge = 7 days, fair share from `shares`, job
+    size by CPUs, the partition's tier, QOS "normal" = 0.5); nothing when the cluster is not multifactor."""
+    if c.config.get("PriorityType") != "priority/multifactor":
+        return Out("", 1, "sprio: error: You are not running a supported priority plugin\n"
+                          f"({c.config.get('PriorityType', 'priority/basic')}).\n"
+                          "Only 'priority/multifactor' is supported.")
+    rows = []
+    for job in sorted(c.jobs.values(), key=lambda j: j.job_id):
+        if job.state != "PENDING" or job.user != c.user or job.held:
+            continue
+        for part in job.partition.split(","):
+            age = round(_weight(c, "Age") * min(1.0, max(0.0, now - job.submit) / (7 * 86400)))
+            fs = round(_weight(c, "FairShare") * _fairshare(c, job.account))
+            size = round(_weight(c, "JobSize") * min(1.0, job.cpus * job.num_nodes / 512))
+            tier = round(_weight(c, "Partition") * c.partition_tier.get(part, 0.5))
+            qos = round(_weight(c, "QOS") * (0.5 if job.qos == "normal" else 1.0))
+            total = max(1, age + fs + size + tier + qos)
+            rows.append(f"{job.job_id}|{job.user}|{part}|{total}|{age}|0|{fs}|{size}|{tier}|{qos}||0\n")
+    return Out("".join(rows) if rows else "Unable to find jobs matching user/id(s) specified\n")
+
+
+def sshare(c: SimCluster) -> Out:
+    """`sshare -h -U -u <me> -P -o Account,User,RawShares,NormShares,RawUsage,EffectvUsage,FairShare,LevelFS`."""
+    return Out("".join(f"{a}|{c.user}|{raw}|{norm}|{usage}|{eff}|{fs}|{lfs}\n"
+                       for a, raw, norm, usage, eff, fs, lfs in c.shares))
+
+
 # ====================================================================================================== capabilities
 def sinfo_version(c: SimCluster) -> Out:
     return Out(f"slurm {c.slurm_version}\n")
@@ -845,6 +888,51 @@ def log_fetch(h: SimHost, *, path: str, nbytes: int) -> Out:
     if lg is None:
         return Out("", 1, f"tail: cannot open '{path}' for reading: No such file or directory")
     return Out(lg.tail(nbytes).decode("utf-8", errors="replace"))
+
+
+def log_search(h: SimHost, *, paths: Sequence[str], pattern: str, icase: bool, max_matches: int, per_file: int,
+               budget: int) -> Out:
+    """The `log.search` script (core/logsearch.py, §4.7.1) played on the simulated files: per file `@@file I SIZE
+    START N` and grep's `LINE:OFFSET:EXCERPT` lines (`-a -n -b -o -E -m left`, `head -n left`, `cut -b 1-600`),
+    `@@err I missing`, `@@skip I matches|budget`, `@@end LEFT BUDGET`; `@@bad <message>` when grep refuses the ERE."""
+    rx = logsearch.ere_bytes(pattern, icase=icase)
+    if isinstance(rx, str):
+        return Out(f"@@bad grep: {rx}\n")
+    left, out = max_matches, []
+    for i, path in enumerate(paths, start=1):
+        if left <= 0:
+            out.append(f"@@skip {i} matches\n")
+            continue
+        if budget <= 0:
+            out.append(f"@@skip {i} budget\n")
+            continue
+        lg = h.logs.get(path)
+        if lg is None:
+            out.append(f"@@err {i} missing\n")
+            continue
+        size = lg.size
+        n = min(size, per_file, budget)
+        start = size - n
+        budget -= n
+        out.append(f"@@file {i} {size} {start} {n}\n")
+        data = lg.read_from(start)[:n]
+        lines: list[bytes] = []
+        offset, matched = 0, 0
+        for lineno, line in enumerate(data.split(b"\n"), start=1):
+            if matched >= left:
+                break
+            if line or offset < len(data):
+                found = [m for m in rx.finditer(line) if m.end() > m.start()]
+                if found:
+                    matched += 1
+                    lines += [f"{lineno}:{offset + m.start()}:".encode() + m.group(0) for m in found]
+            offset += len(line) + 1
+        lines = [ln[:logsearch.EXCERPT_BYTES] for ln in lines[:left]]
+        if lines:
+            out.append(b"\n".join(lines).decode("utf-8", errors="replace") + "\n")
+            left -= len(lines)
+    out.append(f"@@end {left} {budget}\n")
+    return Out("".join(out))
 
 
 def exitscan(h: SimHost, *, tasks: Sequence[tuple[str, Sequence[str]]], nbytes: int = 8192) -> Out:

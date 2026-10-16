@@ -3,6 +3,8 @@
 Owns the Jobs-view state (filter text, state preset, sort, grouping, marks, other users) and turns the store into
 table rows on every change: scope -> users -> preset -> filter -> sort -> grouping (§7.5, §7.6). The preview pane
 sits below the table (right of it at >= 150 columns), collapses to one line below 30 rows and hides below 20.
+A saved view (palette › View: <name>, ``ui/saved_views.py``) sets filter, preset, sort and grouping at once; the status
+line names it until any of them changes.
 """
 
 from __future__ import annotations
@@ -20,15 +22,15 @@ from textual.widgets import DataTable
 
 from runfleet.core.service import LogPeek
 from runfleet.models import ConnState, Job, JobKey, StateGroup
-from runfleet.ui import keymap, query, theme
+from runfleet.ui import keymap, query, saved_views, theme
 from runfleet.ui.query import PRESET_LABELS, SORT_LABELS, Preset, SortColumn
+from runfleet.ui.saved_views import GROUPS, SavedView
 from runfleet.ui.widgets.filter_bar import FilterBar
 from runfleet.ui.widgets.job_preview import JobPreview
 from runfleet.ui.widgets.header import FleetHeader
 from runfleet.ui.widgets.job_table import COLUMNS, ID_CAP, GroupRow, JobTable, Row, RowContext, layout
 from runfleet.util import humanize
 
-GROUPS: tuple[str, ...] = ("none", "host", "array")
 SIDE_PREVIEW_WIDTH = 150
 PREVIEW_FULL_HEIGHT = 30
 PREVIEW_MIN_HEIGHT = 20
@@ -63,6 +65,8 @@ class JobsView(Widget):
         self._dwell: Timer | None = None
         self._dwell_key: str | None = None
         self.ended_since: datetime | None = None    # digest `f`: own jobs that ended after this, preset aside (esc)
+        self.active_view: str | None = None         # saved view in effect; cleared once any part of it changes
+        self._view_basis: SavedView | None = None
 
     @property
     def rf(self) -> Any:
@@ -90,6 +94,11 @@ class JobsView(Widget):
         bar.display = bool(self.query_text)
         table = self.table
         table.sort_column, table.sort_reverse = self.sort, self.reverse
+        name = state.get("active_view")
+        views = saved_views.load_views(state)
+        stored = saved_views.find(views, name) if isinstance(name, str) else None
+        if stored is not None and views[stored] == self.current_view():
+            self.active_view, self._view_basis = stored, views[stored]
         self._apply_size()
 
     @property
@@ -198,6 +207,7 @@ class JobsView(Widget):
     def refresh_data(self) -> None:
         if not self.is_mounted:
             return
+        self._check_view()
         now = self.rf.now()
         jobs, total = self.visible_jobs()
         live = {str(j.key) for j in self.rf.store.jobs()}
@@ -228,6 +238,45 @@ class JobsView(Widget):
                 table.set_rows([table.rows_by_key[k] for k in table.order], self._row_context(self.rf.now()))
             self._update_preview()
 
+    # ------------------------------------------------------------------ saved views (§7.6)
+    def current_view(self) -> SavedView:
+        """Filter, preset, sort and grouping as they are now (what palette › Save view as… stores)."""
+        return SavedView(self.query_text, self.preset, self.sort, self.reverse, self.group)
+
+    def apply_view(self, name: str, view: SavedView) -> None:
+        """Palette › View: <name>: take over all five settings at once (the digest's `f` mode ends too)."""
+        self.query_text, self.parsed = view.filter, query.parse(view.filter)
+        bar = self.query_one(FilterBar)
+        bar.value = view.filter
+        bar.display = bool(view.filter)
+        self.preset, self.sort, self.reverse, self.group = view.preset, view.sort, view.reverse, view.group
+        self.folded.clear()
+        self.ended_since = None
+        self.active_view, self._view_basis = name, view
+        self.rf.save_ui_state(filter=view.filter, preset=view.preset, sort=view.sort, reverse=view.reverse,
+                              group=view.group, active_view=name)
+        self.refresh_data()
+        self.table.focus()
+
+    def view_saved(self, name: str) -> None:
+        """The current settings were just saved as ``name``: the status line names it from now on."""
+        self.active_view, self._view_basis = name, self.current_view()
+        self.rf.save_ui_state(active_view=name)
+        self._post_status()
+
+    def view_deleted(self, name: str) -> None:
+        if self.active_view is not None and self.active_view.casefold() == name.casefold():
+            self._drop_view()
+            self._post_status()
+
+    def _check_view(self) -> None:
+        if self.active_view is not None and (self.ended_since is not None or self.current_view() != self._view_basis):
+            self._drop_view()
+
+    def _drop_view(self) -> None:
+        self.active_view, self._view_basis = None, None
+        self.rf.save_ui_state(active_view=None)
+
     def _post_status(self) -> None:
         main = self.screen
         if hasattr(main, "update_tabs"):
@@ -244,7 +293,10 @@ class JobsView(Widget):
             out.append("  esc clears", style=theme.dim())
             return out
         if width < 100:
-            out = Text(f"{self.preset} · {sort.replace(' ', '')} · {self.shown}/{self.total}", style=theme.muted())
+            out = Text()
+            if self.active_view:
+                out.append(f"{self.active_view} · ", style=theme.accent())
+            out.append(f"{self.preset} · {sort.replace(' ', '')} · {self.shown}/{self.total}", style=theme.muted())
             if self.query_text:
                 out.append(f" · /{self.query_text}", style=theme.accent())
             return out
@@ -253,8 +305,11 @@ class JobsView(Widget):
             out = self._status_full(window, sort, compact=compact)
             if out.cell_len <= room:
                 return out
-        # still too long: keep the count and the filter visible, drop the labels
-        out = Text(f"{self.preset} · {sort} · ", style=theme.muted())
+        # still too long: keep the view name, the count and the filter visible, drop the labels
+        out = Text()
+        if self.active_view:
+            out.append(f"{self.active_view} · ", style=theme.accent())
+        out.append(f"{self.preset} · {sort} · ", style=theme.muted())
         if self.query_text:
             out.append(f"/{self.query_text} · ", style=theme.accent())
         if self.marks:
@@ -265,6 +320,10 @@ class JobsView(Widget):
     def _status_full(self, window: str, sort: str, *, compact: bool) -> Text:
         gap = "  " if compact else "   "
         out = Text()
+        if self.active_view:
+            out.append("view: ", style=theme.dim())
+            out.append(self.active_view, style=theme.accent())
+            out.append(gap)
         out.append("state: ", style=theme.dim())
         out.append(PRESET_LABELS[self.preset].format(window=window), style=theme.muted())
         out.append(f"{gap}sort: ", style=theme.dim())

@@ -18,7 +18,8 @@ from runfleet.backends.process.actions import render_script
 from tests.integration.test_signal_script import (POLITE, STUBBORN, Runner, _alive, _start_epoch, _wait_gone,
                                                   runners)
 
-pytestmark = pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs Linux /proc")
+pytestmark = [pytest.mark.posix,                  # real processes and signals
+              pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs Linux /proc")]
 __all__ = ["runners"]                                   # the fixture, re-exported for pytest
 
 

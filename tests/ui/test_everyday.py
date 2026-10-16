@@ -164,6 +164,7 @@ def test_forward_node() -> None:
 
 
 # ====================================================================================================== pilot flows
+@pytest.mark.posix                # asserts file mode 0600
 async def test_copy_menu_shell_command_and_bundle(make_app: MakeApp, monkeypatch: pytest.MonkeyPatch,
                                                   tmp_path: Path) -> None:
     app, svc = make_app()

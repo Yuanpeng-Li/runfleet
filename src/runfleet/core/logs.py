@@ -1,4 +1,4 @@
-"""[WP1] LogService: follow streams, line assembly, peek, fetch, pager argv (§4.7).
+"""[WP1] LogService: follow streams, line assembly, peek, fetch, search (§4.7.1), pager argv (§4.7).
 
 Streams yield raw blocks (`StreamHandle.chunks()`), never lines, so a multi-MB CR-only tqdm line cannot overflow a
 reader limit. `LineAssembler` turns blocks into display lines with terminal semantics: `\\n` ends a line, `\\r` restarts
@@ -14,7 +14,7 @@ import contextlib
 import logging
 import os
 import re
-import shlex
+import shutil
 import tempfile
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -23,14 +23,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from runfleet import paths
+from runfleet.core import logsearch
 from runfleet.core.clock import Clock
+from runfleet.core.logsearch import LogQuery, LogSearchResult, SearchPlan
 from runfleet.core.service import LogPeek, LogUpdate
 from runfleet.errors import RunFleetError
 from runfleet.models import Capabilities, HostError, LogRef
 from runfleet.probe import framing
 from runfleet.probe.section import ProbeScript, Section, StreamSpec
 from runfleet.transport.base import ProbeResult, StreamHandle, Transport
-from runfleet.util import shell
+from runfleet.util import platform, shell
 
 log = logging.getLogger("runfleet.core.logs")
 
@@ -143,11 +145,16 @@ def stream_note(stderr: str, path: str) -> str | None:
     return None
 
 
-def tail_spec(path: str, nbytes: int) -> StreamSpec:
-    """`log.tail` (Appendix A): initial tail and follow from one command; stdin is the remote watchdog."""
+def tail_spec(path: str, nbytes: int, start: int | None = None) -> StreamSpec:
+    """`log.tail` (Appendix A): initial tail and follow from one command; stdin is the remote watchdog. ``start``
+    (a log search hit, §4.7.1): from that absolute byte offset instead of the last ``nbytes`` (``tail -c +K``)."""
     p = shell.quote(shell.path(path))
-    cmd = f"tail -c {int(nbytes)} -F -- {p} & p=$!; cat >/dev/null; kill $p 2>/dev/null"
-    return StreamSpec("log.tail", cmd=cmd, meta={"path": path, "bytes": int(nbytes)})
+    first = f"+{int(start) + 1}" if start is not None and int(start) >= 0 else str(int(nbytes))
+    cmd = f"tail -c {first} -F -- {p} & p=$!; cat >/dev/null; kill $p 2>/dev/null"
+    meta: dict[str, object] = {"path": path, "bytes": int(nbytes)}
+    if start is not None and int(start) >= 0:
+        meta["start"] = int(start)
+    return StreamSpec("log.tail", cmd=cmd, meta=meta)
 
 
 def peek_section(path: str, nbytes: int) -> Section:
@@ -329,10 +336,11 @@ class LogService:
         self._peeks: dict[tuple[str, str], _Peeked] = {}
 
     # ------------------------------------------------------------ follow
-    async def stream(self, host: str, ref: LogRef, *, tail_bytes: int = 65536) -> StreamSession:
+    async def stream(self, host: str, ref: LogRef, *, tail_bytes: int = 65536,
+                     start: int | None = None) -> StreamSession:
         if not ref.path:
             raise RunFleetError("log path unknown")
-        spec = tail_spec(ref.path, tail_bytes)
+        spec = tail_spec(ref.path, tail_bytes, start)
         async with self._admit.setdefault(host, asyncio.Lock()):
             open_ = self._streams.setdefault(host, [])
             while open_ and len(open_) >= max(1, self._stream_limit_for(host)):
@@ -412,6 +420,24 @@ class LogService:
             f.write(r.stdout + ("\n" if r.stdout else ""))
         return Path(name)
 
+    # ------------------------------------------------------------ search (§4.7.1)
+    async def search(self, host: str, search: SearchPlan, query: LogQuery, *,
+                     max_matches: int = logsearch.MAX_MATCHES) -> LogSearchResult:
+        """One `log.search` probe over the plan's files (on demand only); never raises."""
+        problem = logsearch.pattern_problem(query)
+        if problem is not None:
+            return LogSearchResult(host, query, search, max_matches=max_matches, error=problem)
+        if not search.files:
+            return LogSearchResult(host, query, search, max_matches=max_matches)
+        section = logsearch.search_section([f.path for f in search.files], query, max_matches=max_matches)
+        try:
+            res = await self._probe(host, framing.make_script([section], "log"))
+        except Exception as e:             # a search problem is a line in the results, never an app error
+            return LogSearchResult(host, query, search, max_matches=max_matches, error=str(e)[:120] or "failed")
+        if res.error is not None:
+            return LogSearchResult(host, query, search, max_matches=max_matches, error=res.error.summary)
+        return logsearch.parse(host, query, search, res.sections[logsearch.SECTION], max_matches=max_matches)
+
     # ------------------------------------------------------------ pagers
     def pager_argv(self, host: str, ref: LogRef) -> list[str] | None:
         caps = self._caps_for(host)
@@ -421,9 +447,14 @@ class LogService:
         return self._transport_for(host).interactive_argv(cmd)
 
     def local_pager_argv(self, path: Path | None = None) -> list[str]:
-        spec = self._pager or os.environ.get("PAGER") or "less -R +G"
+        """general.pager, else $PAGER, else `less -R +G`; Windows: `less` when installed (Git for Windows, scoop),
+        else `more`, and the setting is split with Windows rules (backslashes are path separators)."""
+        default = ["less", "-R", "+G"]
+        if platform.IS_WINDOWS and shutil.which("less") is None:
+            default = ["more"]
+        spec = self._pager or os.environ.get("PAGER")
         try:
-            argv = shlex.split(spec)
+            argv = platform.split_command(spec) if spec else default
         except ValueError:
-            argv = ["less", "-R", "+G"]
-        return [*(argv or ["less", "-R", "+G"]), str(path if path is not None else paths.log_file())]
+            argv = default
+        return [*(argv or default), str(path if path is not None else paths.log_file())]

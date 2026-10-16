@@ -43,12 +43,14 @@ def _run_smoke(tmp_path: Path, bin_dir: Path, *args: str) -> subprocess.Complete
     return subprocess.run(["bash", str(SMOKE), *args], capture_output=True, text=True, env=env, timeout=60)
 
 
+@pytest.mark.posix                                 # bash with fake ssh / runfleet shell scripts
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 def test_smoke_script_requires_explicit_approval(tmp_path: Path) -> None:
     out = _run_smoke(tmp_path, _fake_bin(tmp_path, 1))
     assert out.returncode == 2 and "--yes" in out.stderr
 
 
+@pytest.mark.posix                                 # bash with fake ssh / runfleet shell scripts
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 def test_smoke_script_counts_network_sessions_per_host(tmp_path: Path) -> None:
     bin_dir = _fake_bin(tmp_path, 1)                 # 1 per command -> 2 per host (doctor + snapshot)
@@ -65,6 +67,7 @@ COLD_MASTER = ("ssh -fN -o ControlMaster=yes -o 'ProxyCommand=ssh -T -W [%h]:%p 
                "ssh -T -o BatchMode=yes -W '[lyra.example]:22' jumpvm </dev/null")
 
 
+@pytest.mark.posix                                 # bash with fake ssh / runfleet shell scripts
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 def test_smoke_script_budgets_a_cold_managed_master_separately(tmp_path: Path) -> None:
     """m3 F4 residual: a cold lyra = master -fN + its -W hop + 3 sessions; that is within budget."""
@@ -76,6 +79,7 @@ def test_smoke_script_budgets_a_cold_managed_master_separately(tmp_path: Path) -
     assert kinds.count("master") == 1 and kinds.count("hop") == 1
 
 
+@pytest.mark.posix                                 # bash with fake ssh / runfleet shell scripts
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 def test_smoke_script_fails_on_a_second_master_or_a_stray_hop(tmp_path: Path) -> None:
     out = _run_smoke(tmp_path, _fake_bin(tmp_path, 1, COLD_MASTER + COLD_MASTER[:1]), "--yes", "lyra")
@@ -85,6 +89,7 @@ def test_smoke_script_fails_on_a_second_master_or_a_stray_hop(tmp_path: Path) ->
     assert out.returncode == 1 and "jump hops without a master login" in out.stdout
 
 
+@pytest.mark.posix                                 # bash with fake ssh / runfleet shell scripts
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 def test_smoke_script_fails_over_budget(tmp_path: Path) -> None:
     out = _run_smoke(tmp_path, _fake_bin(tmp_path, 2), "--yes", "--max-calls", "3", "k2")

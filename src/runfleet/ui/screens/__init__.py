@@ -18,6 +18,14 @@ if TYPE_CHECKING:
     from runfleet.ui.app import RunFleetApp
 
 
+def dialog_list_room(screen_height: int, cap: int, reserved: int = 0) -> int:
+    """Rows a list in a dialog may take: at most ``cap``, and no more than the dialog has (``.dialog``: 90 % of the
+    screen, less its border and ``reserved`` rows of other content). A fixed ``max-height`` alone lets a short terminal
+    clip the list's bottom rows inside the box, so the highlighted row could sit there unseen (OptionList scrolls only
+    within its own height)."""
+    return max(3, min(cap, screen_height * 9 // 10 - 2 - reserved))
+
+
 class FleetScreen(Screen[Any]):
     """Base class for RunFleet's full screens (not modals)."""
 

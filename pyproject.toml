@@ -53,7 +53,10 @@ exclude = ["__pycache__", "*.py[cod]", "/docs/research", "/docs/integration-note
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-markers = ["real: touches real hosts over ssh; never run in CI (opt-in with -m real)"]
+markers = [
+  "real: touches real hosts over ssh; never run in CI (opt-in with -m real)",
+  "posix: needs a POSIX system (sh, process groups, file modes, ptys); skipped on native Windows",
+]
 
 [tool.ruff]
 line-length = 110

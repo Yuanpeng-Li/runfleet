@@ -1,7 +1,7 @@
 """Alert history (palette › Notifications) and the "since you were away" digest (``D``), §7.14.
 
-Both are dialogs over the current screen; ``enter`` on a row closes the dialog and opens that job. The digest also
-offers ``f``: the Jobs view filtered to the jobs that ended since the last visit.
+Both are dialogs over the current screen; ``enter`` on a row closes the dialog and opens that job (a GPU watch that
+fired: its host). The digest also offers ``f``: the Jobs view filtered to the jobs that ended since the last visit.
 """
 
 from __future__ import annotations
@@ -19,9 +19,12 @@ from textual.widgets.option_list import Option
 from runfleet.core.events import JobEvent, count_line, end_summary, end_word, ended_at
 from runfleet.models import Job, JobKey, StateGroup
 from runfleet.ui import keymap, render, theme
+from runfleet.ui.gpu_watch import WatchEvent
 from runfleet.ui.notify import since_label
+from runfleet.ui.screens import dialog_list_room
 from runfleet.util import humanize
 
+LIST_ROWS = 20                   # = the lists' max-height (less on a short terminal: dialog_list_room)
 _DIALOG_CSS = """
     #notify-box, #digest-box { width: 104; }
     #notify-list, #notify-list:focus, #digest-list, #digest-list:focus {
@@ -37,8 +40,8 @@ def _parse_key(text: str | None) -> JobKey | None:
     return JobKey(host, jid)
 
 
-def event_text(event: JobEvent, width: int = 96) -> Text:
-    """``17:23  k2:2332861 orb-swp--train… failed: exit 1`` (red for bad news)."""
+def event_text(event: JobEvent | WatchEvent, width: int = 96) -> Text:
+    """``17:23  k2:2332861 orb-swp--train… failed: exit 1`` (red for bad news; a GPU watch: ``free GPUs: …``)."""
     out = Text(humanize.local_hm(event.at) + "  ", style=theme.muted())
     out.append(event.text(), style=theme.warn() if event.bad else "")
     return render.fit(out, width)
@@ -57,16 +60,16 @@ def failure_text(job: Job, width: int = 96) -> Text:
     return render.fit(out, width)
 
 
-class NotificationsScreen(ModalScreen[JobKey | None]):
-    """The session's alert history, newest first; dismisses with the job to open."""
+class NotificationsScreen(ModalScreen[JobKey | str | None]):
+    """The session's alert history, newest first; dismisses with the job to open (a host name for a GPU watch)."""
 
     BINDINGS = keymap.bindings("notifications")
     HELP_CONTEXT = "notifications"
     DEFAULT_CSS = _DIALOG_CSS
 
-    def __init__(self, events: Sequence[JobEvent]) -> None:
+    def __init__(self, events: Sequence[JobEvent | WatchEvent]) -> None:
         super().__init__()
-        self.events = list(reversed(events))
+        self.events = sorted(reversed(events), key=lambda e: e.at, reverse=True)    # equal times: newest added first
 
     def compose(self) -> ComposeResult:
         box = Vertical(id="notify-box", classes="dialog")
@@ -78,15 +81,25 @@ class NotificationsScreen(ModalScreen[JobKey | None]):
                                  id="notify-list")
             else:
                 yield Static(Text("nothing yet: failures, timeouts, restarts and jobs low on time appear here "
-                                  "(w watches a job for its start and end too)", style=theme.dim()))
+                                  "(w watches a job for its start and end too; palette › Watch free GPUs… adds "
+                                  "free GPUs)", style=theme.dim()))
 
     def on_mount(self) -> None:
         found = self.query(OptionList)
         if found:
             found.first().focus()
+        self._fit()
+
+    def on_resize(self) -> None:
+        self._fit()
+
+    def _fit(self) -> None:
+        for menu in self.query(OptionList):
+            menu.styles.max_height = dialog_list_room(self.app.size.height, LIST_ROWS)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(self.events[int(event.option.id or 0)].key)
+        picked = self.events[int(event.option.id or 0)]
+        self.dismiss(picked.key if isinstance(picked, JobEvent) else picked.host or None)
 
     def action_cursor_down(self) -> None:
         for menu in self.query(OptionList):
@@ -144,6 +157,17 @@ class DigestScreen(ModalScreen[tuple[str, JobKey | None] | None]):
         found = self.query(OptionList)
         if found:
             found.first().focus()
+        self._fit()
+
+    def on_resize(self) -> None:
+        self._fit()
+
+    def _fit(self) -> None:
+        """The header and the "failures (n)" lines sit above the list inside the same dialog."""
+        head = digest_header(self.since, self.jobs, self.hosts, self.now)
+        reserved = len(head.plain.splitlines()) + 2
+        for menu in self.query(OptionList):
+            menu.styles.max_height = dialog_list_room(self.app.size.height, LIST_ROWS, reserved)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(("open", _parse_key(event.option.id)))

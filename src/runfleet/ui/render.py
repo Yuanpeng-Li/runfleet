@@ -6,11 +6,13 @@ inputs (rendered as a dash or an empty bar, never as 0).
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from rich.text import Text
 
-from runfleet.models import GPU, ConnState, ErrorKind, HostStatus, JobState, PartitionSummary
+from runfleet.models import (GPU, ConnState, ErrorKind, FairShare, HostStatus, JobState, PartitionSummary,
+                             PendingPriority)
 from runfleet.ui import theme
 from runfleet.util import humanize
 
@@ -293,3 +295,61 @@ def free_gpus(p: PartitionSummary, *, sep: str = "/") -> Text:
         out.append(f" ({p.gpus_free_planned} planned)", style=theme.dim())
     return out
 
+
+# ---------------------------------------------------------------- pending priority (§5.2.10)
+PRIORITY_LABELS = {"age": "age", "assoc": "assoc", "fairshare": "fairshare", "jobsize": "job size",
+                   "partition": "partition", "qos": "QOS", "tres": "TRES", "nice": "nice"}
+FAIRSHARE_LOW = 0.25             # the collector's hint thresholds (backends/slurm/priority.py), for colour only
+FAIRSHARE_HIGH = 0.75
+
+
+def prio_num(value: float) -> str:
+    return f"{value:,.0f}" if abs(value) >= 10 or value == int(value) else f"{value:.2f}"
+
+
+def share_bar(fraction: float | None, width: int) -> Text:
+    """A neutral ``▕███  ▏`` of ``width`` cells: how much of a factor's weight a pending job gets."""
+    if fraction is None:
+        return gpu_bar(None, width)
+    inner = max(0, width - 2)
+    body = _fill(fraction * 100, inner)
+    filled = body.rstrip(" ")
+    out = Text(BAR_LEFT, style=theme.dim())
+    out.append(filled, style=f"{theme.accent()} {theme.track()}".strip())
+    out.append(" " * (inner - len(filled)), style=theme.track())
+    out.append(BAR_RIGHT, style=theme.dim())
+    return out
+
+
+def job_share(p: PendingPriority, account: str | None) -> FairShare | None:
+    """The sshare row of the job's account (the collector puts it first), else the only one."""
+    return next((s for s in p.fairshare if s.account == account), None) or (
+        p.fairshare[0] if len(p.fairshare) == 1 else None)
+
+
+def fairshare_style(value: float | None) -> str:
+    if value is None:
+        return theme.dim()
+    return theme.warn() if value < FAIRSHARE_LOW else theme.ok() if value >= FAIRSHARE_HIGH else ""
+
+
+def priority_summary(p: PendingPriority, account: str | None, now: datetime) -> Text:
+    """One line for the Jobs preview and the compact job detail: ``prio 3,017 · fairshare dominates · fairshare 0.03
+    · 4m ago`` — evidence, never a start time or a queue position."""
+    out = Text("prio ", style=theme.label())
+    if not p.ranked:
+        out.append("not ranked here: submit order as resources free up (+ backfill)", style=theme.muted())
+        return out
+    if p.priority is None:
+        out.append("not read yet (sprio runs at most every 10 min)", style=theme.dim())
+    else:
+        out.append(prio_num(p.priority), style="bold")
+        if p.dominant:
+            out.append(f" · {PRIORITY_LABELS.get(p.dominant, p.dominant)} dominates", style=theme.muted())
+    share = job_share(p, account)
+    if share is not None and share.fairshare is not None:
+        out.append(" · fairshare ", style=theme.muted())
+        out.append(f"{share.fairshare:.2f}", style=fairshare_style(share.fairshare))
+    if p.sampled_at is not None:
+        out.append(f" · {humanize.ago(p.sampled_at, now)}", style=theme.dim())
+    return out

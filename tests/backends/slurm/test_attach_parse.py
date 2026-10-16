@@ -50,6 +50,7 @@ def test_idx_list(text: str, want: tuple[int, ...] | None) -> None:
     assert pa.parse_idx_list(text) == want
 
 
+@pytest.mark.posix                # runs sed
 def test_scope_sed_of_the_node_script_finds_both_layouts() -> None:
     """The node.cg script's own sed expression, run for real on the k2/vega and lyra cgroup lines."""
     expr = "s#^0::(/system\\.slice/[^/]*slurmstepd\\.scope)(/.*)?$#\\1#p"

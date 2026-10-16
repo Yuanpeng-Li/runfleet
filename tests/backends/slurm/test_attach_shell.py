@@ -22,7 +22,8 @@ from tests.backends.slurm.test_attach_parse import HEALTHY, STUCK
 from tests.backends.slurm.test_attach import collector_with, make_job
 from tests.integration.harness import MockEnv, run_script, shells
 
-pytestmark = pytest.mark.skipif(not Path("/sys/fs/cgroup").is_dir(), reason="needs Linux /sys/fs/cgroup")
+pytestmark = [pytest.mark.posix,                  # real shells and cgroup files
+              pytest.mark.skipif(not Path("/sys/fs/cgroup").is_dir(), reason="needs Linux /sys/fs/cgroup")]
 
 UUID0 = "GPU-11111111-2222-3333-4444-555555555555"
 UUID1 = "GPU-66666666-7777-8888-9999-000000000000"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import stat
 import tomllib
 from pathlib import Path
@@ -13,6 +14,12 @@ import tomlkit
 from runfleet import configedit as ce
 from runfleet.config import HostConfig, dump_hosts_toml, parse_config
 from runfleet.errors import ConfigError
+from tests.conftest import is_root
+
+
+def _left(d: Path) -> list[str]:
+    """Files in `d`; Windows refuses to unlink the open `.config.toml.lock`, so it stays there (harmless)."""
+    return sorted(p.name for p in d.iterdir() if not (sys.platform == "win32" and p.name == ".config.toml.lock"))
 
 GOLDEN = Path(__file__).parent / "golden" / "configedit"
 INPUT = (GOLDEN / "input.toml").read_text(encoding="utf-8")
@@ -145,6 +152,7 @@ def test_minimal_tables_only(tmp_path: Path) -> None:
     assert next(h for h in f.hosts() if h.name == "z").slurm.poll_jobs == 20      # [defaults.slurm] applies
 
 
+@pytest.mark.posix                # umask and file modes
 def test_new_file_starts_from_the_commented_template(tmp_path: Path) -> None:
     path = tmp_path / "sub" / "config.toml"
     f = ce.ConfigFile(path)
@@ -181,7 +189,7 @@ def test_invalid_toml_is_never_overwritten(tmp_path: Path) -> None:
         with pytest.raises(ConfigError, match="invalid TOML"):
             op()
     assert f.path.read_text() == broken and f.path.stat().st_mtime_ns == mtime
-    assert [p.name for p in tmp_path.iterdir()] == ["config.toml"]
+    assert _left(tmp_path) == ["config.toml"]
 
 
 def test_an_edit_that_would_not_validate_is_not_written(tmp_path: Path) -> None:
@@ -201,6 +209,7 @@ def test_split_or_inline_host_lists_are_refused(tmp_path: Path) -> None:
         _cfg(tmp_path / "b.toml", inline).add_hosts([HostConfig("x", "x")])
 
 
+@pytest.mark.posix                # file modes
 def test_atomic_write_keeps_mode_and_follows_symlinks(tmp_path: Path) -> None:
     real = tmp_path / "dotfiles" / "runfleet.toml"
     real.parent.mkdir()
@@ -224,7 +233,7 @@ def test_a_failed_rename_leaves_the_original_and_no_temp_file(tmp_path: Path, mo
     with pytest.raises(ConfigError, match="cannot write: No space left on device"):     # an error, not a crash
         f.remove_host("k2")
     assert f.path.read_text() == INPUT
-    assert [p.name for p in tmp_path.iterdir()] == ["config.toml"]
+    assert _left(tmp_path) == ["config.toml"]
 
 
 def test_every_golden_file_still_loads() -> None:
@@ -298,7 +307,8 @@ def test_a_removed_table_can_be_restored_whole(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------- write failures and concurrent writers
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.posix                              # directory modes
+@pytest.mark.skipif(is_root(), reason="root ignores directory permissions")
 def test_an_unwritable_directory_is_a_config_error(tmp_path: Path) -> None:
     ro = tmp_path / "dotfiles"
     ro.mkdir()
@@ -315,6 +325,7 @@ def test_an_unwritable_directory_is_a_config_error(tmp_path: Path) -> None:
         ro.chmod(0o755)
 
 
+@pytest.mark.posix                # holds the lock with fcntl.flock
 def test_a_held_lock_waits_then_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import fcntl
 
@@ -346,7 +357,7 @@ def test_concurrent_processes_never_lose_an_edit(tmp_path: Path) -> None:
     names = _names(path)
     assert len(names) == 3 + 32 and {f"h{n}x{i}" for n in range(4) for i in range(8)} <= set(names)
     assert "# vega: slow cold logins (GSSAPI)" in path.read_text()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["config.toml"]
+    assert _left(tmp_path) == ["config.toml"]
 
 
 def test_a_lock_that_cannot_be_taken_in_a_writable_directory_is_an_error(tmp_path: Path) -> None:

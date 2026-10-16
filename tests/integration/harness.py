@@ -19,7 +19,7 @@ from runfleet.probe.section import ProbeScript, Section, SectionResult
 from tests.conftest import REPO_ROOT, SAMPLES_DIR
 
 MOCKBIN = REPO_ROOT / "tests" / "mockbin"
-SLURM_MOCKS = ("squeue", "sacct", "scontrol", "sinfo", "sstat", "sacctmgr", "scancel")
+SLURM_MOCKS = ("squeue", "sacct", "scontrol", "sinfo", "sstat", "sacctmgr", "scancel", "sprio", "sshare")
 # System tools the probes and mocks use. Tests run with PATH = mocks + links to just these, so a real `squeue` or
 # `nvidia-smi` on the dev box can never leak into a test.
 SYSTEM_TOOLS = ("sh", "dash", "bash", "env", "awk", "grep", "cut", "tr", "sed", "date", "id", "hostname", "mktemp",

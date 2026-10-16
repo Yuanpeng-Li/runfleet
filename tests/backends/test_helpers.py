@@ -6,7 +6,7 @@ import shutil
 
 import pytest
 
-from tests.conftest import _argv_of, _spawns_real_ssh, frame, meta, sample, sample_path
+from tests.conftest import _argv_of, _spawns_real_ssh, _ssh_stem, frame, meta, sample, sample_path
 
 
 def test_sample_is_byte_exact() -> None:
@@ -54,6 +54,14 @@ def test_no_ssh_guard_policy(tmp_path: object) -> None:
     assert not _spawns_real_ssh(["ssh", "-G", "k2"], None, None)
     assert not _spawns_real_ssh(["sh", "-s"], None, None)
     assert not _spawns_real_ssh(["ssh", "k2"], None, {"PATH": "/nonexistent"})
+    real = shutil.which("ssh")
+    assert real is not None and _spawns_real_ssh([real, "k2"], None, None)
+
+
+def test_no_ssh_guard_knows_windows_names() -> None:
+    assert _ssh_stem("ssh") == _ssh_stem("ssh.exe") == _ssh_stem(r"C:\Windows\System32\OpenSSH\SSH.EXE") == "ssh"
+    assert _ssh_stem("C:/Program Files/Git/usr/bin/ssh.exe") == "ssh"
+    assert _ssh_stem("sshd") == "sshd" and _ssh_stem("/usr/bin/ssh-agent") == "ssh-agent"
 
 
 def test_gpu_idle_run_breaks_across_a_telemetry_gap() -> None:

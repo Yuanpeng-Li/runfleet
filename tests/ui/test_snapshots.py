@@ -14,7 +14,16 @@ import pytest
 from runfleet.core.clock import ManualClock
 from runfleet.models import JobKey
 from runfleet.ui.app import RunFleetApp
+from runfleet.util import platform
 from tests.ui.fakes import T0, FakeService
+
+
+@pytest.fixture(autouse=True)
+def _posix_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests pin the POSIX behaviour (pure UI/CLI logic, valid on any OS); the Windows branches are tested in
+    test_windows_cli.py / test_windows_ui.py / tests/unit/test_platform.py."""
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)
+
 
 BIG = (120, 35)
 SMALL = (80, 24)

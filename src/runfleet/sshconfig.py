@@ -5,12 +5,12 @@ from __future__ import annotations
 import glob
 import logging
 import os
-import shlex
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from runfleet.errors import RunFleetError
+from runfleet.util import platform
 
 log = logging.getLogger("runfleet.sshconfig")
 
@@ -43,7 +43,7 @@ def _tokens(line: str) -> list[str]:
     if sep and " " not in key.strip() and "\t" not in key.strip():
         stripped = f"{key.strip()} {rest.strip()}"
     try:
-        return shlex.split(stripped, comments=True)
+        return platform.split_command(stripped, comments=True)    # Windows: backslashes in paths stay
     except ValueError:
         return stripped.split()
 

@@ -12,7 +12,16 @@ import pytest
 from runfleet import __version__, update
 from runfleet.ui.app import RunFleetApp
 from runfleet.ui.screens.settings import SettingsPanel, SettingsScreen
+from runfleet.util import platform
 from tests.ui.fakes import FakeService
+
+
+@pytest.fixture(autouse=True)
+def _posix_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests pin the POSIX behaviour (pure UI/CLI logic, valid on any OS); the Windows branches are tested in
+    test_windows_cli.py / test_windows_ui.py / tests/unit/test_platform.py."""
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)
+
 
 BIG = (120, 35)
 T0 = datetime(2026, 10, 15, 9, 0, tzinfo=UTC)
@@ -124,3 +133,22 @@ async def test_demo_never_asks_github(clock: Any, checks: Checks) -> None:
         app.open_update()
         await settle(pilot)
         assert checks.calls == [] and "demo — no network" in panel(app)
+
+
+async def test_windows_version_row_shows_the_manual_steps(clock: Any, checks: Checks,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows (P1): the running runfleet.exe cannot be replaced, so ↵ never arms an update that quits."""
+    monkeypatch.setattr(platform, "IS_WINDOWS", True)
+    app, _svc = app_for(clock, check=False)
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        app.open_update()
+        await settle(pilot)
+        assert checks.calls == [True]
+        text = panel(app)
+        assert "9.0.0: quit RunFleet (q), then run uv tool upgrade runfleet" in text
+        assert "how to update" in text and "↵ again" not in text
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, SettingsScreen) and "↵ again" not in panel(app)
+    assert app.return_code != update.RESTART_CODE

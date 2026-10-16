@@ -9,17 +9,19 @@ import os
 import tomllib
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from runfleet import status
 from runfleet.config import FleetConfig, GeneralSettings, HostConfig
 from runfleet.core.cache import Cache
 from runfleet.core.clock import ManualClock
 from runfleet.core.service import FleetService
 from runfleet.errors import ActionError, ConfigError, RunFleetError
-from runfleet.models import (ConnState, ErrorKind, HostError, HostSnapshot, JobKey, LogRef, Visibility, to_json)
+from runfleet.models import (ConnState, ErrorKind, HostError, HostSnapshot, HostStatus, JobKey, LogRef, Visibility,
+                             to_json)
 from runfleet.transport.base import Transport
 from runfleet.transport.fake import FakeStream, FakeTransport, result
 from runfleet.transport.local import LocalTransport
@@ -425,7 +427,7 @@ async def test_shell_and_pager_argv(world: Callable[..., World]) -> None:
     assert w.svc.shell_argv("k2", JobKey("k2", "101")) == ["fake-ssh", "-t", "k2", "cd /w/101 && exec $SHELL -l"]
     assert w.svc.pager_argv("k2", LogRef("stdout", "/w/101.out")) == ["fake-ssh", "-t", "k2",
                                                                        "less -R +G -- /w/101.out"]
-    assert w.svc.local_pager_argv(Path("/tmp/x"))[-1] == "/tmp/x"
+    assert w.svc.local_pager_argv(Path("/tmp/x"))[-1] == str(Path("/tmp/x"))
 
 
 # ---------------------------------------------------------------- snapshot (`runfleet snapshot --json`)
@@ -481,6 +483,7 @@ async def test_collect_once_timeout(world: Callable[..., World]) -> None:
     assert w.status("k2").state is ConnState.UNREACHABLE and "timed out" in w.status("k2").error.summary
 
 
+@pytest.mark.posix                # LocalTransport runs sh
 async def test_snapshot_of_the_local_host_with_real_sh() -> None:
     """`runfleet snapshot --json local`: FleetService + LocalTransport, real /bin/sh, stub collectors."""
     clock = ManualClock(CLOCK_START)
@@ -500,6 +503,7 @@ async def test_snapshot_of_the_local_host_with_real_sh() -> None:
     assert isinstance(make_transport(host), LocalTransport)
 
 
+@pytest.mark.posix                # LocalTransport runs sh
 async def test_snapshot_local_with_wp2_backends_if_available() -> None:
     """The same path with the real WP2 detection/collectors (skipped until they are implemented)."""
     from runfleet.core.poller import BackendHooks
@@ -542,6 +546,33 @@ async def test_warm_start_from_cache(tmp_path: Path, world: Callable[..., World]
     await w.svc.stop()
     again = Cache(tmp_path / "cache.sqlite").load_snapshots()
     assert set(again["k2"].jobs) == {"101", "102"}
+
+
+async def test_connection_states_reach_the_cache_for_runfleet_status(tmp_path: Path,
+                                                                     world: Callable[..., World]) -> None:
+    """`runfleet status` shows `lynx:auth` from the cache: the service writes each host's state when it changes
+    (never NEW / CONNECTING, and not again while it stays the same)."""
+    cache = Cache(tmp_path / "cache.sqlite")
+    written: list[str] = []
+    put = cache.put_status
+
+    def record(host: str, st: HostStatus, at: datetime) -> None:
+        written.append(f"{host}:{st.state.value}")
+        put(host, st, at)
+    cache.put_status = record  # type: ignore[method-assign]
+    w = world(K2, cache=cache)
+    w.transports["k2"].prepare_errors.append(HostError(ErrorKind.AUTH, "authentication needed"))
+    await w.svc.start()
+    await settle()
+    assert w.status("k2").state is ConnState.NEEDS_AUTH
+    await cache.flush()
+    rows = status.read_cache(tmp_path / "cache.sqlite")
+    assert rows.status["k2"][1:] == ("needs_auth", "auth", "authentication needed")
+    await w.svc.after_connect("k2", 0)
+    await run_for(w.clock, 20)
+    await cache.flush()
+    assert status.read_cache(tmp_path / "cache.sqlite").status["k2"][1:] == ("ok", None, None)
+    assert written == ["k2:needs_auth", "k2:ok"]
 
 
 async def test_second_instance_notice(tmp_path: Path) -> None:
@@ -642,6 +673,7 @@ async def test_doctor_with_fake_transport(world: Callable[..., World]) -> None:
     assert rep2.checks[-1].name == "master" and rep2.checks[-1].ok is False
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_doctor_with_openssh_and_fake_ssh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from tests.unit.test_openssh import FAKE_SSH, G_LYRA
 

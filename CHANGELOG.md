@@ -5,6 +5,65 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Open what needs you from the Fleet view**: a click on a job row of a roomy Fleet card, or on a row of the fleet
+  panel's *what changed*, opens that job (a click elsewhere on a card still selects it). `a` opens *Needs you*: every
+  failure of the last 4 h, running job with a warning or low on time, pending job that will never start or is held,
+  and older failure across the fleet, most urgent first, with host, job id, full name and why; `enter` opens the job.
+  It works in the compact cards and the narrow table too and polls nothing new.
+- **`runfleet status [--short | --json] [HOST …]`** for shell prompts and tmux status bars: your running, pending and
+  failed jobs across the fleet, the hosts that need you and how old the data is, e.g. `R4 PD2 F1 · lynx:auth · 3m`
+  (`14m stale` past 10 minutes). It only reads RunFleet's cache — no ssh, no writes, about 70 ms — prints `no data`
+  (exit 1) when there is none, and has a per-host table by default and a `runfleet.status/1` JSON document. The user
+  guide has tmux, zsh and starship snippets. The cache now also keeps each host's connection state for it.
+- **Watch for free GPUs**: palette › *Watch free GPUs…*, type e.g. `2 h200 k2`, `4x a100 k2/gpu-preempt` or `1 mig
+  vega`, and RunFleet notifies you (toast, terminal notification, `[notify] command`) when that many GPUs are free
+  **on one node**. It uses only what it already polls, counts only fresh readings (never a `host ?`), fires after two
+  readings in a row agree, then rests at least 15 minutes and until the GPUs are taken again. Backfill-planned GPUs
+  count only with `planned`, MIG slices only with `mig`. While you type it shows what matches right now; palette ›
+  *Watches* lists what each watch is doing and removes one (`d`). Firings appear in *Notifications* and the fleet
+  panel; when polling pauses after a long idle time the watches say so instead of going silent. Up to 10, kept in
+  `ui.json`.
+- **Saved Jobs views**: palette › *Save view as…* names the Jobs view's filter, state preset, sort and grouping;
+  *View: \<name\>* switches to the Jobs view and applies all of it at once, *Delete view: \<name\>* forgets it.
+  The status line shows `view: <name>` until you change any part of it. Up to 20 views, names up to 24 characters
+  (letters, digits, space, `. _ -`), kept in `ui.json`; entries RunFleet cannot read are skipped.
+- **Why isn't my job starting? — priority evidence**: a pending Slurm job's detail now shows a *Priority* box in place
+  of the empty GPU box: its priority as Slurm computes it, each factor (age, fair share, job size, partition, QOS,
+  TRES, association) against the most the cluster lets it add, which one dominates, your fair share per account
+  (usage vs share) and plain hints such as "fairshare 0.03: your group used much more than its share recently; it
+  recovers with a half-life of 14 days" or "held back by per-user job cap (QOS), not by priority". The Jobs preview and
+  the compact detail show one line (`prio 3,017 · fairshare dominates · fairshare 0.03 · 4m ago`). On a cluster that
+  does not rank by priority (every weight 0, or `priority/basic`) it says so — submit order plus backfill — instead
+  of a row of zeros. It is evidence, not a promised start time or queue position. Cost: `sprio` and `sshare` (your
+  own jobs and user only) in one round trip at most every 10 minutes (hourly when the host is off screen), only while
+  a job of yours is pending on a cluster that ranks by priority; the priority settings come with the existing
+  `scontrol show config` detection (cached capabilities are re-detected once).
+- **Search logs across your recent jobs**: palette › *Search logs…* (or `ctrl+f` in the Jobs view) finds text in the
+  logs of your own jobs that run or ended within the recent window, on the hosts in scope — literal by default, a
+  regular expression (`grep -E`) or case-sensitive on request. The results list each match per job and file
+  (stdout / stderr) with the matched text highlighted, and say exactly what was read: files, KiB, and every cap that
+  applied. `enter` opens the log viewer right at that line — anchored to the search's byte offset, so it is the same
+  line however much the job wrote since — and `esc` comes back to the results; `/` edits the search. It runs only when
+  you ask, one read-only probe per host: at most 20 log files per host, the last 256 KiB of each, 1 MiB read and 200
+  matches in all, 30 s at most; paths and the pattern are quoted, nothing is globbed or walked, and a regular
+  expression whose `{n,m}` counts grep would expand into gigabytes of memory on the login node is refused up front.
+- **Windows (preview)**: RunFleet now runs natively on Windows 10/11 with the built-in OpenSSH client (8.1 or newer),
+  best in Windows Terminal. Install in PowerShell with
+  `powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.ps1 | iex"`
+  (Git for Windows is a prerequisite). Files live in `%APPDATA%\runfleet` (config) and `%LOCALAPPDATA%\runfleet`
+  (cache, state, log). Preview limits, all shown by `runfleet doctor` and in the host screen: Windows `ssh` has no
+  connection sharing, so every refresh is a full login — hosts with keys or `ssh-agent` work, hosts behind Duo or a
+  password need WSL for now; no port forwards, no `ssh = "local"` host, no `ctrl+z`; `runfleet update` prints the
+  command to run after quitting RunFleet instead of replacing the running `runfleet.exe`. CI now runs the test suite
+  and a demo smoke test on Windows, and type-checks the Windows code paths on Linux.
+
+### Fixed
+- Job exit signals (`exit 138 = SIGUSR1`, "killed by SIGBUS") are named from the Linux table whatever OS RunFleet runs
+  on; on macOS some numbers were named after macOS's own signals (10 read as SIGBUS).
+- A log rotation that cannot rename `runfleet.log` (another RunFleet has it open) keeps logging instead of printing a
+  traceback over the TUI on every line.
+
 ## [0.5.0] - 2026-10-15
 
 ### Added

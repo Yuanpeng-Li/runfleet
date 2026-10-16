@@ -3,6 +3,10 @@
 Every non-interactive ssh (and the local `sh -s`) is started here: `start_new_session=True` (no controlling terminal,
 so nothing can open `/dev/tty`), stdin a pipe or `/dev/null`, `DISPLAY`/`SSH_ASKPASS` removed and
 `SSH_ASKPASS_REQUIRE=never`. Any prompt therefore fails at once instead of writing onto the TUI.
+
+Windows (`util.platform`): no console window and a process group of its own instead of a session, and stdin is
+always a pipe (closed at once when there is nothing to send: some ssh.exe builds hang on a NUL stdin); killing ends
+the whole tree with `taskkill /F /T`.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from runfleet.models import ErrorKind, HostError
 from runfleet.probe import framing
 from runfleet.probe.section import ProbeScript
 from runfleet.transport.base import ProbeResult, RunResult
+from runfleet.util import platform
 
 log = logging.getLogger("runfleet.transport.spawn")
 
@@ -68,6 +73,7 @@ async def spawn(argv: Sequence[str], *, stdin_pipe: bool, capture: bool = True,
                 env: Mapping[str, str] | None = None) -> asyncio.subprocess.Process:
     """Start `argv` in a new session with the scrubbed environment. Raises SpawnError."""
     out = asyncio.subprocess.PIPE if capture else asyncio.subprocess.DEVNULL
+    pipe_in = stdin_pipe or platform.IS_WINDOWS
     loop = asyncio.get_running_loop()
     protocol: _ExitProtocol | None = None
 
@@ -79,16 +85,18 @@ async def spawn(argv: Sequence[str], *, stdin_pipe: bool, capture: bool = True,
     try:
         transport, _ = await loop.subprocess_exec(
             factory, *argv,
-            stdin=asyncio.subprocess.PIPE if stdin_pipe else asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE if pipe_in else asyncio.subprocess.DEVNULL,
             stdout=out, stderr=out,
-            start_new_session=True,
             env=scrubbed_env(env),
+            **platform.background_spawn_kwargs(),
         )
     except OSError as e:
         raise SpawnError(f"cannot run {argv[0]}: {e.strerror or e}") from e
     assert protocol is not None
     proc = asyncio.subprocess.Process(transport, protocol, loop)
     _CHILDREN[proc] = (protocol.exited, transport)
+    if pipe_in and not stdin_pipe and proc.stdin is not None:
+        proc.stdin.close()                 # Windows: end of input, like /dev/null
     return proc
 
 
@@ -108,15 +116,10 @@ def release(proc: asyncio.subprocess.Process) -> None:
         entry[1].close()
 
 
-def _signal_group(proc: asyncio.subprocess.Process, sig: int) -> None:
-    """Signal the process group the child leads (start_new_session), e.g. ssh plus its ProxyCommand."""
-    if proc.returncode is not None:
-        return
-    try:
-        os.killpg(proc.pid, sig)
-    except (ProcessLookupError, PermissionError):
-        with contextlib.suppress(ProcessLookupError):
-            proc.send_signal(sig)
+def _signal_group(proc: asyncio.subprocess.Process, *, hard: bool) -> None:
+    """SIGTERM (`hard`: SIGKILL) to the process group the child leads (start_new_session), e.g. ssh plus its
+    ProxyCommand; on Windows the whole tree ends at once (`platform.kill_tree`)."""
+    platform.kill_tree(proc, hard=hard)
 
 
 def descendants(pid: int) -> list[int]:
@@ -125,6 +128,8 @@ def descendants(pid: int) -> list[int]:
     GNU `timeout` moves itself into its own process group, so signalling our child's group does not reach a section
     that runs under it; on the local host we therefore signal the descendants individually as well.
     """
+    if platform.IS_WINDOWS:                # no /proc ("/proc" there is a folder on the current drive); taskkill /T
+        return []
     children: dict[int, list[int]] = {}
     try:
         entries = os.listdir("/proc")
@@ -150,23 +155,36 @@ def descendants(pid: int) -> list[int]:
     return out
 
 
-def _signal_tree(proc: asyncio.subprocess.Process, sig: int, extra: list[int]) -> None:
-    _signal_group(proc, sig)
+def _signal_tree(proc: asyncio.subprocess.Process, extra: list[int], *, hard: bool) -> None:
+    _signal_group(proc, hard=hard)
+    sig = platform.KILL_SIGNAL if hard else signal.SIGTERM
     for p in extra:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(p, sig)
 
 
 async def terminate(proc: asyncio.subprocess.Process, grace: float = KILL_GRACE) -> None:
-    """SIGTERM the group (and stray descendants), SIGKILL after `grace` seconds, reap."""
+    """SIGTERM the group (and stray descendants), SIGKILL after `grace` seconds, reap.
+
+    Windows: the tree ends at once (`taskkill /F /T`, then TerminateProcess). taskkill is a process of its own and
+    takes a moment, so it runs in a worker thread: when the network drops, every probe times out together and the
+    TUI must not freeze for each of them in turn."""
     if proc.returncode is not None:
         return
+    if platform.IS_WINDOWS:
+        await asyncio.to_thread(platform.taskkill_tree, proc.pid)
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                proc.kill()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(wait_exit(proc), grace)
+        return
     tree = descendants(proc.pid)
-    _signal_tree(proc, signal.SIGTERM, tree)
+    _signal_tree(proc, tree, hard=False)
     try:
         await asyncio.wait_for(wait_exit(proc), grace)
     except TimeoutError:
-        _signal_tree(proc, signal.SIGKILL, tree + descendants(proc.pid))
+        _signal_tree(proc, tree + descendants(proc.pid), hard=True)
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(wait_exit(proc), grace)
 
@@ -255,7 +273,7 @@ async def run(argv: Sequence[str], *, timeout: float, input: bytes | None = None
     finally:
         if proc.returncode is None:          # cancelled: never leave a stray ssh behind
             # descendants too (GNU timeout runs a local section in its own group), then reap before release()
-            _signal_tree(proc, signal.SIGKILL, descendants(proc.pid))
+            _signal_tree(proc, descendants(proc.pid), hard=True)
             with contextlib.suppress(TimeoutError, asyncio.CancelledError):
                 await asyncio.shield(asyncio.wait_for(wait_exit(proc), KILL_GRACE))
         for t in tasks:

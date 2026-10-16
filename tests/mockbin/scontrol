@@ -5,7 +5,8 @@ mock_log scontrol "$@"; mock_env scontrol; mock_fail SCONTROL
 case $1 in
   show)
     case $2 in
-      config) cat "$S/slurm_config.txt"; exit 0 ;;
+      config) cat "$S/slurm_config.txt"; [ -f "$S/slurm_config_priority.txt" ] && cat "$S/slurm_config_priority.txt"
+              exit 0 ;;
       job)
         for id in "$@"; do :; done
         for f in scontrol_show_job_running_d scontrol_show_job_d; do

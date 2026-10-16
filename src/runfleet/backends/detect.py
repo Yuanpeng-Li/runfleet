@@ -17,7 +17,8 @@ from runfleet.probe.section import Section, SectionResult
 log = logging.getLogger("runfleet.backends.detect")
 
 DETECT_TOOLS = ("squeue", "sacct", "sinfo", "scontrol", "sstat", "scancel", "sacctmgr", "nvidia-smi", "timeout",
-                "less", "stat", "ps", "pgrep", "srun", "ssh")   # srun/ssh: Attach's login-side tools (§7.16)
+                "less", "stat", "ps", "pgrep", "srun", "ssh",   # srun/ssh: Attach's login-side tools (§7.16)
+                "sprio", "sshare")                              # pending priority evidence (§5.2.10)
 
 ID_CMD = ("printf 'user=%s\\nuid=%s\\nhost=%s\\ntz=%s\\nepoch=%s\\n' \"$(id -un)\" \"$(id -u)\" \"$(hostname)\" "
           "\"$(date +%z)\" \"$(date +%s)\"")

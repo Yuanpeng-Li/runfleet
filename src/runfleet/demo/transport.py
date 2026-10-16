@@ -146,6 +146,11 @@ def _h_names(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
     return c if isinstance(c, Out) else render.getent_names(c, users=meta_list(s.meta, "users"))
 
 
+def _h_sprio(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
+    c = _cluster(h, "sprio")
+    return c if isinstance(c, Out) else render.sprio(c, now)
+
+
 def _h_slurm_act(verb: str) -> Handler:
     def handler(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
         c = _cluster(h, "scancel" if verb == "cancel" else "scontrol")
@@ -225,6 +230,13 @@ def _h_fetch(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
     return render.log_fetch(h, path=_meta_str(s.meta, "path", ""), nbytes=_meta_int(s.meta, "bytes", 4 << 20))
 
 
+def _h_search(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
+    m = s.meta
+    return render.log_search(h, paths=meta_list(m, "paths"), pattern=_meta_str(m, "pattern", ""),
+                             icase=bool(m.get("icase", True)), max_matches=_meta_int(m, "max_matches", 200),
+                             per_file=_meta_int(m, "per_file", 262144), budget=_meta_int(m, "budget", 1 << 20))
+
+
 def _h_attach_node(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
     c = _cluster(h, "ssh" if s.meta.get("mode") == "ssh" else "srun")
     return c if isinstance(c, Out) else render.attach_node(c, now, s.meta)
@@ -272,6 +284,8 @@ HANDLERS: dict[str, Handler] = {
     "slurm.sinfo": _h_sinfo,
     "slurm.occupants": _h_occupants,
     "slurm.names": _h_names,
+    "slurm.sprio": _h_sprio,
+    "slurm.sshare": _simple(render.sshare, "sshare"),
     "slurm.act.cancel": _h_slurm_act("cancel"),
     "slurm.act.hold": _h_slurm_act("hold"),
     "slurm.act.release": _h_slurm_act("release"),
@@ -286,6 +300,7 @@ HANDLERS: dict[str, Handler] = {
     "process.detail": _h_detail,
     "log.peek": _h_peek,
     "log.fetch": _h_fetch,
+    "log.search": _h_search,
     "slurm.attach.audit": _h_attach_audit,
 }
 
@@ -515,6 +530,7 @@ class DemoStream:
         await self._t._latency()
         path = _meta_str(self._spec.meta, "path", "")
         nbytes = _meta_int(self._spec.meta, "bytes", 65536)
+        start = _meta_int(self._spec.meta, "start", -1)         # `tail -c +K`: from an absolute offset (a search hit)
         sim = self._t._sim()
         assert sim is not None
         world.sync()
@@ -524,7 +540,7 @@ class DemoStream:
             self._stderr += f"tail: cannot open '{path}' for reading: No such file or directory\n"
         else:
             offset = lg.size
-            for block in _blocks(lg.tail(nbytes)):
+            for block in _blocks(lg.read_from(start) if start >= 0 else lg.tail(nbytes)):
                 yield block
         while not self._closed.is_set():
             try:

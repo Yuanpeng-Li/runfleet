@@ -20,6 +20,7 @@ from runfleet.models import Capabilities, ErrorKind, LogRef
 from runfleet.probe.section import ProbeScript
 from runfleet.transport.base import ProbeResult
 from runfleet.transport.fake import FakeStream, FakeTransport
+from runfleet.util import platform
 from tests.conftest import CLOCK_START
 
 CAPS = Capabilities(remote_user="me", uid=1, login_host="l", tz_offset=timedelta(0), clock_skew=timedelta(0),
@@ -194,6 +195,7 @@ def test_parse_peek_errors_and_tail() -> None:
     assert many.lines == tuple(f"l{i}" for i in range(12, 20))
 
 
+@pytest.mark.posix                # file mode 0600
 async def test_fetch_writes_private_temp_file() -> None:
     t = FakeTransport("k2")
     t.set_result("log.fetch", "a\nb")
@@ -213,6 +215,7 @@ async def test_fetch_writes_private_temp_file() -> None:
 
 
 def test_pager_argvs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)       # the POSIX behaviour (Windows: test_windows_*.py)
     t = FakeTransport("k2")
     svc = make_service(t, ManualClock(CLOCK_START))
     assert svc.pager_argv("k2", LogRef("stdout", "/w/a b.out")) == ["fake-ssh", "-t", "k2",
@@ -222,9 +225,9 @@ def test_pager_argvs(monkeypatch: pytest.MonkeyPatch) -> None:
                        probe=Probe(t), caps_for=lambda h: None)
     assert nolss.pager_argv("k2", LogRef("stdout", "/w/x")) is None
     monkeypatch.setenv("PAGER", "most -s")
-    assert svc.local_pager_argv(Path("/tmp/x.log")) == ["most", "-s", "/tmp/x.log"]
+    assert svc.local_pager_argv(Path("/tmp/x.log")) == ["most", "-s", str(Path("/tmp/x.log"))]
     monkeypatch.delenv("PAGER")
-    assert svc.local_pager_argv(Path("/tmp/x.log")) == ["less", "-R", "+G", "/tmp/x.log"]
+    assert svc.local_pager_argv(Path("/tmp/x.log")) == ["less", "-R", "+G", str(Path("/tmp/x.log"))]
     assert make_service(t, ManualClock(CLOCK_START), pager="bat --paging=always").local_pager_argv()[:2] == \
         ["bat", "--paging=always"]
     assert svc.local_pager_argv()[-1].endswith("runfleet.log")

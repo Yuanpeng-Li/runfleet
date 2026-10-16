@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +45,7 @@ from runfleet.config import NOTIFY_EVENTS, HostConfig
 from runfleet.errors import ConfigError, RunFleetError
 from runfleet.models import ConnState, DetectReport, StateGroup
 from runfleet.ui import keymap, theme
+from runfleet.util import platform
 
 SECTIONS: tuple[tuple[str, str], ...] = (("hosts", "Hosts"), ("general", "General"), ("about", "About"))
 PANEL_W, PANEL_H = 76, 22          # herdr's popup size; shrinks to the terminal (width - 4, height - 2)
@@ -59,26 +59,26 @@ def _click(action: str) -> Style:
 
 
 def display_path(path: Path | None) -> str:
-    if path is None:
-        return ""
-    try:
-        return "~/" + str(path.relative_to(Path.home()))
-    except ValueError:
-        return str(path)
+    from runfleet import paths
+
+    return "" if path is None else paths.display_path(path)
 
 
 def host_name_for(alias: str) -> str:
-    """Config name for an ssh target (`me@box` -> `me_box`), like ad-hoc hosts on the command line."""
-    return _NAME_SUB.sub("_", alias) or "host"
+    """Config name for an ssh target (`me@box` -> `me_box`), like ad-hoc hosts on the command line (a name Windows
+    cannot use as a file name gets a `_`)."""
+    return platform.safe_file_name(_NAME_SUB.sub("_", alias) or "host")
 
 
 def editor_argv(path: Path) -> list[str]:
-    spec = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    """`$VISUAL`, `$EDITOR`, else `vi` (Windows: `notepad`)."""
+    default = "notepad" if platform.IS_WINDOWS else "vi"
+    spec = os.environ.get("VISUAL") or os.environ.get("EDITOR") or default
     try:
-        argv = shlex.split(spec)
+        argv = platform.split_command(spec)
     except ValueError:
-        argv = ["vi"]
-    return [*(argv or ["vi"]), str(path)]
+        argv = [default]
+    return [*(argv or [default]), str(path)]
 
 
 # ======================================================================================= rows
@@ -620,8 +620,11 @@ class SettingsScreen(ModalScreen[None]):
             return
         from runfleet import update
 
-        self.confirm = _UPDATE
         manual = update.detect_install().manual
+        if platform.IS_WINDOWS:          # the running runfleet.exe cannot be replaced: by hand, after quitting
+            self._say(f"{status.latest}: quit RunFleet (q), then run {manual}", theme.warn())
+            return
+        self.confirm = _UPDATE
         self._say(f"↵ again: quit, update to {status.latest} ({manual}) and start again · esc: not now", theme.warn())
 
     def update_changed(self, answer: Any) -> None:
@@ -630,7 +633,8 @@ class SettingsScreen(ModalScreen[None]):
             self._asked = False
             if answer.available:
                 self._version_enter() if self._open_update else self._say(
-                    f"RunFleet {answer.latest} is available — ↵ updates and restarts", theme.ok())
+                    f"RunFleet {answer.latest} is available — ↵ " + ("shows how to update" if platform.IS_WINDOWS
+                                                                     else "updates and restarts"), theme.ok())
             elif answer.error is not None:
                 self._error(f"cannot ask GitHub: {answer.error}")
             else:
@@ -856,7 +860,8 @@ class SettingsScreen(ModalScreen[None]):
         if key == "version":
             status = self.rf.update_status
             return (" ↵ update now " if self.confirm == _UPDATE else
-                    " ↵ update " if status is not None and status.available else " ↵ check ")
+                    (" ↵ how " if platform.IS_WINDOWS else " ↵ update ") if status is not None and status.available
+                    else " ↵ check ")
         if key == "theme":
             return " ↵ change "
         return " ↵ open " if key in _ABOUT_ACTIONS else ""
@@ -1028,7 +1033,7 @@ class SettingsScreen(ModalScreen[None]):
         if status is None:
             return "↵ check for updates"
         if status.available:
-            return f"{status.latest} available · ↵ update"
+            return f"{status.latest} available · ↵ " + ("how to update" if platform.IS_WINDOWS else "update")
         if status.error is not None and status.latest is None:
             return "check failed · ↵ retry"
         return "newest · ↵ check again"

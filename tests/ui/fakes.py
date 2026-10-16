@@ -20,7 +20,9 @@ from runfleet.backends.base import ActionParam, ActionPlan, ActionSpec, Collecto
 from runfleet.config import (FleetConfig, GeneralSettings, HostConfig, NotifySettings, SlurmSettings,
                              UISettings)
 from runfleet.core.clock import ManualClock
+from runfleet.core import logsearch
 from runfleet.core.forwards import PortForward
+from runfleet.core.logsearch import LogQuery, LogSearchResult
 from runfleet.core.service import LogPeek, LogUpdate
 from runfleet.core.store import ChangeSet, FleetStore, HostState
 from runfleet.errors import ActionError, AttachBlocked, AttachConsentRequired, RunFleetError
@@ -30,6 +32,7 @@ from runfleet.models import (
     HostStatus, Job, JobDetail, JobGpuUsage, JobKey, JobKind, JobLive, JobState, JobStep, LogRef, Node, NodeAlloc,
     NodeInspect, NodeJob, PartitionSummary, Proc, ResourceAlloc, SectionStatus, StateGroup, Visibility,
 )
+from runfleet.probe.section import SectionOutcome, SectionResult
 from runfleet.util.efficiency import efficiency
 from runfleet.util.efficiency import lines as efficiency_lines
 
@@ -607,6 +610,10 @@ class FakeService:
         self.last_activity = self.clock.monotonic()
         self.peeks: list[tuple[str, str | None]] = []
         self.logs: dict[str, list[str]] = {}
+        self.stream_starts: list[int | None] = []          # stream_log(start=…) per stream, in order
+        self.missing_logs: set[str] = set()                 # log.search answers "@@err I missing" for these
+        self.search_errors: dict[str, str] = {}             # host -> search_logs error (no probe)
+        self.search_gate: asyncio.Event | None = None       # set: search_logs waits for it (a slow host)
         self.already_connected: set[str] = set()
         # Settings (FleetAPI runtime host management): in memory like --demo unless a test sets config_path
         self.config_path: Path | None = None
@@ -709,11 +716,50 @@ class FakeService:
         self.peeks.append((host, ref.path))
         return LogPeek(tuple(self.log_lines(ref.path)[-8:]), ref.size, ref.mtime, self.clock.now())
 
-    async def stream_log(self, host: str, ref: LogRef, *, tail_bytes: int = 65536) -> FakeLogSession:
-        session = FakeLogSession(host, ref, self.log_lines(ref.path))
+    def log_bytes(self, path: str | None) -> bytes:
+        """The fake file behind ``log_lines``: the lines, each ended by a newline."""
+        return "".join(line + "\n" for line in self.log_lines(path)).encode("utf-8")
+
+    async def stream_log(self, host: str, ref: LogRef, *, tail_bytes: int = 65536,
+                         start: int | None = None) -> FakeLogSession:
+        lines: Sequence[str] = self.log_lines(ref.path)
+        if start is not None:                      # `tail -c +K`: from that byte on (the first line may be partial)
+            lines = self.log_bytes(ref.path)[start:].decode("utf-8", errors="replace").split("\n")[:-1]
+        session = FakeLogSession(host, ref, lines)
         self.sessions.append(session)
+        self.stream_starts.append(start)
         self._record("stream_log", host, ref.stream, ref.path)
         return session
+
+    async def search_logs(self, host: str, query: LogQuery, *, max_matches: int = 200) -> LogSearchResult:
+        """The real plan and parser over the fake files, through the demo's play of the `log.search` script."""
+        from types import SimpleNamespace
+
+        from runfleet.demo import render
+        from runfleet.demo.world import SimLog
+
+        self._record("search_logs", host, query, max_matches)
+        if self.search_gate is not None:
+            await self.search_gate.wait()
+        search = logsearch.plan(host, self.store.jobs([host]), self.clock.now(), self.config.general.recent_window)
+        if host in self.search_errors:
+            return LogSearchResult(host, query, search, max_matches=max_matches, error=self.search_errors[host])
+        problem = logsearch.pattern_problem(query)
+        if problem is not None or not search.files:
+            return LogSearchResult(host, query, search, max_matches=max_matches, error=problem)
+        section = logsearch.search_section([f.path for f in search.files], query, max_matches=max_matches)
+        files: dict[str, SimLog] = {}
+        for f in search.files:
+            if f.path not in self.missing_logs:
+                files[f.path] = SimLog(f.path, 0.0)
+                files[f.path].write(self.log_bytes(f.path).decode("utf-8"), 0.0)
+        m = section.meta
+        out = render.log_search(SimpleNamespace(logs=files), paths=list(m["paths"]), pattern=str(m["pattern"]),
+                                icase=bool(m["icase"]), max_matches=int(m["max_matches"]),
+                                per_file=int(m["per_file"]), budget=int(m["budget"]))
+        res = SectionResult(section.name, SectionOutcome.OK if out.stdout else SectionOutcome.EMPTY, out.rc,
+                            out.stdout, out.stderr, 7)
+        return logsearch.parse(host, query, search, res, max_matches=max_matches)
 
     async def fetch_log(self, host: str, ref: LogRef, *, nbytes: int = 4 << 20) -> Path:
         fd, name = tempfile.mkstemp(prefix="rf-log-")

@@ -67,7 +67,7 @@ class SectionStatus:
     last_ok: datetime | None
     error: HostError | None = None
 
-DETECT_REV = 1      # bump when detection learns something new: cached capabilities of an older revision are re-detected
+DETECT_REV = 2      # bump when detection learns something new: cached capabilities of an older revision are re-detected
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +284,42 @@ class JobGpuUsage:
     note: str = ""               # "Slurm accounting · refreshed every 60 s", "GPU-level; shared GPUs count others"
 
 @dataclass(frozen=True, slots=True)
+class PriorityFactor:
+    """One term of a pending job's priority/multifactor priority (§5.2.10), as `sprio` weights it."""
+    name: Literal["age", "assoc", "fairshare", "jobsize", "partition", "qos", "tres", "nice"]
+    value: float                 # weighted contribution (sprio %A %B %F %J %P %Q %T; nice: minus the adjustment)
+    weight: float | None = None  # the cluster's PriorityWeight<Factor>: the most this factor can add; None for nice
+
+@dataclass(frozen=True, slots=True)
+class FairShare:
+    """One `sshare -U` row of the user: fair-share standing in one account (§5.2.10)."""
+    account: str
+    user: str
+    raw_shares: str | None       # "1", "parent"
+    norm_shares: float | None    # share among the siblings, 0..1
+    raw_usage: int | None        # decayed usage (TRES-seconds)
+    effective_usage: float | None    # decayed usage relative to the siblings, 0..1
+    fairshare: float | None      # the fair-share factor 0..1 (×PriorityWeightFairShare in the job's priority)
+    level_fs: float | None       # NormShares / EffectvUsage at this level (> 1: under-served); None: "inf" (no
+                                 # usage) or unknown
+
+@dataclass(frozen=True, slots=True)
+class PendingPriority:
+    """Why a pending Slurm job waits, as evidence (§5.2.10): its priority factors weighted as the cluster weights
+    them, the user's fair share and plain-language hints. Never a start time or a queue position."""
+    ranked: bool                 # False: the cluster does not rank pending jobs by priority (priority/basic, or
+                                 # priority/multifactor with every PriorityWeight* 0): submit order + backfill
+    priority: float | None = None            # sprio %Y of the job's best partition; None: not read yet
+    partition: str | None = None             # partition of that sprio row
+    factors: tuple[PriorityFactor, ...] = () # every weighted factor (weight > 0), largest contribution first
+    dominant: str | None = None              # name of the largest contribution (None: all 0 / not read)
+    others: tuple[tuple[str, float], ...] = ()   # (partition, priority) of the job's other sprio rows
+    fairshare: tuple[FairShare, ...] = ()    # the user's sshare rows; the job's account first
+    hints: tuple[str, ...] = ()              # plain language, most telling first
+    sampled_at: datetime | None = None       # when sprio was read (None: never)
+    half_life_s: float | None = None         # PriorityDecayHalfLife (0 = usage does not decay)
+
+@dataclass(frozen=True, slots=True)
 class Job:
     key: JobKey
     kind: JobKind
@@ -325,6 +361,7 @@ class Job:
     source: Literal["squeue", "sacct", "vanished", "ps", "cache", "demo"] = "squeue"
     observed_at: datetime | None = None
     raw: Mapping[str, str] = field(default_factory=dict)   # every raw field (detail "Raw" tab)
+    priority: PendingPriority | None = None  # own pending Slurm jobs: priority evidence (§5.2.10); else None
 
 # ---------- cluster ----------
 @dataclass(frozen=True, slots=True)

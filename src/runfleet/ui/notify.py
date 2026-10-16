@@ -4,7 +4,9 @@
 :class:`~runfleet.core.events.TransitionDetector`, keeps the alert history (palette › Notifications), delivers what
 ``[notify]`` selects as a toast, a terminal notification and the optional local hook, keeps the watch list and the
 last-seen time in ``ui.json``, and after a start (or the first key after ``idle_after`` without input) shows one toast
-with what ended meanwhile (``D`` opens the digest).
+with what ended meanwhile (``D`` opens the digest). It also runs the GPU availability watches (``ui.json``
+``watches``, evaluated by :mod:`runfleet.ui.gpu_watch` on the same batches): a watch that fires, or the watches pausing
+with an idle pause, is delivered the same way and kept in its own history (:attr:`Alerts.watch_events`).
 
 Terminal notifications: OSC 9 (iTerm2, WezTerm, Windows Terminal, ghostty, kitty), OSC 777 (foot, urxvt, VTE), else
 BEL; inside tmux wrapped in DCS passthrough (needs ``set -g allow-passthrough on``). They are written through the
@@ -19,7 +21,6 @@ import contextlib
 import logging
 import os
 import re
-import signal
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
@@ -29,7 +30,9 @@ from runfleet.config import NotifySettings
 from runfleet.core.events import (JobEvent, Notice, TransitionDetector, coalesce, count_line, end_word, ended_since,
                                   wanted)
 from runfleet.models import ConnState, Job, JobKey, StateGroup
-from runfleet.util import humanize
+from runfleet.ui import gpu_watch
+from runfleet.ui.gpu_watch import GpuWatch, Reading, WatchEvent
+from runfleet.util import humanize, platform
 
 if TYPE_CHECKING:
     from runfleet.ui.app import RunFleetApp
@@ -79,10 +82,15 @@ def escape_sequence(mode: TerminalMode, title: str, body: str, *, tmux: bool = F
 
 
 # ---------------------------------------------------------------- local hook (pure parts)
+WINDOWS_SHELL = "cmd.exe"            # a string hook on Windows: `cmd.exe /c <string>` (through the shell, unquoted)
+
 def hook_argv(command: Sequence[str] | str) -> list[str] | None:
-    """`[notify] command`: an argv list as given, a string through ``/bin/sh -c``; None when unset."""
+    """`[notify] command`: an argv list as given, a string through ``/bin/sh -c`` (Windows: ``cmd.exe /c``, run by
+    :func:`run_hook` through the shell so cmd.exe gets the string unquoted); None when unset."""
     if isinstance(command, str):
-        return ["/bin/sh", "-c", command] if command.strip() else None
+        if not command.strip():
+            return None
+        return [WINDOWS_SHELL, "/c", command] if platform.IS_WINDOWS else ["/bin/sh", "-c", command]
     return list(command) or None
 
 
@@ -96,14 +104,26 @@ def hook_env(notice: Notice) -> dict[str, str]:
             "RUNFLEET_STATE": e.state.name if one else "", "RUNFLEET_SUMMARY": notice.text}
 
 
+def watch_hook_env(event: WatchEvent) -> dict[str, str]:
+    """A GPU watch for the hook: ``RUNFLEET_EVENT`` ``gpu_free`` (or ``gpu_watch_paused``), ``_HOST`` the first host
+    that matched, ``_NAME`` the watch (``2× H200 on k2``), ``_SUMMARY`` the one-line text; no job or state."""
+    return {"RUNFLEET_EVENT": "gpu_free" if event.kind == "gpu_free" else "gpu_watch_paused",
+            "RUNFLEET_HOST": event.host, "RUNFLEET_JOB": "", "RUNFLEET_NAME": event.watch, "RUNFLEET_STATE": "",
+            "RUNFLEET_SUMMARY": event.text()}
+
+
 async def run_hook(argv: Sequence[str], env: Mapping[str, str], timeout: float) -> None:
     """Run the hook in its own session (no terminal), kill its tree after ``timeout``; log, never raise."""
     from runfleet.transport import spawn
 
+    streams: dict[str, Any] = {"stdin": asyncio.subprocess.DEVNULL, "stdout": asyncio.subprocess.DEVNULL,
+                               "stderr": asyncio.subprocess.PIPE, "env": {**os.environ, **env},
+                               **platform.background_spawn_kwargs()}
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE, start_new_session=True, env={**os.environ, **env})
+        if platform.IS_WINDOWS and len(argv) == 3 and argv[:2] == [WINDOWS_SHELL, "/c"]:
+            proc = await asyncio.create_subprocess_shell(argv[2], **streams)    # `%COMSPEC% /c "<string>"`
+        else:
+            proc = await asyncio.create_subprocess_exec(*platform.resolve_program(argv), **streams)
     except OSError as exc:
         log.warning("notify command %s cannot start: %s", argv[0], exc)
         return
@@ -120,7 +140,7 @@ async def run_hook(argv: Sequence[str], env: Mapping[str, str], timeout: float) 
     finally:
         if not finished:        # timed out or cancelled (RunFleet quits): the whole group, even when the shell itself
             with contextlib.suppress(ProcessLookupError, PermissionError):   # exited and left `cmd &` holding stderr
-                os.killpg(proc.pid, signal.SIGKILL)
+                platform.kill_group(proc.pid)
 
 
 # ---------------------------------------------------------------- the app-side owner
@@ -169,6 +189,11 @@ class Alerts:
         self.digest_since: datetime | None = None            # `D` shows what ended after this
         self._away: tuple[datetime, datetime | None, float] | None = None   # (since, fresh after, asked at mono)
         self._hooks = 0
+        self.gpu_watches: list[GpuWatch] = gpu_watch.load_watches(state)    # ui.json `watches`
+        self.gpu_eval = gpu_watch.Evaluator()
+        self.watch_events: deque[WatchEvent] = deque(maxlen=self.HISTORY)
+        self._gpu_memo: dict[str, tuple[Any, ...]] = {}
+        self._paused_said = False
 
     @property
     def settings(self) -> NotifySettings:
@@ -204,6 +229,10 @@ class Alerts:
             self.check_away()
         except Exception:                      # notifications must never break the store bridge
             log.exception("notification processing failed")
+        try:
+            self.check_gpu_watches()
+        except Exception:                      # neither may a GPU watch
+            log.exception("GPU watch evaluation failed")
 
     def scan(self) -> None:
         self.on_changes(())
@@ -249,6 +278,24 @@ class Alerts:
                 self.app.call_later(self.write_terminal, seq)
             if argv is not None:
                 self._start_hook(argv, hook_env(notice), settings.command_timeout)
+
+    def _deliver_watch(self, event: WatchEvent) -> None:
+        """A GPU watch fired or paused: history always; with ``[notify] enabled`` a toast, a terminal notification
+        and the hook (``watch_hook_env``). The ``[notify] events`` selection does not apply: the user asked."""
+        self.watch_events.append(event)
+        log.info("gpu watch %s: %s", event.kind, event.text())
+        settings = self.settings
+        if not settings.enabled:
+            return
+        self.app.toast(event.text(), severity="warning" if event.bad else "information", timeout=12.0)
+        mode: TerminalMode = settings.terminal if settings.terminal != "auto" else terminal_mode(os.environ)
+        title = f"RunFleet · {event.host}" if event.host else "RunFleet"
+        seq = escape_sequence(mode, title, event.text(), tmux=bool(os.environ.get("TMUX")))
+        if seq:
+            self.app.call_later(self.write_terminal, seq)
+        argv = hook_argv(settings.command)
+        if argv is not None:
+            self._start_hook(argv, watch_hook_env(event), settings.command_timeout)
 
     def write_terminal(self, seq: str) -> None:
         """Write a notification escape through the driver (the event loop, between frames; never headless)."""
@@ -323,6 +370,56 @@ class Alerts:
             seen = _parse_iso(self.watch[name])
             if seen is None or (now - seen).total_seconds() > self.WATCH_KEEP:
                 del self.watch[name]
+
+    # ------------------------------------------------------------------ GPU availability watches
+    def gpu_readings(self) -> dict[str, Reading]:
+        """Every host's current free-GPU reading (:func:`gpu_watch.readings`, the fleet panel's freshness rule)."""
+        from runfleet.ui.widgets.host_card import old_reading
+
+        now = self.now()
+        return gpu_watch.readings(self.app.store.hosts, now, old=lambda state, gpu: old_reading(state, gpu, now),
+                                  rate=getattr(self.app, "multiplier", 1.0), memo=self._gpu_memo)
+
+    def check_gpu_watches(self) -> None:
+        """Count new readings for every watch and deliver those that fire; once per idle pause, say that the watches
+        are paused with polling (a silence the user could mistake for "no GPUs")."""
+        if not self.gpu_watches:
+            self._paused_said = False
+            return
+        now = self.now()
+        paused = bool(self.app.store.idle_paused)
+        for fired in self.gpu_eval.update(self.gpu_watches, self.gpu_readings(), now, paused=paused):
+            self._deliver_watch(gpu_watch.fired_event(fired))
+        if paused and not self._paused_said:
+            self._paused_said = True
+            n = len(self.gpu_watches)
+            idle = humanize.age(self.app.service.config.general.idle_pause_after)
+            self._deliver_watch(WatchEvent(
+                "paused", now, "", "", f"polling stopped after {idle} without input, so {n} "
+                f"watch{'es' if n != 1 else ''} cannot fire — any key in RunFleet resumes"))
+        elif not paused:
+            self._paused_said = False
+
+    def gpu_watch_status(self, watch: GpuWatch) -> tuple[str, gpu_watch.Level]:
+        return self.gpu_eval.status(watch, self.gpu_readings(), self.now(), paused=bool(self.app.store.idle_paused))
+
+    def add_gpu_watch(self, watch: GpuWatch) -> str | None:
+        """Keep a new watch (ui.json) and count the current reading at once; the problem when it cannot be added."""
+        problem = gpu_watch.add_problem(self.gpu_watches, watch)
+        if problem is not None:
+            return problem
+        self.gpu_watches.append(watch)
+        self.app.save_ui_state(watches=gpu_watch.with_watch(self.app.ui_state, watch))
+        self.check_gpu_watches()
+        return None
+
+    def remove_gpu_watch(self, watch: GpuWatch) -> bool:
+        if watch not in self.gpu_watches:
+            return False
+        self.gpu_watches.remove(watch)
+        self.gpu_eval.states.pop(watch, None)
+        self.app.save_ui_state(watches=gpu_watch.without_watch(self.app.ui_state, watch))
+        return True
 
     # ------------------------------------------------------------------ since you were away
     def note_input(self, idle_s: float) -> None:

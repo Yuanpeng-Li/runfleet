@@ -108,3 +108,15 @@ rc=0 ms=31
 ## scontrol_partitions
 cmd: PARTS_CMD (groups, parent accounts, scontrol show partition -o; fields trimmed to the access/TRES subset)
 rc=0 ms=21
+
+## slurm_config_priority
+cmd: scontrol show config | grep -E '^(PriorityType|PriorityWeight[A-Za-z]*|PriorityFlags|PriorityDecayHalfLife|PriorityMaxAge|PriorityUsageResetPeriod) '
+rc=0 ms=21
+
+## sprio
+cmd: sprio -h -u "$(id -un)" -o "%i|%u|%r|%Y|%A|%B|%F|%J|%P|%Q|%T|%N"
+rc=0 ms=18
+
+## sshare
+cmd: sshare -h -U -u "$(id -un)" -P -o "Account,User,RawShares,NormShares,RawUsage,EffectvUsage,FairShare,LevelFS"
+rc=0 ms=25

@@ -65,8 +65,19 @@ revision 3 brings into scope.
 - Job **submission**, templates or resubmission (the user's own submission tooling owns that).
 - Installing anything on remote hosts, daemons, agents, Prometheus, slurmrestd.
 - Admin features (draining nodes, editing partitions), acting on other users' jobs or processes.
-- A web UI. Native Windows (works under WSL).
+- A web UI.
 - Long-term metrics storage.
+
+**Native Windows is a goal, shipped as a preview with P1 limits** (WSL remains the full-featured way on a Windows
+machine). The package imports and runs on Windows 10/11 with the built-in OpenSSH client (≥ 8.1); every local OS
+difference lives in `util/platform.py` (§3.2; a contract test keeps `fcntl`, `os.killpg`, `os.getuid`,
+`signal.SIGKILL`, `termios` out of every other module, `ui/termbg.py` excepted behind its own guards), and CI runs
+the suite on `windows-latest` (tests marked `posix` skipped) plus `mypy --platform win32` on Linux. P1 limits, all
+said in `doctor` and the UI: ssh connection sharing is forced off (§4.1), so every poll is a full login — key /
+ssh-agent hosts work, Duo or password hosts need WSL; no port forwards; no `ssh = "local"` host; no `ctrl+z`;
+`runfleet update` prints manual steps (§8.6); the terminal's background is not asked. Planned: P2, a long-lived
+`ssh.exe` session per host running a temporary `sh` agent sent on stdin (installs nothing, removes its own temp
+files), which makes Duo hosts usable; P3, port forwards over it and in-place updates.
 
 ### 1.3 v0.1 scope (polished core) vs later phases
 
@@ -154,7 +165,10 @@ exclude = ["__pycache__", "*.py[cod]", "/docs/research", "/docs/integration-note
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-markers = ["real: touches real hosts over ssh; never run in CI (opt-in with -m real)"]
+markers = [
+  "real: touches real hosts over ssh; never run in CI (opt-in with -m real)",
+  "posix: needs a POSIX system (sh, process groups, file modes, ptys); skipped on native Windows",
+]
 
 [tool.ruff]
 line-length = 110
@@ -197,6 +211,8 @@ runfleet                    # configured fleet (no config yet: prompts to import
 runfleet k2 labstation      # ad-hoc: only these ssh aliases this run (new ones are saved once they answer, §8.4)
 runfleet --demo             # synthetic fleet, no network
 ```
+Windows (preview, §1.2): `powershell -ExecutionPolicy ByPass -c "irm …/main/install.ps1 | iex"` (§8.6), or the same
+`uv tool install` line; Git for Windows and the OpenSSH Client feature are prerequisites.
 Dev loop: `uv sync`, `uv run runfleet --demo`, `uv run pytest`, `uv run textual console` + `uv run textual run --dev
 runfleet.ui.app:dev_app` for live CSS.
 
@@ -256,12 +272,15 @@ src/runfleet/
   debugdump.py           `--debug` raw probe dumps (wire format, rotated per host) under <state>/debug [WP1]
   wait.py                `runfleet wait HOST:JOBID …`: pollers for those hosts until the jobs end (§8.5)  [WP4]
   update.py              `runfleet update`, the daily update check, install detection, relaunch (§8.6)  [WP4]
+  status.py              `runfleet status`: cache-only summary for prompts / tmux, read-only sqlite (§8.5)  [WP4]
   util/
     shell.py             shlex helpers, id/pid/path validators                          [WP1]
     slurmfmt.py          Slurm durations/timestamps/memory/TRES/hostlist/state-suffix parsing  [WP2]
     humanize.py          display formatting: durations, ages, bytes, MiB→G, percentages [WP3]
     logscan.py           exit log scan (Traceback / OOM / Killed): ended tasks + "Why it ended"; cause chip, error lines [WP2]
     efficiency.py        efficiency card: time / CPU / memory / GPU used vs requested, "next time" request (§5.2.8)
+    platform.py          the only home of OS differences: IS_WINDOWS, spawn keywords, kill_tree, file locks, command
+                         splitting/display, Windows-reserved names, Linux signal names (§1.2, §4.2, §8.1)  [WP1]
   probe/
     section.py           FROZEN Section, SectionResult, SectionOutcome, ProbeScript, StreamSpec  [WP1]
     framing.py           render ProbeScript → POSIX sh; parse framed stdout → SectionResults  [WP1]
@@ -289,6 +308,7 @@ src/runfleet/
       states.py          state mapping, reason humanizer, exit explanations, hints       [WP2]
       parse_squeue.py parse_sacct.py parse_scontrol.py parse_sinfo.py parse_sstat.py     [WP2]
       parse_occupants.py every user's running jobs per node + getent names (§5.2.9)    [WP2]
+      priority.py        pending priority evidence: priority settings, sprio / sshare parsers, hints (§5.2.10)  [WP2]
       logpaths.py        %x/%j/%A/%a… expansion, WorkDir resolution, merged-stderr rules [WP2]
       actions.py         cancel / hold / release / requeue specs, plans, interpretation [WP2]
       attach.py          Attach plan/ingest, nested node script, section names + thresholds (§7.16)  [WP2]
@@ -304,7 +324,8 @@ src/runfleet/
     clock.py             FROZEN Clock protocol, RealClock, ManualClock                  [WP1]
     poller.py            HostPoller: ticks, cadence modes, backoff, lanes, MonitorView  [WP1]
     actions.py           ActionService: eligibility, plan, execute, action log          [WP1]
-    logs.py              LogService: follow streams, line assembly, peek, fetch, pager argv  [WP1]
+    logs.py              LogService: follow streams, line assembly, peek, fetch, search, pager argv  [WP1]
+    logsearch.py         cross-job log search (§4.7.1): scope, the `log.search` command, its parser, excerpts (pure)  [WP1]
     cache.py             SQLite cache (§5.5)                                            [WP1]
     doctor.py            per-host diagnostics → DoctorReport                            [WP1]
     forwards.py          port forwards: PortForward, service URLs in logs, free local port (§7.15)  [WP1]
@@ -321,10 +342,16 @@ src/runfleet/
     commands.py          command palette Provider (§7.10)                               [WP3]
     query.py             filter language (§7.6): parse + match Job → bool (pure)        [WP3]
     fleet_layout.py      roomy Fleet view (§7.4): row-height plan, ranked card lists, row templates, fleet panel data (pure)  [WP3]
+    saved_views.py       saved Jobs views (§7.6): name rules, ≤ 20 views, tolerant ui.json `views` reader/writer (pure)  [WP3]
+    gpu_watch.py         GPU availability watches (§7.14): per-node matching, readings, evaluator, prompt parser, ui.json `watches` (pure)  [WP3]
     everyday.py          copy menu + support bundle, forwards, log in to all, free GPUs (§7.15)  [WP3]
-    notify.py            Alerts: notification delivery (toast, OSC 9/777, hook), watch list, away digest (§7.14)  [WP3]
+    notify.py            Alerts: notification delivery (toast, OSC 9/777, hook), watch list, away digest, GPU watches (§7.14)  [WP3]
     screens/  main.py job_detail.py host_detail.py log_viewer.py help.py confirm.py action_menu.py host_error.py
-              settings.py forwards.py notifications.py  [WP3]
+              settings.py forwards.py notifications.py
+              attention.py ("needs you" picker of the Fleet view, `a`, §7.4)
+              save_view.py (palette › Save view as…: the name prompt, §7.6)
+              gpu_watch.py (palette › Watch free GPUs… prompt and the Watches list, §7.14)
+              log_search.py (palette › Search logs… / ^f in Jobs: the prompt and the results, §4.7.1)  [WP3]
     widgets/  header.py hintbar.py tabs.py fleet_view.py host_card.py jobs_view.py job_table.py job_preview.py
               gpus_view.py gpu_panel.py proc_table.py node_table.py log_view.py filter_bar.py
               attach_panel.py (Attach status line + live GPU rows, §7.16)
@@ -626,6 +653,36 @@ class JobGpuUsage:
     note: str = ""               # "Slurm accounting · refreshed every 60 s", "GPU-level; shared GPUs count others"
 
 @dataclass(frozen=True, slots=True)
+class PriorityFactor:            # one term of a pending job's priority/multifactor priority (§5.2.10), as sprio weights it
+    name: Literal["age", "assoc", "fairshare", "jobsize", "partition", "qos", "tres", "nice"]
+    value: float                 # weighted contribution (sprio %A %B %F %J %P %Q %T; nice: minus the adjustment)
+    weight: float | None = None  # the cluster's PriorityWeight<Factor>: the most this factor can add; None for nice
+
+@dataclass(frozen=True, slots=True)
+class FairShare:                 # one `sshare -U` row of the user: fair-share standing in one account (§5.2.10)
+    account: str
+    user: str
+    raw_shares: str | None       # "1", "parent"
+    norm_shares: float | None    # share among the siblings, 0..1
+    raw_usage: int | None        # decayed usage (TRES-seconds)
+    effective_usage: float | None
+    fairshare: float | None      # the fair-share factor 0..1 (×PriorityWeightFairShare in the job's priority)
+    level_fs: float | None       # NormShares / EffectvUsage (> 1: under-served); None: "inf" (no usage) or unknown
+
+@dataclass(frozen=True, slots=True)
+class PendingPriority:           # why a pending Slurm job waits, as evidence — never a start time or queue position
+    ranked: bool                 # False: the cluster does not rank by priority (priority/basic, or every weight 0)
+    priority: float | None = None            # sprio %Y of the job's best partition; None: not read yet
+    partition: str | None = None             # partition of that sprio row
+    factors: tuple[PriorityFactor, ...] = () # weighted factors (weight > 0), largest contribution first
+    dominant: str | None = None              # the largest contribution (None: all 0 / not read)
+    others: tuple[tuple[str, float], ...] = ()   # (partition, priority) of the job's other sprio rows
+    fairshare: tuple[FairShare, ...] = ()    # the user's sshare rows; the job's account first
+    hints: tuple[str, ...] = ()              # plain language, most telling first (≤ 4)
+    sampled_at: datetime | None = None       # when sprio was read (None: never)
+    half_life_s: float | None = None         # PriorityDecayHalfLife (0 = usage does not decay)
+
+@dataclass(frozen=True, slots=True)
 class Job:
     key: JobKey
     kind: JobKind
@@ -667,6 +724,7 @@ class Job:
     source: Literal["squeue", "sacct", "vanished", "ps", "cache", "demo"] = "squeue"
     observed_at: datetime | None = None
     raw: Mapping[str, str] = field(default_factory=dict)   # every raw field (detail "Raw" tab)
+    priority: PendingPriority | None = None  # own pending Slurm jobs: priority evidence (§5.2.10); else None
 
 # ---------- cluster ----------
 @dataclass(frozen=True, slots=True)
@@ -1119,12 +1177,14 @@ class CollectorOutput:
     caps_patch: Mapping[str, object] | None = None # Capabilities field -> value learned at runtime ({"gpu_tres": True})
     errors: tuple[HostError, ...] = ()             # section-level, classified
     followups: frozenset[str] = frozenset()        # cadence groups (event or interval) to run at the next tick
+    handled: frozenset[str] = frozenset()          # sections whose non-zero exit the collector read as an answer
+                                                   # (sprio: no job pending / not multifactor): ok, no backoff
 # Merge rule (poller, one tick): EVERY collector of the profile has ingest() called on EVERY tick, with an empty
 # results map when none of its sections ran. Outputs are applied monitors first (profile order), scheduler last; for
-# every Optional field the last non-None value wins; errors are concatenated; followups are unioned. MonitorView is
-# updated from monitor outputs only, and only from fields that are not None. A scheduler that annotates GPUs (process)
-# therefore re-annotates MonitorView.gpus from its last known tasks on every tick and returns gpus/procs whenever
-# MonitorView.gpus_at is not None, so annotations never blink on ticks without its own sections.
+# every Optional field the last non-None value wins; errors are concatenated; followups and handled are unioned.
+# MonitorView is updated from monitor outputs only, and only from fields that are not None. A scheduler that annotates
+# GPUs (process) therefore re-annotates MonitorView.gpus from its last known tasks on every tick and returns
+# gpus/procs whenever MonitorView.gpus_at is not None, so annotations never blink on ticks without its own sections.
 
 class Collector(ABC):
     name: ClassVar[str]          # "slurm" | "process" | "nvidia" | "procfs" (== section-name prefix)
@@ -1524,10 +1584,15 @@ class FleetAPI(Protocol):
     async def job_detail(self, key: JobKey, *, max_age_s: float = 30) -> JobDetail: ...
     async def peek_log(self, host: str, ref: LogRef, *, nbytes: int = 4096) -> LogPeek: ...
         # preview pane; cached per (host, path); re-fetched only if >= 15 s old and logstat size/mtime changed
-    async def stream_log(self, host: str, ref: LogRef, *, tail_bytes: int = 65536) -> LogSession: ...
-        # JobDetail log pane and LogScreen only; opening one beyond the host's stream lane closes the oldest
+    async def stream_log(self, host: str, ref: LogRef, *, tail_bytes: int = 65536,
+                         start: int | None = None) -> LogSession: ...
+        # JobDetail log pane and LogScreen only; opening one beyond the host's stream lane closes the oldest.
+        # start: from that absolute byte offset instead of the last tail_bytes (a log search hit, §4.7.1)
     async def fetch_log(self, host: str, ref: LogRef, *, nbytes: int = 4 << 20) -> Path: ...
         # last nbytes into a private temp file (local $PAGER fallback)
+    async def search_logs(self, host: str, query: LogQuery, *, max_matches: int = 200) -> LogSearchResult: ...
+        # palette › Search logs… only (never a timer): one `log.search` probe over the host's own recent log files
+        # (logsearch.plan: ≤ 20 files, last 256 KiB each, ≤ 1 MiB, ≤ max_matches excerpts); never raises (§4.7.1)
     # actions
     def actions_for(self, keys: Sequence[JobKey]) -> list[ActionSpec]: ...
         # merged per action id across hosts; disabled_reason precedence: read-only mode -> host not OK/DEGRADED
@@ -1664,6 +1729,13 @@ Mux decision (config `mux = "auto" | "user" | "managed" | "off"`, default `auto`
 | config `mux = "off"` | `off` | `-o ControlMaster=no -o ControlPath=none` (every probe is a cold login) |
 | `ssh = "local"` | `local` | no ssh (LocalTransport, §4.5) |
 
+**Windows forces `off`** (`decide()`, whatever `mux` or a ControlPath in `~/.ssh/config` say): Windows OpenSSH has no
+ControlMaster (Win32-OpenSSH#405), and a `-fN` master never backgrounds there, so `user`/`managed` would hang. The off
+plan already holds together: `connect_argv` is an `ssh … true` auth check, the poller skips `check_master`,
+`reset_master` does nothing, `forward_blocker` says why. `doctor` (mux check `off (Windows)` plus the reason as a
+warning) and the host screen (`mux: off (Windows)` and the reason) say so; the auth dialog adds that a Connect login
+does not carry over. The ProxyJump rewrite still applies, in Windows form (§4.2).
+
 `<mux_dir>` = `$XDG_RUNTIME_DIR/runfleet` if set, else `~/.cache/runfleet/cm`; mode 0700; if a rendered socket path
 would exceed 86 bytes, `/tmp/runfleet-<uid>/` (0700). (OpenSSH first binds `<path>.<16 random chars>`, 17 bytes longer,
 and macOS' `sun_path` holds 104 bytes incl. NUL: 103 − 17 = 86. "too long for Unix domain socket" in the log becomes
@@ -1707,7 +1779,13 @@ master?" in HostErrorScreen.
 spawned by `transport/spawn.py` with `start_new_session=True` (no controlling terminal, so ssh cannot open `/dev/tty`),
 `stdin=PIPE` (probe/stream) or `DEVNULL`, and an environment equal to `os.environ` minus `DISPLAY` and `SSH_ASKPASS`
 plus `SSH_ASKPASS_REQUIRE=never`. Any prompt (host key, passphrase, password, Duo) therefore fails at once and is
-classified (§9 rows 1–2).
+classified (§9 rows 1–2). On Windows (`util/platform.py`) the same spawn uses `CREATE_NO_WINDOW |
+CREATE_NEW_PROCESS_GROUP` instead of a new session, stdin is always a pipe (closed at once when there is no input:
+some ssh.exe builds hang on a NUL stdin), and killing a probe, stream or notify hook ends its tree with
+`taskkill /F /T` and TerminateProcess (P2 adds a Job Object, so a crash leaves nothing behind either); a timed-out
+probe's taskkill runs in a worker thread, so a dropped network (every probe timing out at once) never stalls the
+TUI. Programs the user names (pager, editor, a notify hook argv) are looked up on `PATH` with `PATHEXT` first
+(`platform.resolve_program`): CreateProcess only appends `.exe`, and `more` is `more.com`, `code` is `code.cmd`.
 
 **Jump rewrite.** OpenSSH builds the ProxyJump hop as `ssh -W '[%h]:%p' <jump>` and does **not** pass command-line `-o`
 options to it (verified on OpenSSH 10.0p2), so BatchMode/ConnectTimeout would not reach `jumpvm`. When `ssh -G` reports
@@ -1721,6 +1799,12 @@ where `[U@]Hn[:P]` is the last hop of the chain and `H1…Hn-1` the earlier ones
 Earlier hops of a multi-hop chain do not get the options but are still tty-less, so prompts fail and the local timeout
 bounds them. `connect` and interactive commands use the same rewrite **without** BatchMode but with `-E <log>`, so the
 hop can prompt in the real terminal yet never writes onto the TUI later. A user-defined `ProxyCommand` is left alone.
+
+**Windows form.** Windows OpenSSH starts a ProxyCommand without a shell (`posix_spawnp` → `CreateProcess`): a command
+that does not start with a quoted program is quoted whole after its first `.exe`. So on Windows the rewrite is
+`"<absolute ssh.exe>" -T … -W "[%h]:%p" Hn` — the client's absolute path (`shutil.which`) in double quotes, every
+argument quoted for the hop's C runtime (`subprocess.list2cmdline`, so an `-E` log path with spaces stays one word),
+`%` still escaped as `%%`. `mux.jump_rewrite` is pure and tested on Linux with `IS_WINDOWS` patched.
 
 OpenSSH keeps the **first** value of an option, so every command line has the same order: the structural options
 RunFleet depends on (BatchMode, ControlMaster / the literal ControlPath / ControlPersist, the jump rewrite) first, then
@@ -1884,6 +1968,8 @@ Notes that matter:
 `ssh = "local"` (or `name` ∈ {`local`, `localhost`} with no `ssh` key) → `LocalTransport`: `create_subprocess_exec("sh",
 "-s")` with the same rendered script and framing; streams are `sh -c <cmd>`; `interactive_argv(cmd)` = `[$SHELL]` or
 `["sh", "-c", cmd]`; `connect_argv()` = None. Useful for running RunFleet on a login node or for the machine it runs on.
+POSIX only: on native Windows `prepare()` / `probe()` return, and `stream()` raises, one HostError (MISSING, "local
+host monitoring needs Linux/macOS; run RunFleet in WSL") and nothing is spawned.
 
 ### 4.6 Interactive connect and shells (UI side, `ui/app.py`)
 
@@ -1938,7 +2024,79 @@ def run_external(self, argv: list[str], *, banner: str | None = None, fail_log: 
 - **Pager** (`p`): `ssh -t <alias> less -R +G -- <path>` if `less` ∈ caps.tools; else `fetch_log` (`log.fetch` =
   `tail -c 4194304 -- {path}`) into a 0600 temp file and the local `general.pager` / `$PAGER` / `less -R +G`. In v0.1
   the pager is where log search happens.
-- LogView keeps ≤ 20 000 lines (RichLog `max_lines`). Older-chunk paging, search, wrap toggle and save are **v0.2**.
+- LogView keeps ≤ 20 000 lines (RichLog `max_lines`). Older-chunk paging, wrap toggle and save are **v0.2**; `/`
+  searches the loaded buffer, and §4.7.1 searches several jobs' files on the host.
+
+#### 4.7.1 Cross-job log search (`core/logsearch.py`, `ui/screens/log_search.py`)
+On demand only — palette › **Search logs…** or `^f` in the Jobs view; never from a timer, never by the poller, and
+read-only (allowed with `--readonly`). The prompt takes a pattern, **literal by default** (`tab` reaches two options:
+regular expression = POSIX ERE via `grep -E`; match case — otherwise ASCII letters match either case, grep `-i` in the C
+locale the probe prelude exports).
+- **Scope** (`logsearch.plan`, pure): per host of the current host scope (header `ALL` or `0`/`1-9`), the user's own
+  jobs (`is_mine`) that run now (`StateGroup.ACTIVE`) or ended within `general.recent_window` (end, else observed
+  time), most recent first; their stdout and stderr paths, deduplicated (merged stderr = the stdout file; a file several
+  jobs write is searched once, listed under the newest job), validated (`util.shell.path`: absolute, one line), at
+  most **20 files per host** (`left_out` counts the rest). Hosts that are disabled, unreachable or need auth / a host
+  key are skipped and listed as such; a host with no file gets no probe.
+- **One probe per host** (purpose `log`, the on-demand lane, `_on_demand` like peek/fetch), one section `log.search`
+  (timeout 30 s, the local deadline 35 s by `framing.local_timeout`, `max_stdout` 256 000), the hosts searched in
+  parallel. The pattern goes into grep as `.{0,60}(PATTERN).{0,60}` (a literal one with every ERE special character
+  in a bracket expression, `^` escaped), so `-o` prints an excerpt of ≤ 60 bytes either side; a regex must not use
+  back-references and its parentheses must pair (else the group could be closed early), and no `{n,m}` count may exceed
+  255 nor may the counted repetitions expand past 1000 positions (`logsearch.EXPANDED_MAX`): grep expands them when it
+  compiles, so a nested `((a{1,255}){1,255}){1,255}` took over 3 GB on the login node before reading a byte (checked
+  locally, before anything runs). Exact command (paths and the
+  pattern `shlex`-quoted, nothing globbed, no recursion, no file is written):
+  ```sh
+  p='.{0,60}(PATTERN).{0,60}'; left=200; budget=1048576; i=0
+  printf 'x\n' | grep -E -e "$p" >/dev/null 2>&1
+  [ $? -lt 2 ] || { printf '@@bad %s\n' "$(printf 'x\n' | grep -E -e "$p" 2>&1 >/dev/null | head -n 1 | cut -b 1-200)"; exit 0; }
+  for f in '/path/one.out' '/path/two.err'; do
+    i=$((i + 1))
+    if [ "$left" -le 0 ]; then echo "@@skip $i matches"; continue; fi
+    if [ "$budget" -le 0 ]; then echo "@@skip $i budget"; continue; fi
+    if [ ! -e "$f" ]; then echo "@@err $i missing"; continue; fi
+    if [ ! -f "$f" ]; then echo "@@err $i notfile"; continue; fi
+    if [ ! -r "$f" ]; then echo "@@err $i denied"; continue; fi
+    s=$(stat -L -c %s -- "$f" 2>/dev/null)
+    case $s in ''|*[!0-9]*) echo "@@err $i stat"; continue;; esac
+    n=$s; [ "$n" -gt 262144 ] && n=262144; [ "$n" -gt "$budget" ] && n=$budget
+    b=$((s - n)); budget=$((budget - n))
+    echo "@@file $i $s $b $n"
+    [ "$n" -gt 0 ] || continue
+    r=$(tail -c +$((b + 1)) -- "$f" | head -c "$n" | grep -a -n -b -o -i -E -m "$left" -e "$p" | head -n "$left" | cut -b 1-600)
+    [ -z "$r" ] || { printf '%s\n' "$r"; left=$((left - $(printf '%s\n' "$r" | wc -l))); }
+  done
+  echo "@@end $left $budget"
+  ```
+  Bounds: the **last 256 KiB** of each file, **1 MiB read** per probe in all (a file the budget reaches is read short,
+  the rest are skipped and say so), **≤ 200 excerpts overall** (split evenly between the hosts searched:
+  `max_matches = 200 // hosts`, `-m` and `head -n` per file), ≤ 600 bytes per output line, `/dev/null`, FIFOs and
+  directories never opened (`-f`), the 30 s remote timeout (the 35 s local deadline also bounds a read stuck on a
+  network filesystem). Cost: one ssh round trip and no Slurm RPC per host per search; the remote work is ≤ 1 MiB of
+  sequential reads from the end of ≤ 20 files and one grep over them.
+- **Output → `LogSearchResult`** (`logsearch.parse`): per file a `FileOutcome` (searched with size / window start / bytes
+  read / hits; missing, denied, not a file, unreadable; skipped by the budget or the match cap; not reached when the
+  probe timed out or died); per hit a `LogHit`: window start `b` (absolute), grep's line number `-n` inside the window,
+  absolute offset `b + -b`, the excerpt, its **needle** (the `\r` segment holding the first match, cut characters
+  dropped) and the file size. `@@bad` (grep refused the regex) is the host's error, as are a timeout and a transport
+  failure; partial output is kept.
+- **Results** (`LogSearchScreen`): the summary says exactly what was read — `searched N files on <hosts> · M KiB ·
+  K matches`, then every cap that applied (`only the last 256 KiB of N files`, `1 MiB read limit: N cut short, N not
+  searched`, `20-file limit: N older files left out`, `match limit reached on k2 (50)`, files not reached) or `nothing
+  capped`; per-host errors and skipped hosts; unreadable files by kind. Rows are grouped per file (host, job id, name,
+  stdout / stderr / `stdout+stderr`, the path cut from the left, `N matches in the last 256K of 3.1M`), each hit one
+  row: the excerpt without ANSI codes, the match(es) highlighted, fitted to the width in cells with the first match a
+  third in (`…` where text is left out, or where the context window cut the line; wide characters never split).
+- **Open a hit** (`enter`): `LogScreen` is pushed **above** the results (`esc` comes back to them) and streams from
+  the hit's window start, `tail -c +<b+1> -F` (`FleetAPI.stream_log(start=b)`), so grep's line number is the index of
+  the line in the viewer however much the job wrote since: the anchor is the absolute offset plus the line number,
+  confirmed by the needle — never a tail-relative line number. `LogView` maps the raw line to its first wrapped
+  display line (its RichLog records where each write's display lines start), scrolls there, pauses following and
+  notes `search hit "…" · line N` (a literal pattern also primes `n`/`N`). When that line lacks the needle (the file
+  was rewritten, a `\r` update overwrote the match) the nearest line with it wins, with a note saying so; when the
+  file grew by more than 8 MiB since the search, the usual last 64 KiB are streamed and the last line with the needle
+  is used; the line never arriving within 5 s falls back the same way.
 
 ---
 
@@ -1969,9 +2127,9 @@ The **detect probe** (one round trip, purpose `detect`) holds the generic sectio
 | Section | Command | Parsed into |
 |---|---|---|
 | `detect.id` | `printf 'user=%s\nuid=%s\nhost=%s\ntz=%s\nepoch=%s\n' "$(id -un)" "$(id -u)" "$(hostname)" "$(date +%z)" "$(date +%s)"` | remote_user, uid, login_host, tz_offset, clock_skew |
-| `detect.tools` | `for c in squeue sacct sinfo scontrol sstat scancel sacctmgr nvidia-smi timeout less stat ps pgrep; do command -v "$c" >/dev/null 2>&1 && echo "$c"; done; true` | tools |
+| `detect.tools` | `for c in squeue sacct sinfo scontrol sstat scancel sacctmgr nvidia-smi timeout less stat ps pgrep srun ssh sprio sshare; do command -v "$c" >/dev/null 2>&1 && echo "$c"; done; true` | tools |
 | `slurm.version` (req `sinfo`) | `sinfo --version` | `slurm 25.05.8` → "25.05.8" |
-| `slurm.config` (req `scontrol`) | `scontrol show config \| grep -E '^(ClusterName\|AccountingStorageType\|JobAcctGatherType\|JobAcctGatherFrequency\|PreemptMode\|PrologFlags\|LaunchParameters\|MinJobAge\|PrivateData) '` | cluster_name, slurm_config, acct_gather_freq_s |
+| `slurm.config` (req `scontrol`) | `scontrol show config \| grep -E '^(ClusterName\|AccountingStorageType\|JobAcctGatherType\|JobAcctGatherFrequency\|PreemptMode\|PrologFlags\|LaunchParameters\|MinJobAge\|PrivateData\|PriorityType\|PriorityWeight[A-Za-z]*\|PriorityFlags\|PriorityDecayHalfLife\|PriorityMaxAge\|PriorityUsageResetPeriod) '` | cluster_name, slurm_config (incl. the priority settings of §5.2.10), acct_gather_freq_s |
 | `slurm.assoc` (req `sacctmgr`) | `sacctmgr -n -P show assoc where user="$(id -un)" format=Cluster,Account,Partition,QOS` | associations |
 | `slurm.parts` (req `scontrol`) | `commands.PARTS_CMD`: `groups=` (comma-separated names from the group database via `getent`, not the session's groups), `parent=cluster\|account\|parent` lines walking up from the user's accounts (account-level `sacctmgr show assoc` rows, ≤ 6 levels, `root` left out), `parents=complete` when every sacctmgr call worked and the chain ended, then `scontrol show partition -o` (a value runs to the next ` Key=`, so names with spaces stay whole) | gpu_partitions: partitions with `gres/gpu` in TRES, not `Hidden`, `RootOnly`, `INACTIVE` or `DRAIN`, whose AllowGroups holds one of your groups and where, for some account, the association of this cluster for that partition (else the one for all partitions, as Slurm picks) passes AllowAccounts/DenyAccounts with the account or a parent (the lists are hierarchical; a DenyAccounts list needs `parents=complete`) and has a QOS passing AllowQos/DenyQos (an empty QOS list passes only unrestricted partitions). No association data at all: only partitions open to every account and QOS; associations on other clusters only: none |
 | `slurm.sacctfmt` (req `sacct`) | `sacct --helpformat` | sacct_fields (enables `StdOut,StdErr` when present) |
@@ -1983,6 +2141,10 @@ The **detect probe** (one round trip, purpose `detect`) holds the generic sectio
 with `alloc.gpus > 0` count: key present → True; False only after **two distinct GPU jobs** lacked it. CPU-only jobs
 (vega `dev` partition) never change it. sstat CPU/RSS fields are used regardless of gpu_tres. Changes go out as
 `caps_patch={"gpu_tres": …}`.
+
+**Priority settings** (§5.2.10): the same `slurm.config` grep brings `PriorityType`, every `PriorityWeight*`,
+`PriorityFlags`, `PriorityDecayHalfLife`, `PriorityMaxAge` and `PriorityUsageResetPeriod` into `caps.slurm_config`
+(no extra RPC, cached with the other capabilities); `DETECT_REV` 2 re-detects capabilities cached without them.
 
 Profile selection (`backends/detect.py: choose_profile(caps, host_cfg) -> tuple[str, ...]`):
 1. `backend = "slurm"` in config, or `auto` and `squeue` ∧ `sinfo` ∈ tools → `("slurm", "procfs")` + `"nvidia"` if
@@ -2030,9 +2192,12 @@ def choose_profile(caps: Capabilities, host: HostConfig) -> tuple[str, ...]: ...
 | `slurm.nodes` (interval) | `slurm.sinfo` | 120 s / 60 s / ×5 / ×1 | partitions known: config `partitions`, else partitions of the user's jobs (live + history) ∪ non-empty association partitions ∪ `caps.gpu_partitions` (GPU partitions you may use but have not used lately, e.g. a lab's paid partition) |
 | `slurm.occupants` (interval, **focused only**) | `slurm.sinfo` + `slurm.occupants` | 30 s / 30 s / — / ×1 | the host's detail screen (or a job detail on it) is open and partitions are known; not after the squeue `-o` fallback (§5.2.9) |
 | `slurm.names` (event) | `slurm.names` | — | users in the last `slurm.occupants` reading never looked up (≤ 200 per probe) |
+| — (on demand, any host kind) | `log.search` | never on a timer: palette › Search logs… / `^f`, one probe per host | the user asked; ≤ 20 own recent log files (§4.7.1) |
+| `slurm.priority` (interval) | `slurm.sprio` + `slurm.sshare` | 600 s / 600 s / ×6 / ×1 (failure backoff up to 1 h) | ≥ 1 own job PENDING/REQUEUED and not held, `PriorityType=priority/multifactor` with some `PriorityWeight*` > 0, sprio or sshare present; `slurm.sshare` only when `PriorityWeightFairShare` > 0 (§5.2.10) |
 
 All due groups ride **one** probe per tick, and groups are only evaluated at ticks (§5.4), so a visible Slurm host
-costs 4 round trips/min (1.3 hidden); an open host detail adds nothing but two more sections every 30 s. Job detail is a separate on-demand probe (`detail_sections`: `slurm.scontrol` for
+costs 4 round trips/min (1.3 hidden); an open host detail adds nothing but two more sections every 30 s, and a pending
+job of yours two sections every 10 min (hidden: every hour). Job detail is a separate on-demand probe (`detail_sections`: `slurm.scontrol` for
 that id if older than 30 s, `slurm.steps`, `slurm.sstat` if running, `slurm.logstat`).
 
 #### 5.2.2 Exact commands (`backends/slurm/commands.py`)
@@ -2098,12 +2263,24 @@ def occupants_cmd(partitions: list[str], sep: str = SEP) -> str:
     return f"squeue -a -h -t R,CG -p {shlex.quote(','.join(partitions))} -O {shlex.quote(fmt)}"
 def names_cmd(users: list[str]) -> str:               # getent exits 2 when one user is unknown: the rest still print
     return "getent passwd " + " ".join(map(shlex.quote, users)) + " | cut -d: -f1,5; true"
+
+# pending priority evidence (§5.2.10, group slurm.priority): own jobs / own user only, nothing from data interpolated
+SPRIO_FORMAT = "%i|%u|%r|%Y|%A|%B|%F|%J|%P|%Q|%T|%N"   # id user partition priority, weighted age assoc fairshare
+                                                        # jobsize partition qos tres, nice — one row per job×partition
+SPRIO_CMD = f'sprio -h -u "$(id -un)" -o {shlex.quote(SPRIO_FORMAT)}'          # max_stdout 512 000
+SSHARE_CMD = 'sshare -h -U -u "$(id -un)" -P -o Account,User,RawShares,NormShares,RawUsage,EffectvUsage,FairShare,LevelFS'
+                                                                                # max_stdout 64 000
+
+# on-demand cross-job log search (§4.7.1; every host kind, core/logsearch.py: search_command, not a Slurm command):
+# per file  tail -c +<b+1> -- <path> | head -c <n> | grep -a -n -b -o [-i] -E -m <left> -e '.{0,60}(PAT).{0,60}'
+#           | head -n <left> | cut -b 1-600      n = min(size, 256 KiB, budget left of 1 MiB); ≤ 20 paths, ≤ 200 lines
 ```
 
 Incremental history: `since_s` = seconds since `max(last successful sacct − 300 s, now − sacct_window)`.
 Validators (`util/shell.py`): `JOBID_RE = r"^\d+(_(\d+|\[[\d,\-%]+\]))?(\.(batch|extern|\d+))?$"`, partition/user/QOS
 `^[A-Za-z0-9_.\-]+$`, paths absolute without NUL/newline. Anything else is rejected before rendering. Timeouts: squeue
-20 s, sacct 30 s, scontrol loop 15 s, sstat 15 s, logstat 10 s, sinfo 20 s, occupants 20 s, names 10 s.
+20 s, sacct 30 s, scontrol loop 15 s, sstat 15 s, logstat 10 s, sinfo 20 s, occupants 20 s, names 10 s, sprio 15 s,
+sshare 15 s, log.search 30 s (on demand only; cost per search and host: one round trip, no Slurm RPC, ≤ 1 MiB read).
 
 #### 5.2.3 Parsing rules
 - **Rows** are split on `"\n"` only (a trailing `\r` dropped) in every Slurm and ps parser: `str.splitlines()` also
@@ -2310,7 +2487,8 @@ and only where `caps.sacct_fields` lists it.
   JobHeld{User,Admin}, "launch failed requeued held", JobArrayTaskLimit, BadConstraints, InvalidAccount, InvalidQOS —
   each with a short text and one actionable line (unknown `Assoc…` / `QOS…` limits get a generic one). Never-runs (red):
   DependencyNeverSatisfied, PartitionTimeLimit, PartitionNodeLimit, QOSMaxWallDurationPerJobLimit, BadConstraints,
-  InvalidAccount, InvalidQOS. The collector copies the advice to `Job.raw["reason_advice"]` (UI must not import
+  InvalidAccount, InvalidQOS (the priority evidence behind `Priority` / `Resources`, read by its own group: §5.2.10).
+  The collector copies the advice to `Job.raw["reason_advice"]` (UI must not import
   backends; the UI's short wording lives in `ui/render._REASONS`); `explain()` for a queued job returns the advice and,
   when squeue gave one, the start estimate with its caveat ("Slurm's backfill guess — it moves when running jobs end
   early or higher-priority jobs arrive").
@@ -2343,6 +2521,51 @@ host detail is open** (`slurm.occupants` is a focused-only cadence group, §5.4)
   `next GPU frees in ≤ 2h17m` (time limits are upper bounds; a job whose split is unknown counts as holding GPUs),
   plus `as of 2m ago` once a reading is ≥ 90 s old.
   With `PrivateData=jobs` in `caps.slurm_config` the panel says only the user's jobs are listed.
+
+#### 5.2.10 Pending priority evidence (`priority.py`)
+"Why isn't my job starting?" — beyond the reason code (§5.2.8) and squeue's start estimate, RunFleet shows what Slurm
+itself says about the job's priority. **Evidence, never a promise**: no start time of its own and no queue position.
+- **Settings** (`priority.settings(caps.slurm_config)`): `PriorityType`, the weights (`PriorityWeightTRES` `(null)` → 0,
+  a per-TRES list → its sum), flags, `PriorityDecayHalfLife`, `PriorityMaxAge`, `PriorityUsageResetPeriod`, read by
+  detection (§5.1). **Ranked** = `priority/multifactor` with some weight > 0. `priority/basic`, or multifactor with every
+  weight 0 (all pending jobs have priority ~1), is **not ranked**: no remote command at all, and every own pending job
+  gets the hint "this cluster does not rank by priority: pending jobs start in submit order as resources free up
+  (backfill can start short jobs earlier)" instead of a row of zero factors. Unknown type (capabilities of an older
+  detection) → no evidence.
+- **Reading** (cadence group `slurm.priority`, §5.2.1): one probe with `slurm.sprio` (own pending jobs, one row per job ×
+  partition) and `slurm.sshare` (the user's associations; left out when the fair-share weight is 0). Due at the first
+  tick that has an own pending, not held job, then at most every 600 s (floor; ×6 when hidden; a busy controller
+  slows it like every `slurm.*` group); the group disappears when no such job is left, and its last run / backoff
+  survive, so a job submitted later waits for the floor. Failures back off (×2 per failure, up to 1 h) and keep the
+  last reading; a mostly unparsable answer is a PARSE error. sprio refusing a non-multifactor cluster ("not running a
+  supported priority plugin" — the cluster changed since detection) stops the group for the session, without an error.
+  sprio's "Unable to find jobs matching user/id(s) specified" is an empty answer, on stdout or (with a non-zero exit)
+  on stderr: the job started between squeue and sprio. Both answers are `CollectorOutput.handled`: the poller counts
+  them as ok — no error, no backoff, and a refusal does not leave the host DEGRADED by a section that never runs again.
+- **Cost**: sprio and sshare are one slurmctld RPC each (priority factors of the user's pending jobs; the association
+  tree's share info), ≤ 2 per 10 min per host while a job of yours waits, nothing otherwise — no slurmdbd query, no
+  compute node.
+- **Evidence** (`priority.evidence(job, rows, shares, settings, sampled_at) -> PendingPriority`, on `Job.priority` of own
+  PENDING/REQUEUED jobs; pure and clock-free so a job only changes with a new reading): the sprio row with the highest
+  priority (its partition; the other partitions' priorities in `others`), every factor with a weight > 0 (value =
+  weighted contribution, weight = the most it can add; a non-zero nice as a negative term), the dominant (largest)
+  factor, and the user's sshare rows with the job's account first (`LevelFS` `inf` → None). Hints, most telling first,
+  ≤ 4: held ("does not compete until released"); a never-runs reason (§5.2.8: "priority does not matter here", nothing
+  else); another blocking reason ("held back by per-user job cap (QOS), not by priority: these factors only count once
+  that clears"); the dominant factor and what it means ("fairshare carries most of its priority (3,000 of 3,017): …");
+  every factor 0 ("it starts when nothing ranked higher fits — backfill can still start it early if it is short"); not
+  in the last reading yet; fair share of the job's account below 0.25 ("fairshare 0.03: your group (lab) used much
+  more than its share recently; it recovers with a half-life of 14 days" — "you used more than your share of lab"
+  when the user's own LevelFS < 1; with `PriorityDecayHalfLife` 0: "usage does not decay on this cluster; it is reset
+  monthly", or "… is reset only by the admins" for `NONE`/`NOW`), or ≥ 0.75 (good standing / no recent usage); age
+  still growing ("waiting raises it: age adds up to 1,000 after 7 days in the queue").
+- **Display**: job detail of a pending job — the Summary's right column shows a **Priority** box in place of the GPU
+  box ("n/a — job pending"), titled `Priority · sprio 4m ago`: `priority 3,017 in gpu-preempt · lab 2,017`, one row per
+  factor (neutral bar = share of that factor's weight, `value / weight`, `◀ dominates`), `share` rows per account
+  (fair share, usage vs share, "no recent usage"), then the hints; an unranked cluster shows its hint only. The compact
+  layout (< 110×30) and the Jobs preview carry one line: `prio 3,017 · fairshare dominates · fairshare 0.03 · 4m ago`
+  (`prio not ranked here: submit order as resources free up (+ backfill)`; `prio not read yet …`). `snapshot --json`
+  carries it as `jobs[].priority` (additive; `runfleet.snapshot/1` unchanged).
 
 ### 5.3 Workstations (`backends/process/`, `backends/common/nvidia.py`, `backends/common/procfs.py`)
 
@@ -2514,9 +2737,10 @@ Default load per host (steady state, visible):
 
 | Host type | SSH round trips/min | Remote commands/min | Notes |
 |---|---|---|---|
-| Slurm login node | 4 (test-enforced: ≤ 240 per simulated hour with no wakes) | squeue 4, sstat ≤ 1, sacct 0.5, sinfo 0.5, stat 0.5, scontrol ≈ 0 ⇒ **≤ 7 controller/dbd RPCs/min** | ≈ `watch -n 15 squeue --me`; floors: squeue 10 s, sacct 60 s |
+| Slurm login node | 4 (test-enforced: ≤ 240 per simulated hour with no wakes) | squeue 4, sstat ≤ 1, sacct 0.5, sinfo 0.5, stat 0.5, scontrol ≈ 0, sprio + sshare ≤ 0.2 (only while a job of yours pends, §5.2.10) ⇒ **≤ 7 controller/dbd RPCs/min** | ≈ `watch -n 15 squeue --me`; floors: squeue 10 s, sacct 60 s, sprio/sshare 600 s |
 | Slurm, hidden | 1.3 | ÷3 | |
 | Workstation | 12 (focused 20) | nvidia-smi 2 + ps 0.5–1 + procfs 1 per tick | ≈ 0.04 CPU-core on labstation |
+| Any host, Search logs… (§4.7.1) | +1 per search the user starts (none otherwise) | `stat` + `tail`/`head`/`grep` over ≤ 20 files, ≤ 1 MiB read, no Slurm RPC | on demand only, never repeated by a timer |
 
 **Busy controller** (`ControllerBackoff` in the poller): after every tick the controller sections `slurm.squeue`,
 `slurm.sacct`, `slurm.sacct_ids` and `slurm.sinfo` are checked. Stderr matching `Socket timed out|Rate limit|
@@ -2542,7 +2766,13 @@ CREATE TABLE jobmeta     (host TEXT, job_id TEXT, job_id_raw TEXT, name TEXT, wo
                           last_state TEXT, PRIMARY KEY (host, job_id));               -- survives scontrol's MinJobAge
 CREATE TABLE ended_tasks (host TEXT, job_id TEXT, ended_at REAL, json TEXT,          -- job_id = "p<pid>-<start>"
                           PRIMARY KEY (host, job_id));
+CREATE TABLE host_status (host TEXT PRIMARY KEY, at REAL, state TEXT,                -- for `runfleet status` only
+                          error_kind TEXT, error TEXT);
 ```
+`host_status` holds each host's `ConnState` since `at` (with the error's kind and one-liner): FleetService subscribes
+to the store and queues a row when (state, error kind, error summary) changes — never NEW / CONNECTING, which are no
+observation — so the 10 s batch carries at most one row per host; nothing reads it back into the TUI. Caches of
+RunFleet ≤ 0.5.0 lack the table (`CREATE TABLE IF NOT EXISTS` adds it at the next start).
 Retention: jobmeta 30 days, ended_tasks 7 days, pruned at startup. Serialization via `models.to_json`/`from_json`.
 A failed batch write (`sqlite3.Error`: disk full, read-only filesystem) keeps the batch pending for the next flush,
 newer entries winning: ended tasks and jobmeta are queued only on change and would otherwise be lost for good.
@@ -2673,12 +2903,18 @@ added; `tests/integration/test_signal_script.py` runs the real one.
 | MainScreen › GPUs view | `widgets/gpus_view.py` | `tab` | every workstation GPU + one row per running Slurm job with GPUs |
 | JobDetailScreen | `screens/job_detail.py` | `enter`/double-click on a job, palette | tabs Summary (job + resources + GPU + log follow) / GPU (usage, per-node indices; running Slurm job: Attach live panel, §7.16) / Logs / Steps / Procs (task members; running Slurm job: Attach process list with STEP column) / Raw |
 | HostDetailScreen | `screens/host_detail.py` | `enter` on a host card/row, palette | workstation: GPUs + host + processes; cluster: partitions + nodes + my jobs + capabilities |
-| LogScreen | `screens/log_viewer.py` | `l` | full-screen log, follow, live line, stream switch |
+| LogScreen | `screens/log_viewer.py` | `l`, a log search hit | full-screen log, follow, live line, stream switch; from a hit: streamed from its window, landed on its line |
 | HelpScreen (modal) | `screens/help.py` | `?`, `F1` | contextual, filterable key list generated from `keymap.py` |
 | Command palette (modal) | Textual built-in + `ui/commands.py` Provider | `ctrl+p`, `:` | fuzzy RunFleet commands (§7.10) |
 | ConfirmScreen (modal) | `screens/confirm.py` | every action | title, targets, skipped, exact command, params |
 | ActionMenuScreen (modal) | `screens/action_menu.py` | `x`, right-click | `OptionList` of `actions_for()`, disabled ones greyed with reason; optional single-key accelerators (copy menu) |
 | HostErrorScreen (modal) | `screens/host_error.py` | `e`, click on a red chip | classified error, stderr excerpt, ssh log tail, next retry; Connect / Retry now / Disable host |
+| AttentionScreen (modal) | `screens/attention.py` | `a` in the Fleet view | "needs you": the actionable entries of every card's ranking, fleet-wide, in rank order; `enter` opens the job (§7.4) |
+| SaveViewScreen (modal) | `screens/save_view.py` | palette › Save view as… | one-line name prompt for a saved Jobs view (keymap context `prompt`); shows what is saved and why a name cannot be used (§7.6) |
+| WatchPromptScreen (modal) | `screens/gpu_watch.py` | palette › Watch free GPUs…, `n` in the Watches list | one-line prompt for a GPU availability watch (keymap context `prompt`): how the text was read, what matches now, why it cannot be saved (§7.14) |
+| WatchesScreen (modal) | `screens/gpu_watch.py` | palette › Watches | the GPU watches with what each is doing (waiting, holds 1 of 2, fired, quiet until, paused); `d` removes, `n` adds (§7.14) |
+| SearchPromptScreen (modal) | `screens/log_search.py` | palette › Search logs…, `ctrl+f` in the Jobs view, `/` in the results | pattern, regex / match-case options, what would be read per host (keymap context `search_prompt`, §4.7.1) |
+| LogSearchScreen (modal) | `screens/log_search.py` | the prompt's `enter` | what was read and every cap; matches per job file with the excerpt highlighted; `enter` pushes LogScreen above it, landed on the hit (keymap context `log_hits`, §4.7.1) |
 | SettingsScreen (modal) | `screens/settings.py` | `,`, header `⚙`, palette › Settings, start with a config without hosts | herdr-style panel: Hosts (save / remove / test / add / reorder), General, About (§7.13) |
 
 ### 7.3 Mockups (120×35 unless stated)
@@ -3130,7 +3366,8 @@ connect_timeout in the config).`
     Workstation GPU lines gain an owner column (22 cells wide, a 6-cell tag narrow): `?` (old reading), `no reading`
     (`?` narrow: neither util nor memory sampled), `mine orb.launch` / `carol sample.py` (`+N` more owners), `in use ·
     no process`, `free`.
-  - *Fleet panel* (always the whole fleet, not the scope): free GPUs now, counted once per node with
+  - *Fleet panel* (always the whole fleet, not the scope; which hosts may be counted is `fleet_layout.free_source`,
+    shared with the GPU watches of §7.14): free GPUs now, counted once per node with
     `util/slurmfmt.node_free` (an allocated node with an idle GPU counts 0; `parse_sinfo.summarize` uses the same), only
     nodes of the listed partitions, MIG slices apart per host, workstation GPUs not in use and not an old reading;
     problem/stale hosts show as `host ?`, and so does a fresh cluster whose last `slurm.sinfo` failed, is missing (nodes
@@ -3144,8 +3381,22 @@ connect_timeout in the config).`
     its generation, `6000Ada`, apart from the Turing `6000`; a `Ti` / `SUPER` suffix stays with the number and `GTX` is
     a prefix like `RTX`: `rtx2080ti` and `GeForce RTX 2080 Ti` are `2080TI`, `gtx1070` is `1070`). Then what changed (§7.14), newest first. At most half the
     panel goes to the free part. It never takes focus; arrows and enter skip it, and a click on it (or on a gap of the
-    grid) leaves the focus on the selected card (`#fleet-cards` does not focus on click); its legend rows in the help
-    overlay appear only while it is shown.
+    grid) leaves the focus on the selected card (`#fleet-cards` does not focus on click), except that a click on an
+    activity row opens that job (below); its legend rows in the help overlay appear only while it is shown.
+  - *Opening entries*. Every rendered list row and activity row keeps its `JobKey`, in step with the lines:
+    `fleet_layout.list_region` / `activity_region` return `(lines, keys)` (a folded array row keeps its first job, the
+    overflow and count lines None), `host_card.card_body` / `fleet_panel.panel_body` carry them to
+    `HostCard.row_keys` / `FleetPanel.row_keys` (T0 cards: none). A click maps its content row
+    (`Click.get_content_offset`) to that key and opens the job (`App.open_listed_job`: a toast when the store no
+    longer lists it); a click on any other line of a card selects it, a double-click opens the host, as before.
+    `a` (fleet context, any layout: roomy, compact or the table) opens `AttentionScreen`: `fleet_layout.attention`
+    merges the cards' cached rankings (`FleetView._ranked`, also used at T0 and in table mode), whole fleet, keeping
+    only rows that need the user — tier 0 fresh failures, 1 running with a warn/red hint or low on time (workstation:
+    own task with a hint), 2 pending that will never run or held, 3 older failures in the window (Slurm ranks 0–3;
+    workstation ranks 0, 1, 4); sorted by tier, failures newest first across hosts, else host order, then card rank
+    order; array siblings never fold. A row reads `host  id  badge  full name  why` (`attention_why`: the card row's
+    detail and time cells, `low on time` for a runway-only rank 1), the reason on a second line when the full name
+    and it do not fit one; `enter` dismisses with the key and opens the job, `esc` closes.
   - *Cost*: the 1 Hz tick re-renders text only. `FleetView` caches each card's ranking and its `distinct_starts` per
     (jobs dict, minute, window) and until a listed failure turns 4 h old or leaves the window
     (`fleet_layout.rank_expiry`, to the second, so the list agrees with the card's `my jobs` counts); the ranking (a
@@ -3223,6 +3474,30 @@ space-separated and all must match:
 State presets (`f` cycles, palette `State: …`): fresh (default) → active → queued → failed (FAILED + ENDED) → all. The
 filter text, preset, sort and grouping persist in `~/.local/state/runfleet/ui.json`.
 
+**Saved views** (`ui/saved_views.py`, pure; `ui/screens/save_view.py`). A named set of the five Jobs-view settings,
+stored in ui.json `views` = `{name: {filter, preset, sort, reverse, group}}`. Palette only, no key:
+- *Save view as…* opens `SaveViewScreen` (the port prompt's pattern, keymap context `prompt`): a summary line of what is
+  saved (`failed · sort state ▲ · group host · /k2`), the name input (pre-filled with the active view's name) and a
+  live note: why the name cannot be used, that it replaces an existing view, or `N of 20 saved`. `enter` with a usable
+  name saves and toasts; `esc` cancels. It saves the Jobs view's settings from any view and does not switch views.
+- `View: <name>` (help text = the summary line) switches to the Jobs view and sets all five at once: filter bar
+  value and visibility, folded groups cleared, the digest's ended-since mode (§7.14) ended; ui.json gets the five
+  values plus `active_view`.
+- `Delete view: <name>` removes it (no confirmation; a toast says so).
+
+Names: 1–24 characters of ASCII letters, digits, space, `.`, `_`, `-`, starting with a letter or digit, no double
+space and none at the end (the prompt strips the name; a hand-written `gpu ` is skipped); unique ignoring case (saving `GPU` over `gpu` replaces it under the new spelling). At most 20 views: a 21st new
+name is refused in the prompt (replacing one is fine). Reading is tolerant: `views` that is not an object, a key that
+is not a valid name, a value that is not an object, a filter that is not a one-line string, an unknown preset / sort /
+grouping or a non-bool `reverse` make that entry (or `views`) ignored, never an error; a missing field takes the Jobs
+view default; of names equal ignoring case only one is used; beyond 20 the rest (by name) are ignored. Writes touch
+only the entry asked for, so entries this version cannot read (a newer RunFleet's) stay in the file.
+
+**Active view**: the status line names it — `view: <name>` first in the wide forms, `<name> · ` first below 100
+columns and in the shortest fallback — from applying or saving it until any of the five settings changes (or the
+digest's `f` sets the preset aside); changing it back does not bring the name back, and deleting the view drops it.
+`active_view` in ui.json brings the name back at the next start only when the restored settings still equal the view.
+
 ### 7.7 Header, refresh indicators, stale and error presentation
 - **FleetHeader** (1 line): `RunFleet`, scope chip `▏ALL▕`/`▏k2▕`, one chip per host (`<dot> <name> <age>`; age = time
   since last successful data; RETRYING `retry 38s`, NEEDS_AUTH `auth`), totals `R n PD n F n/24h` of **my** jobs over
@@ -3256,6 +3531,8 @@ filter text, preset, sort and grouping persist in `~/.local/state/runfleet/ui.js
 
 Rules: single keys only (no prefix chords in v0.1). Action ids map to keys only in `keymap.py`. `ctrl+c` (quit) and
 `ctrl+z` (`suspend_process`) are bound on the App with `priority=True`, overriding Textual's `help_quit`/`copy_text`.
+On Windows (no job control; Textual makes the action a no-op) `keymap.bindings` drops `ctrl+z` and the help overlay
+does not list it; `keymap.markdown()` (the USER_GUIDE table) is the same on every OS, so `gen_docs --check` is too.
 `tab`/`shift+tab` switch main views only on MainScreen (whose only focusables are the table and the filter bar); modals
 and detail screens keep Textual's focus traversal. `→`/`right` keeps DataTable's horizontal scroll.
 
@@ -3263,17 +3540,18 @@ and detail screens keep Textual's focus traversal. `→`/`right` keeps DataTable
 |---|---|
 | Global | `?`/`F1` help · `ctrl+p` or `:` command palette · `,` settings · `q` back (MainScreen: quit) · `ctrl+c` quit now · `esc` close overlay → clear filter → clear marks → back · `0` all hosts · `1`–`9` host N · `/` filter · `r` refresh scope (≥ 3 s per host) · `ctrl+r` refresh all · `+`/`-` poll faster/slower (0.5×…4×, floors apply) · `ctrl+z` suspend · `D` since you were away (§7.14) |
 | MainScreen | `tab`/`shift+tab` next/previous view (Fleet → Jobs → GPUs) |
-| Fleet view | arrows/`hjkl` move between cards · `enter`/double-click host detail · click selects · `space` (or a header chip click) scopes · `c` connect · `C` log in to every host needing auth (§7.15) · `s` host shell · `t` enable/disable polling · `e` error details |
-| Jobs view | `j`/`k`/arrows/wheel move · `g`/`G`/`home`/`end` first/last · `ctrl+d`/`ctrl+u`/`pgdn`/`pgup` half page · `enter`/double-click detail · `l` log viewer · `p` log in `$PAGER` · `x`/right-click action menu · `ctrl+k` cancel (Slurm) / terminate (task) · `space` mark and move down · `V` mark all visible / clear · `A` mark / clear the row's whole array · `y`/`Y` copy id / copy menu (`Y Y` = stdout path, §7.15) · `s` shell · `P` forward a port · `c` connect the row's host · `f` next state preset · `o` next sort column · `O` reverse sort · `z` cycle grouping · `u` toggle other users' GPU processes · `w` watch / unwatch the row or the marked rows (§7.14) |
+| Fleet view | arrows/`hjkl` move between cards · `enter`/double-click host detail · click selects (on a card's job row or a panel activity row: opens that job) · `a` needs you: what needs the user fleet-wide (§7.4) · `space` (or a header chip click) scopes · `c` connect · `C` log in to every host needing auth (§7.15) · `s` host shell · `t` enable/disable polling · `e` error details |
+| Jobs view | `j`/`k`/arrows/wheel move · `g`/`G`/`home`/`end` first/last · `ctrl+d`/`ctrl+u`/`pgdn`/`pgup` half page · `enter`/double-click detail · `l` log viewer · `p` log in `$PAGER` · `ctrl+f` search the logs of your recent jobs in scope (§4.7.1) · `x`/right-click action menu · `ctrl+k` cancel (Slurm) / terminate (task) · `space` mark and move down · `V` mark all visible / clear · `A` mark / clear the row's whole array · `y`/`Y` copy id / copy menu (`Y Y` = stdout path, §7.15) · `s` shell · `P` forward a port · `c` connect the row's host · `f` next state preset · `o` next sort column · `O` reverse sort · `z` cycle grouping · `u` toggle other users' GPU processes · `w` watch / unwatch the row or the marked rows (§7.14) |
 | GPUs view | navigation as Jobs · `enter` owning job/task (or host) · `x` actions of the owning task · `ctrl+k` terminate owning own task · `c` connect the row's host · `a` copy `CUDA_VISIBLE_DEVICES` for N free GPUs (workstations) · `o`/`O` sort |
 | Job detail | `[`/`]` previous/next tab · `o`/`e` stdout/stderr · `F` follow on/off · `l` full log viewer · `L` log viewer landed on the cause chip's line (§5.2.8) · `/` search the log (opens the log viewer with its search box; never the Jobs filter) · `p` pager · `r` refresh detail (reopens a dead stream) · `x`, `ctrl+k`, `s`, `c`, `y`, `Y`, `P`, `w` as in Jobs · `esc`/`q` back |
 | Host detail | `enter` on a process opens its task · `ctrl+k` terminate task · `x` actions · `u` other users · `o`/`O` sort · `s` shell · `c` connect · `t` enable/disable · workstation: `a` free-GPU picker · cluster: `f` nodes with free GPUs only, `[`/`]` previous/next partition |
 | Log viewer | `F` follow on/off · `G` bottom + follow · `g` top of the buffer · `o`/`e` stream · `/` search the buffer, `n`/`N` next/previous match (`esc` clears) · `]`/`[` next/previous error or warning line (§5.2.8) · `p` pager · `R` reopen the stream · `y` copy path · `c` connect |
-| Modals | Confirm: `y` / `enter` on Confirm, `n`/`esc` cancel, `tab` moves between params and buttons · Action menu: `j`/`k`/`enter` · Notifications: `j`/`k`, `enter` opens the job · Since you were away: `j`/`k`, `enter` opens a failed job, `f` filters the Jobs view to it · Port forwards: `enter` copies the URL again, `ctrl+k` cancels · Prompt: `enter` uses the value, `esc` cancels · `F1` in any dialog: help with the dialog's keys · Help: typing filters (`q` included); `?`, `F1` and `esc` close; a glyph legend sits under the keys |
+| Modals | Confirm: `y` / `enter` on Confirm, `n`/`esc` cancel, `tab` moves between params and buttons · Action menu: `j`/`k`/`enter` · Notifications: `j`/`k`, `enter` opens the job (a GPU watch: its host) · Since you were away: `j`/`k`, `enter` opens a failed job, `f` filters the Jobs view to it · Needs you: `j`/`k`, `enter` opens the job · GPU watches: `j`/`k`, `n` new watch, `d`/`delete` removes one · Port forwards: `enter` copies the URL again, `ctrl+k` cancels · Prompt: `enter` uses the value, `esc` cancels · Search logs: `tab` to the options, `space` toggles, `enter` in the pattern searches; results: `j`/`k`, `enter` opens the log viewer at the match (`esc` there comes back), `/` edits the search · `F1` in any dialog: help with the dialog's keys · Help: typing filters (`q` included); `?`, `F1` and `esc` close; a glyph legend sits under the keys |
 | Settings | `tab`/`→` and `shift+tab`/`←` section · `j`/`k`/arrows/wheel move · `space`/`enter` toggle host / next value / open · `t` test host · `a` add ssh target · `p` poll a saved host this run left out · `J`/`K` or `shift+↓`/`↑` reorder saved hosts · `/` filter · `e` config in `$EDITOR` · `?` these keys · `esc`/`q`/`,` close (`esc` first leaves the input line or a pending confirm) |
 
 ### 7.9 Mouse
-Click selects rows/cards/tabs/header chips; double-click drills in; right-click opens the action menu; clicking a
+Click selects rows/cards/tabs/header chips (a job row of a roomy Fleet card or an activity row of the fleet panel
+opens that job, §7.4); double-click drills in; right-click opens the action menu; clicking a
 column header sorts by it (again reverses); the wheel scrolls tables and logs (3 lines), `shift+wheel` scrolls wide
 tables horizontally; hint-bar entries are clickable. Text selection: hold `Shift` while dragging (terminal-native in
 most emulators), or start with `--no-mouse`; `y`/`Y` copy ids and paths without selecting. Works over SSH and in tmux
@@ -3285,9 +3563,9 @@ Textual's built-in palette (`ctrl+p`; `:` opens the same palette) with only the 
 fuzzy-matched commands — no command grammar: `Fleet view`, `Jobs view`,
 `GPUs view`, `Scope: all` / `Scope: <host>`, `Host detail: <host>`, `Connect <host>`, `Refresh <host>` / `Refresh all`,
 `Enable <host>` / `Disable <host>`, `State preset: fresh|active|queued|failed|all`, `Sort by <column>`, `Group by
-none|host|array`, `Doctor <host>` (runs `FleetAPI.doctor`, shows the report in a modal), `Settings` / `Settings:
+none|host|array`, `Save view as…` / `View: <name>` / `Delete view: <name>` (saved Jobs views, §7.6), `Doctor <host>` (runs `FleetAPI.doctor`, shows the report in a modal), `Settings` / `Settings:
 general` / `Settings: about`, `Update RunFleet` (§8.6), `Fleet: roomy cards` /
-`Fleet: compact cards` (§7.4, §7.13), `Action log`, `Notifications` / `Since you were away` (§7.14), `Log in to all hosts
+`Fleet: compact cards` (§7.4, §7.13), `Search logs…` (§4.7.1), `Action log`, `Notifications` / `Since you were away` / `Watch free GPUs…` / `Watches` (§7.14), `Log in to all hosts
 needing auth` / `Forward a port…` / `Forwards` (§7.15), `RunFleet log`
 (`run_external(service.local_pager_argv())`: the local pager on `runfleet.log`, not LogScreen), `Help`, `Quit`.
 
@@ -3444,7 +3722,7 @@ it. Everything goes through FleetAPI (§3.7).
   palette and other app keys wait until the dialog closes. Help itself closes on `?`, `F1` and `esc`, never on `q`
   (typed into its search box). Compact header chips: §7.7 (FleetHeader).
 
-### 7.14 Notifications, watch list, "since you were away" (`core/events.py`, `ui/notify.py`)
+### 7.14 Notifications, watch list, "since you were away", GPU watches (`core/events.py`, `ui/notify.py`, `ui/gpu_watch.py`)
 For the researcher who submits a sweep, leaves RunFleet in a tmux pane and comes back hours later. No new remote
 command: everything is derived from the snapshots the poller already produces.
 
@@ -3493,7 +3771,45 @@ command: everything is derived from the snapshots the poller already produces.
   `recent_window`: own ends from the store (complete, they
   survive a restart; `✖` bad end, `✓` completed with `ran H:MM:SS`, `■` other end) and the history's `time_low` `◷`,
   `restarted` `↻` and `gpu_idle` `◌` events (session only, one row per job and kind; events of hosts no longer in the
-  fleet are left out of rows and counts). Rows older than `digest_since` are dim.
+  fleet are left out of rows and counts), and GPU watches that fired, `◎` (`HH:MM host ◎ 2× H200 on k2  k2 n-38-01 3
+  free`, session only, not in the count line, a click opens nothing). Rows older than `digest_since` are dim.
+- **GPU availability watches** (`ui/gpu_watch.py`, pure; `Alerts` runs them; palette › *Watch free GPUs…* /
+  *Watches*): "tell me when N free GPUs of type T appear (on host H / partition P)". No new remote command or cadence:
+  only data already polled. *Matching* is per node, never a fleet-wide sum (a job needs its GPUs on one node): a
+  cluster node counts `util/slurmfmt.node_free` (the fleet panel's count; only nodes of the listed partitions, and of
+  the watch's partition when it names one), a workstation is one node of its GPUs not in use and not an old reading.
+  A model is one request: the node's best matching gres type (`A100` matches `A100-80G` and `A100-40G` by
+  `fleet_layout.type_label`, never `GH200`); "any GPU" adds a node's whole-GPU types up, as an untyped request may.
+  MIG slices count only for a `mig` watch (any profile, or one such as `3g.40gb`, one profile per request) and never
+  for a whole-GPU watch. GPUs on a node backfill planned for a pending job (`planned` state / `-` flag) are left out
+  unless the watch says `planned`. *Readings*: `gpu_watch.readings` per host with the panel's freshness rule
+  (`fleet_layout.free_source`: a `host ?` — problem, stale, or a failed / missing / too old sinfo — is not counted;
+  a disabled host neither), a workstation also needs a successful `nvidia.gpu` sample; a reading is identified by its
+  sample time (`slurm.sinfo` / `nvidia.gpu` `last_ok`) and counted once, node scans are memoised per sample.
+  *Evaluation* (`gpu_watch.Evaluator`, per watch and host): a fresh reading that matches extends the host's run, one
+  that does not ends it, a host without a fresh reading breaks its run (whether it holds is unknown, so it does not
+  re-arm either); the watch fires once a host held on `CONSECUTIVE` = 2 readings in a row, then stays quiet for
+  `COOLDOWN_S` = 15 min and is re-armed only after fresh readings show it no longer holds on any host (hosts that
+  leave the fleet or the partition are forgotten). An idle pause (`store.idle_paused`) breaks every run; once per pause
+  `Alerts` delivers `GPU watches paused: polling stopped after 2h without input, so N watches cannot fire — any key
+  in RunFleet resumes` (no false silence), and the Watches list says `paused`. *Delivery*: like a job alert, with
+  `[notify] enabled` a toast, a terminal notification (title `RunFleet · <host>`) and the hook with `RUNFLEET_EVENT`
+  `gpu_free` / `gpu_watch_paused`, `_HOST` (first matching host), `_NAME` (the watch, `2× H200 on k2`), `_SUMMARY`
+  (`free GPUs: 2× H200 on k2 — k2 n-38-01 3 free`), `_JOB` / `_STATE` empty; the `[notify] events` selection does
+  not apply (the user asked). Always into `Alerts.watch_events` (200, session): palette › *Notifications* merges it
+  with the job alerts by time (`enter` on a watch opens its host) and the fleet panel shows `◎` rows. *Prompt*
+  (`gpu_watch.parse`, lenient, against the hosts, listed partitions and GPU types of the store): a count (`2`,
+  `2x`, `x2`, glued `2xh200`; a bare `3090` after a count is the model), a model, `mig` or a profile
+  (`a100-3g.40gb`), a host (`k2`, `@k2`, `host=k2`), a partition (`k2/gpu-preempt`, `partition gpu`, `p=gpu`, or a
+  bare name some host lists; a filler word such as `gpu` that is also a partition gets a note), `planned`; filler
+  words are skipped. Problems block saving (unknown word or host, two counts / types / hosts, a partition the host
+  does not list, a count outside 1–64, a duplicate, more than `MAX_WATCHES` = 10); notes do not (a model not seen in
+  the fleet yet). The prompt shows the reading (`watch for 2× H200 on k2`), what matches now per node (`matches
+  now: k2 n-38-01 3 free`, `best now: …`, planned GPUs it leaves out) and the hosts not counted. *Watches list*: each
+  watch with its state (`waiting: best now …`, `holds on k2 (1 of 2 readings in a row)`, `fired 14:03 · re-arms once
+  it no longer holds`, `quiet until 14:18`, `paused`, `not counted: lyra ?`), refreshed on store batches and every
+  5 s. *Storage*: `ui.json` `watches`, a list of `{count, gpu, mig, host, partition, planned}`; an entry this version
+  cannot read is skipped and kept; the run / cooldown state is per session (a restart counts afresh).
 - **Runway and restarts** (Jobs table, detail title): LEFT is amber below 10 % of the limit or min(30 min, 25 %)
   and red below 2 % or min(5 min, 10 %) (no limit: the minute floors alone); `↻N` before the name when `restarts` (squeue `RestartCnt`, already parsed) is above 0.
 
@@ -3781,7 +4097,7 @@ Nested node sections (owner `node`, each `timeout -k 2 5` via framing; order fix
 |---|---|
 | `~/.config/runfleet/config.toml` | user config (optional) |
 | `~/.local/state/runfleet/cache.sqlite` | cache (§5.5) |
-| `~/.local/state/runfleet/ui.json` | view, sort, filter text, state preset, grouping, theme (auto/dark/light/ansi), Fleet card size (`fleet_layout`: auto/compact) |
+| `~/.local/state/runfleet/ui.json` | view, sort, filter text, state preset, grouping, saved Jobs views (`views`, `active_view`, §7.6), theme (auto/dark/light/ansi), Fleet card size (`fleet_layout`: auto/compact), watched jobs and the last visit (`watch`, `last_seen`), GPU availability watches (`watches`, §7.14) |
 | `~/.local/state/runfleet/update.json` | update check (§8.6): newest version on main, when asked, the last version announced |
 | `~/.local/state/runfleet/runfleet.log` | rotating log (5 MB × 3); `--debug` raises the level and adds `debug/` raw dumps; `--demo` records carry `[demo]` |
 | `~/.local/state/runfleet/ssh-<host>.log` | `-E` log of master creation / connect (§4.2) |
@@ -3789,6 +4105,16 @@ Nested node sections (owner `node`, each `timeout -k 2 5` via framing; order fix
 
 The state dir and `debug/` are created 0700 and every file RunFleet writes there (log and rotations, cache, `ui.json`,
 `ssh-<host>.log`, dumps) 0600, whatever the umask: they hold job names, paths and command lines.
+
+**Windows** (`paths.py`, platformdirs with `appauthor=False`, so one `runfleet` level): config
+`%APPDATA%\runfleet\config.toml` (roaming), state (cache, `ui.json`, `update.json`, log, ssh logs, bundles, `debug\`)
+`%LOCALAPPDATA%\runfleet\`, instance locks `%LOCALAPPDATA%\runfleet\Cache\cm\` (no sockets: sharing is off, §4.1; no
+86-byte limit and no `/tmp` fallback). Modes are not set there (the profile's ACL keeps it private). Instance and
+config-edit locks use `msvcrt.locking` on one sentinel byte at 1 MiB (`util/platform.try_lock`), so the pid at
+offset 0 stays readable to a second instance; Windows refuses to unlink the open `.config.toml.lock`, so that file
+stays (harmless). Host names Windows cannot use as file names (`con`, `nul`, `aux`, `com1`…`lpt9`, a trailing dot)
+are a config error there; names made from ssh aliases get a `_`. A log rotation that cannot rename the file (another
+instance has it open) keeps writing to it instead of printing tracebacks over the TUI.
 
 ### 8.2 Schema by example (three clusters and two workstations, as in the demo fleet)
 
@@ -3922,8 +4248,31 @@ runfleet hosts list | import [--all | ALIAS ...] [--write]
 runfleet doctor [HOST ...] [--reset]
 runfleet snapshot [HOST ...] [--json] [--timeout SEC]
 runfleet wait HOST:JOBID ... [--timeout SEC] [--json]
+runfleet status [HOST ...] [--short | --json] summary from the cache for prompts / tmux; no ssh, no writes
 runfleet update [--check] [--force]           update this install to the newest version on GitHub (§8.6)
 ```
+`status` (`status.py`) never runs ssh, never builds a FleetService and never constructs `Cache` (whose constructor
+creates, migrates and repairs the file): it opens `paths.cache_file()` with sqlite's read-only URI
+(`file:…?mode=ro&immutable=0`, busy timeout 0.5 s) and reads `snapshots` and `host_status` in one read transaction
+(WAL: a TUI flushing at that moment neither blocks nor is blocked; sqlite may create the empty `-wal`/`-shm` files of
+a WAL database, 0600 like the file). Hosts: those named (configured or cached, else exit 2), else the enabled hosts
+of the config in config order (a configured host without data shows "no data"; none enabled: no data, never the
+cached hosts it disabled), else — no config, or one that does not load — every cached host by name;
+`general.recent_window` comes from the same config (default 24 h). Per host it
+counts **my** jobs straight from the snapshot JSON (no `from_json`): R = ACTIVE, PD = QUEUED, F = FAILED/ENDED that
+ended inside the window (the header's totals, §7.7). Problem hosts are the header's red chips: NEEDS_AUTH `auth`,
+HOSTKEY `hostkey`, UNREACHABLE `down` (`dns`). Age = now − the newest snapshot `taken_at` (no snapshot at all: the
+newest `host_status.at`); past 10 min (`STALE_AFTER`) it is marked `stale`. Forms: default a table (HOST, STATE with
+the error cut at 40 columns, R, PD, F, AGE per host and a total row); `--short` one line `R4 PD2 F1 · lynx:auth · 3m`
+(`… · 14m stale`; the problem part only when there is one); `--json` schema `runfleet.status/1`:
+`{"schema", "generated_at", "error", "data_at", "age_s", "stale", "stale_after_s", "recent_window_s", "totals":
+{"running", "pending", "failed"}, "problems": [{"host", "problem"}], "hosts": [{"name", "state", "state_since",
+"error", "problem", "data_at", "age_s", "stale", "running", "pending", "failed"}]}` (times ISO 8601 UTC; `state` the
+`ConnState` value or null when never recorded). Exit 0 a summary (stale or not), 1 no data — no cache file, not a
+database, no `snapshots` table, locked past the timeout, or nothing for the selected hosts (`--short` prints `no
+data`, the table `no data: <why>`, `--json` the same document with `error` set and no hosts) — 2 usage (`--demo` and
+`--no-cache` included: there is nothing to read). Cost ≈ the interpreter + `cli` imports: ~70 ms for the demo
+fleet, ~125 ms for 12 hosts × 600 cached jobs (19 MB of JSON) on the dev box.
 `wait` (`wait.py`) builds a FleetService for just the targets' hosts (named hosts enabled, `readonly`, no cache: a
 cached row is not news, `idle_pause_after` effectively infinite so an unattended wait keeps polling; the ×4 idle
 throttle still applies) and starts the normal pollers — no tighter cadence, no extra commands. A `Waiter` looks at the
@@ -3959,7 +4308,7 @@ controlpersist), chosen mux mode and jump rewrite, `-O check`, probe latency, pr
 timezone/skew, `gpu_tres`, warnings (e.g. "lyra: no GPU accounting — job GPU util unavailable"). `--reset` closes
 managed masters.
 
-### 8.6 Updates (`update.py`, `install.sh`)
+### 8.6 Updates (`update.py`, `install.sh`, `install.ps1`)
 RunFleet installs from GitHub main (no PyPI release). **Newest version** = `__version__` in main's
 `src/runfleet/__init__.py`, fetched from `raw.githubusercontent.com` (urllib, 5 s timeout, `User-Agent:
 runfleet/<version>`, nothing else sent); "what changed" = the CHANGELOG.md sections newer than this version (≤ 30
@@ -4003,6 +4352,26 @@ runfleet`, whichever lists it. Otherwise uv is installed when missing (Astral's 
 `uv tool install git+URL`; when `runfleet` is not on PATH afterwards, `uv tool update-shell` and "open a new
 terminal". Warns (does not fail) without `ssh`. Tested with stub programs (`tests/cli/test_install_sh.py`).
 
+**Windows (P1: by hand).** Windows refuses to overwrite or delete a running `.exe` (uv: "os error 32"), and the
+`runfleet.exe` launcher that runs `runfleet update` is the file uv would replace. So on Windows `run_update` runs no
+step: it prints "quit RunFleet (q) in every window, then run: `<manual>`" and exits 1 (nothing was updated);
+`--check` says "Update by hand: …". In the TUI, Settings › About's `↵` on an available version shows the same line
+instead of arming, the start-up toast names the command, and `request_update` never exits with `RESTART_CODE`.
+Manual commands chain with `; ` instead of `&&` there (Windows PowerShell 5.1 has no `&&`); `find_uv` looks for
+`uv.exe` in the fallback dirs (`shutil.which` already honours PATHEXT). `cli.restart` (only reached on POSIX now) has a
+Windows branch for P3: no `os.execv` (it would spawn and exit, handing the console back to the shell), but the new
+RunFleet as a child with SIGINT ignored in the waiting parent and its exit code passed on. P3 plans the in-place
+update: rename the running `runfleet.exe` aside, `uv tool install` without `--force`, put it back on failure, sweep
+old copies at start-up.
+
+**`install.ps1`** (repo root, `irm …/main/install.ps1 | iex`, Windows PowerShell 5.1 and PowerShell 7, ASCII only):
+the logic of `install.sh` inside one script block (`throw`/`return`, never `exit`, which would close the user's
+window): an installed `runfleet` is upgraded right there with `uv tool upgrade runfleet` / `pipx reinstall runfleet`,
+whichever lists it — after refusing while a `runfleet` process runs (its .exe cannot be replaced); unlike install.sh it
+does not hand over to `runfleet update`, which on Windows only prints those steps (P1); otherwise Git for Windows is required (uv fetches git URLs
+with it), uv is installed when missing (Astral's PowerShell installer in a child shell), then `uv tool install
+git+URL` and `uv tool update-shell`. CI parses it with PowerShell 5.1 and 7 on Windows and with pwsh on Linux.
+
 ---
 
 ## 9. Error handling and resilience matrix
@@ -4040,7 +4409,7 @@ the UI. Each row names the detection rule implemented in `transport/classify.py`
 | 24 | Terminal too small | < 60×16 | — | placeholder screen | resumes on resize |
 | 25 | `App.suspend` unsupported | `SuspendNotSupported` | — | modal with manual command | *Done* → `after_connect(host, 0)` |
 | 26 | Remote `timeout` missing | `caps.tools` | info | host screen note | local probe timeout still bounds every probe |
-| 27 | Cache corrupt / locked | `sqlite3.DatabaseError` | warn | toast once | rename to `cache.sqlite.corrupt-<ts>`, start fresh |
+| 27 | Cache corrupt / locked | `sqlite3.DatabaseError` | warn | toast once; `runfleet status` prints `no data` (exit 1) | rename to `cache.sqlite.corrupt-<ts>`, start fresh (the TUI; `status` never repairs or writes, §8.5) |
 | 28 | MaxSessions / too many sessions | stderr #7; lane limits | — | — | ≤ 3 sessions on a user master, global cap 8, lane drops to 1 on refusal |
 | 29 | Second RunFleet instance | a host's `instance.lock.*` held | — | toast once | none (user decides) |
 | 30 | Unattended for hours | no input for `idle_pause_after` | all hosts paused | header "paused (idle)" | any key/mouse resumes and refreshes |
@@ -4113,6 +4482,10 @@ Mandated parser assertions (minimum; Appendix B lists file → test module):
 - `gpu_types.mem_mib`: `nvidia_a100-sxm4-80gb` and `nvidia_a100_80gb_pcie` → 81920 (generic), MIG `…_3g.40gb` → 40960,
   `v100` → None.
 - `*/slurm_config`, `*/sacctmgr_assoc`, `*/sinfo_version` → capabilities.
+- `*/slurm_config_priority` (§5.2.10): k2 multifactor (FairShare 100000, half-life 14 days) → ranked; vega half-life
+  `00:00:00`, reset `MONTHLY`; lyra every weight 0 → not ranked (the submit-order hint, no sprio/sshare planned).
+  `k2/sprio`: priority 1, every factor 0, empty `%T` → the "every factor is 0" hint; `vega/sprio` fairshare 10000 + QOS
+  5000. `*/sshare`: `LevelFS` `inf` → None; k2 fair share 0.95 without usage → good standing.
 - `labstation/gpu_query`: 4 GPUs, GPU 3 70 %, 21464/49140 MiB; `lynx/gpu_query`: long name intact (9-field list).
   Synthetic 12-field row with a comma in the name and `[N/A]` fan → name intact, fan None, pstate `P0`.
   `*/compute_apps` join → GPU indices. `*/nvidia_smi_version` → `610.43.02` via `KMD version`.
@@ -4149,11 +4522,14 @@ Mandated parser assertions (minimum; Appendix B lists file → test module):
 - ActionService: re-plan on param change, readonly/host/stale disabled reasons, ≤ 1 on-demand probe on a user master.
 
 ### 10.4 Shell integration with mock Slurm (turm's idea)
-`tests/mockbin/{squeue,sacct,scontrol,sinfo,sstat,scancel,nvidia-smi}` are small `sh` scripts that print a fixture
+`tests/mockbin/{squeue,sacct,scontrol,sinfo,sstat,scancel,sprio,sshare,nvidia-smi}` are small `sh` scripts that print a fixture
 selected by `$RF_MOCK_HOST` and the arguments they receive (and append argv to `$RF_MOCK_LOG`). Integration tests run
 the real `SlurmCollector.sections()` → `framing.render()` → `LocalTransport` (PATH=`tests/mockbin:$PATH`) → collector
 `ingest()`, asserting both the parsed jobs and the exact argv the collector issued (e.g. `sacct … -E now …`,
 `squeue --me -h -O …`).
+`tests/integration/test_log_search_shell.py` runs the real `log.search` section (§4.7.1) through sh/dash/bash with the
+system's GNU grep / tail / head / stat on real files (window, budget, match cap, hostile paths and patterns,
+unreadable files, `\r` lines) and checks the demo's play of the script byte for byte against it.
 The mockbin also carries a fake `ps`/`kill` world for the §6.2 script: a root that spawns a new child when one dies →
 the script STOPs the root first, signals the re-enumerated tree, and reports no survivors.
 
@@ -4209,7 +4585,11 @@ card.
   probabilities; per-job logs that grow (epoch lines, tqdm `\r` progress, a Traceback on failure); GPU util random walk,
   memory ramp, temperatures/power; workstation launcher → GPU child trees (a queue runner that starts the next item),
   plus another user's GPU process. `world.inject(host, fault)` (`unreachable`, `auth`, `nvidia_hang`, `garbage`,
-  `slurmdbd_down`) exists for tests; no chaos/big CLI scenarios in v0.1.
+  `slurmdbd_down`) exists for tests; no chaos/big CLI scenarios in v0.1. Priority setups (§5.2.10): k2 ranks by
+  fair share (FairShare 100000, half-life 14 days; account `lab` at fair share 0.03), vega's usage never decays
+  (half-life 0, reset monthly; age, fair share and QOS weighted), lyra has every weight 0 (not ranked: no sprio/sshare).
+  `render.sprio` weights the user's pending jobs from the cluster's own `PriorityWeight*` (age over 7 days, fair share
+  from `SimCluster.shares`, job size, `partition_tier`, QOS) and refuses a non-multifactor cluster like the real one.
 - `demo/render.py` emits **byte-exact real formats** for every section in Appendix A (squeue `-O` with the separator
   suffix, sacct `--delimiter`, epoch timestamps, scontrol `-o` with `SubmitLine` spaces, sstat TRES incl. Tot, sinfo
   GRES with `mixed-`, nvidia-smi CSV with `[N/A]`, ps). A WP4 test feeds `render` output through WP2's parsers
@@ -4217,12 +4597,13 @@ card.
 - `demo/transport.py`: `DemoTransport(host, world)` implements `Transport`: dispatches on `Section.name` (prefix
   `process.kill.` for task signals) and `meta`,
   simulates 50–300 ms latency, executes actions against the world (scancel → CA, hold/release, requeue, task signals →
-  EXITED), streams logs for `log.tail` in chunks, answers `log.peek`/`log.fetch`. `connect_argv()` returns
+  EXITED), streams logs for `log.tail` in chunks (from `meta["start"]` when a search hit opens the viewer), answers
+  `log.peek`/`log.fetch` and `log.search` (`render.log_search` plays the §4.7.1 script on the simulated files). `connect_argv()` returns
   `[sys.executable, "-c", "print('demo: login ok')"]`.
 
 ### 10.7 Performance budgets (checked by hand at M2; CI enforcement is v0.2)
 Startup to first paint < 300 ms with cache; Jobs refresh with 1000 rows < 100 ms headless; idle CPU < 2 % of a core
-with 5 hosts; RSS < 150 MB.
+with 5 hosts; RSS < 150 MB; `runfleet status` < 150 ms in a new process (§8.5).
 
 ### 10.8 Commands
 `uv run ruff check . && uv run mypy src/runfleet && uv run pytest -q` (CI). `uv run pytest --snapshot-update` to accept
@@ -4362,6 +4743,8 @@ Owner = `Section.owner` (name prefix). All `meta` values are also interpolated (
 | `slurm.sinfo` | `partitions: list[str]`, `sep: str` | nodes, free GPUs |
 | `slurm.occupants` | `partitions: list[str]`, `sep: str` | every user's running jobs per node (§5.2.9) |
 | `slurm.names` | `users: list[str]` | GECOS names of those users |
+| `slurm.sprio` | `format: str` (`SPRIO_FORMAT`, a constant) | own pending jobs' weighted priority factors (§5.2.10) |
+| `slurm.sshare` | `fields: list[str]` (constant) | the user's fair share per account (§5.2.10) |
 | `slurm.act.cancel`, `slurm.act.hold`, `slurm.act.release` | `ids: list[str]` (display ids, throttle stripped) | actions |
 | `slurm.act.requeue` | `ids: list[str]`, `hold: bool` | action |
 | `procfs.host` | — | load, mem, cpu, uptime |
@@ -4373,9 +4756,10 @@ Owner = `Section.owner` (name prefix). All `meta` values are also interpolated (
 | `process.exitscan` | `tasks: list[tuple[str, list[str]]]` (job id, log paths) | ended-task log scan |
 | `process.detail` | `pids: list[int]`, `root: int` | detail: `ps` of members + allow-listed env of the root (`CUDA_VISIBLE_DEVICES VIRTUAL_ENV CONDA_DEFAULT_ENV OMP_NUM_THREADS WANDB_PROJECT WANDB_RUN_ID`) |
 | `process.kill.<root pid>` (one per task) | `root: int`, `start: int`, `sig: "TERM"\|"INT"\|"KILL"`, `grace_s: int`, `escalate: bool` | §6.2 |
-| `log.tail` (StreamSpec) | `path: str`, `bytes: int` | follow |
+| `log.tail` (StreamSpec) | `path: str`, `bytes: int`, `start: int` (optional: `tail -c +<start+1>`, a search hit) | follow |
 | `log.peek` | `path: str`, `bytes: int` | preview |
 | `log.fetch` | `path: str`, `bytes: int` | pager fallback |
+| `log.search` | `paths: list[str]`, `pattern: str` (the ERE grep runs), `icase: bool`, `regex: bool`, `max_matches: int`, `per_file: int`, `budget: int` | cross-job log search, on demand (§4.7.1) |
 | `slurm.attach.node<i>` (Attach, §7.16) | `mode: "ssh"\|"srun"`, `node: str`, `job_id_raw: str`, `jobs_raw: list[str]` (own running jobs on the node read by node.cg/node.pids, target first), `sluids: list[str]` (parallel to jobs_raw, "" unknown), `inner_nonce: str`, `inner: list[str]` (nested section names in order) | one node hop carrying the nested node script |
 | `slurm.attach.audit` (late, Attach) | `mode: str`, `job_id_raw: str`, `nodes: list[str]` | no-leftover audit |
 | `node.id` `node.cg` `node.ps` `node.pids` `node.map` `node.gpu` `node.apps` `node.self` (nested, owner `node`) | — (answered via the outer section's meta) | §7.16.3 |
@@ -4389,6 +4773,7 @@ Owner = `Section.owner` (name prefix). All `meta` values are also interpolated (
 | `*/scontrol_show_job*`, `*/scontrol_show_node` | `tests/backends/slurm/test_parse_scontrol.py` |
 | `*/sinfo_nodes_O`, `*/sinfo_parts`, `*/sinfo_summary` | `tests/backends/slurm/test_parse_sinfo.py` |
 | `*/sstat_running` | `tests/backends/slurm/test_parse_sstat.py` |
+| `*/slurm_config_priority`, `*/sprio`, `*/sshare` | `tests/backends/slurm/test_priority.py` |
 | `*/slurm_config`, `*/slurm_env`, `*/sacctmgr_assoc`, `*/sinfo_version`, `*/stdout_path_stat` | `tests/backends/slurm/test_caps.py` |
 | `labstation/*`, `lynx/*` (`gpu_query*`, `compute_apps*`, `nvidia_smi_version`) | `tests/backends/common/test_nvidia.py` |
 | `*/resources`, `*/proc_stat`, `*/meminfo` | `tests/backends/common/test_procfs.py` |

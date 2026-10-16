@@ -6,7 +6,9 @@ the selected host, ``enter``/double-click opens its host screen.
 
 A tall view gets roomy cards (tier T1, :mod:`runfleet.ui.fleet_layout`): the row heights follow from the view size and
 each card's shape only (never from the data), each card lists the jobs that need the user, and the fleet panel fills
-the empty grid cell. ui.json ``fleet_layout = "compact"`` keeps today's cards. Nothing here polls anything.
+the empty grid cell. ui.json ``fleet_layout = "compact"`` keeps today's cards. A click on a job row of a card or on an
+activity row of the panel opens that job; ``a`` lists what needs the user across the fleet, from the same rankings, in
+any layout (:class:`~runfleet.ui.screens.attention.AttentionScreen`). Nothing here polls anything.
 """
 
 from __future__ import annotations
@@ -24,9 +26,9 @@ from runfleet.core.store import HostState
 from runfleet.models import ConnState, JobKind, StateGroup
 from runfleet.ui import fleet_layout, keymap, render, theme
 from runfleet.ui.fleet_layout import CARDS_MIN_WIDTH, HighWater, Ranked, columns_for, inner_width
-from runfleet.ui.widgets.fleet_panel import FleetPanel, panel_lines
+from runfleet.ui.widgets.fleet_panel import FleetPanel, panel_body
 from runfleet.ui.widgets.job_table import ClickTable
-from runfleet.ui.widgets.host_card import HostCard, card_lines, card_title, is_cluster, old_reading
+from runfleet.ui.widgets.host_card import HostCard, card_body, card_title, is_cluster, old_reading
 from runfleet.ui.query import ended_at
 from runfleet.util import humanize
 
@@ -244,8 +246,8 @@ class FleetView(Widget, can_focus=False):
         rendered = []
         for card in cards:
             state = hosts[card.host]
-            lines = card_lines(state, now, width=inner, window=general.recent_window,
-                               util_t=ui.gpu_util_thresholds, mem_t=ui.gpu_mem_thresholds)
+            lines, _keys = card_body(state, now, width=inner, window=general.recent_window,
+                                     util_t=ui.gpu_util_thresholds, mem_t=ui.gpu_mem_thresholds)
             rendered.append((card, state, lines))
         for row_start in range(0, len(rendered), cols):
             row = rendered[row_start:row_start + cols]
@@ -267,13 +269,13 @@ class FleetView(Widget, can_focus=False):
             height = plan.heights[i // plan.cols]
             state = hosts[card.host]
             ranked, starts = self._ranked(state, now, general.recent_window) or (None, None)
-            lines = card_lines(state, now, width=plan.inner, window=general.recent_window,
-                               util_t=ui.gpu_util_thresholds, mem_t=ui.gpu_mem_thresholds,
-                               list_rows=height - shape.t1 if shape.cap else None, wide=plan.wide,
-                               fixed=shape.fixed, ranked=ranked, starts=starts, watched=watched)
+            lines, keys = card_body(state, now, width=plan.inner, window=general.recent_window,
+                                    util_t=ui.gpu_util_thresholds, mem_t=ui.gpu_mem_thresholds,
+                                    list_rows=height - shape.t1 if shape.cap else None, wide=plan.wide,
+                                    fixed=shape.fixed, ranked=ranked, starts=starts, watched=watched)
             problem = state.status.state in (ConnState.NEEDS_AUTH, ConnState.HOSTKEY, ConnState.UNREACHABLE)
             card.set_lines(card_title(state, card.index, now, width=plan.inner), lines[:height], height,
-                           stale=state.stale(now), problem=problem)
+                           stale=state.stale(now), problem=problem, keys=keys[:height])
             card.set_class(card.host == self.rf.scope, "-scoped")
         self._show_panel(plan, hosts, now)
 
@@ -289,11 +291,11 @@ class FleetView(Widget, can_focus=False):
         width = self.size.width or 120
         inner = max(30, ((width - 1) * spec.span) // plan.cols - 4)
         alerts = self.rf.alerts
-        lines = panel_lines(hosts, now, rows=spec.rows, width=inner, wide=inner >= fleet_layout.WIDE_INNER,
-                            window=self.rf.service.config.general.recent_window, history=alerts.history,
-                            digest_since=alerts.digest_since, memo=self._memo,
-                            rate=getattr(self.rf, "multiplier", 1.0))
-        panel.set_lines(lines, spec.span, spec.rows)
+        lines, keys = panel_body(hosts, now, rows=spec.rows, width=inner, wide=inner >= fleet_layout.WIDE_INNER,
+                                 window=self.rf.service.config.general.recent_window, history=alerts.history,
+                                 digest_since=alerts.digest_since, memo=self._memo,
+                                 rate=getattr(self.rf, "multiplier", 1.0), watch_events=alerts.watch_events)
+        panel.set_lines(lines, spec.span, spec.rows, keys)
         panel.display = True
 
     def _refresh_table(self, hosts: dict[str, HostState], now: Any) -> None:
@@ -352,6 +354,28 @@ class FleetView(Widget, can_focus=False):
     def action_scope_host(self) -> None:
         if self.selected is not None:
             self.rf.set_scope(None if self.rf.scope == self.selected else self.selected)
+
+    def attention(self, now: Any) -> list[fleet_layout.Attention]:
+        """What needs the user across the fleet (every host, whatever the scope or layout), from the cards' cached
+        rankings (:meth:`_ranked`)."""
+        window = self.rf.service.config.general.recent_window
+        per_host = []
+        for name, state in self.rf.store.hosts.items():
+            got = self._ranked(state, now, window)
+            if got is not None:
+                per_host.append((name, is_cluster(state), got[0]))
+        return fleet_layout.attention(per_host)
+
+    def action_attention(self) -> None:
+        """``a``: the "needs you" picker; enter opens the job (a toast when it is gone by then)."""
+        from runfleet.ui.screens.attention import AttentionScreen
+
+        now = self.rf.now()
+        hosts = self.rf.store.hosts
+        colors = {name: theme.host_color(state.config, i) for i, (name, state) in enumerate(hosts.items())}
+        self.app.push_screen(
+            AttentionScreen(self.attention(now), now, colors, util_t=self.rf.service.config.ui.gpu_util_thresholds),
+            lambda key: self.rf.open_listed_job(key) if key is not None else None)
 
 
 _SHORT_STATE = {ConnState.RETRYING: "retry", ConnState.NEEDS_AUTH: "auth", ConnState.CONNECTING: "conn…",

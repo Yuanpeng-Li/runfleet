@@ -186,6 +186,7 @@ def _query(term: Terminal, timeout: float) -> tuple[str | None, float]:
     return (None if out == "-" else out), time.monotonic() - started
 
 
+@pytest.mark.posix                # a pty and termios
 @pytest.mark.parametrize(("answer", "expected"), [
     (b"\x1b]11;rgb:2828/2a2a/3636\x1b\\\x1b[?62c", "#282a36"),
     (b"\x1b]11;rgb:2828/2a2a/3636\x07\x1b[?62c", "#282a36"),     # BEL-terminated (Terminal.app)
@@ -200,6 +201,7 @@ def test_query_over_a_pty(answer: bytes, expected: str | None) -> None:
         term.close()
 
 
+@pytest.mark.posix                # a pty and termios
 def test_query_without_any_answer_gives_up() -> None:
     term = Terminal(None)
     try:
@@ -280,6 +282,7 @@ def _query_report(term: Terminal, timeout: float) -> dict[str, object]:
     return dict(json.loads(done.stdout))
 
 
+@pytest.mark.posix                # a pty and termios
 @pytest.mark.parametrize(("chunks", "expected", "pushed"), [
     # split across packets, inside the payload and inside the ST; the user typed "j" while waiting
     ([(0.0, b"j\x1b]11;rgb:2828/2a"), (0.05, b"2a/3636\x1b"), (0.05, b"\\\x1b[?62c")], "#282a36", ["j"]),
@@ -296,6 +299,7 @@ def test_query_reassembles_a_split_reply(chunks: list[tuple[float, bytes]], expe
         term.close()
 
 
+@pytest.mark.posix                # a pty and termios
 @pytest.mark.parametrize(("chunks", "expected"), [
     ([(0.4, b"\x1b]11;rgb:2828/2a2a/3636\x1b\\\x1b[?62c")], "#282a36"),     # late but whole: the colour counts
     ([(0.4, b"\x1b]11;rgb:2828/2a2a/3636")], None),                         # late and never terminated
@@ -329,6 +333,7 @@ os.waitpid(pid, 0)
 """
 
 
+@pytest.mark.posix                # a pty, process groups, termios
 @pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="counts descriptors in /proc")
 def test_query_from_a_background_job_closes_the_tty() -> None:
     master, slave = os.openpty()

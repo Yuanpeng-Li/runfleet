@@ -29,8 +29,8 @@ PKG_DIR = Path(runfleet.__file__).resolve().parent
 
 # Every module of §3.2 (dotted, relative to `runfleet`).
 EXPECTED_MODULES = """
-__main__ cli export models errors config configedit sshconfig paths debugdump wait update
-util util.shell util.slurmfmt util.humanize util.logscan util.efficiency
+__main__ cli export models errors config configedit sshconfig paths debugdump wait update status
+util util.shell util.slurmfmt util.humanize util.logscan util.efficiency util.platform
 probe probe.section probe.framing
 transport transport.base transport.openssh transport.mux transport.spawn transport.classify transport.local
 transport.fake
@@ -39,15 +39,16 @@ backends.common backends.common.nvidia backends.common.procfs backends.common.gp
 backends.slurm backends.slurm.collector backends.slurm.commands backends.slurm.states backends.slurm.parse_squeue
 backends.slurm.parse_sacct backends.slurm.parse_scontrol backends.slurm.parse_sinfo backends.slurm.parse_sstat
 backends.slurm.logpaths backends.slurm.actions backends.slurm.attach backends.slurm.parse_attach
-backends.slurm.parse_occupants
+backends.slurm.parse_occupants backends.slurm.priority
 backends.process backends.process.collector backends.process.parse_ps backends.process.tasks
 backends.process.actions
 core core.service core.store core.clock core.poller core.actions core.logs core.cache core.doctor
-core.forwards core.events core.attach
+core.forwards core.events core.attach core.logsearch
 ui ui.app ui.messages ui.keymap ui.render ui.theme ui.commands ui.query ui.everyday ui.fleet_layout
 ui.screens ui.screens.main ui.screens.job_detail ui.screens.host_detail ui.screens.log_viewer ui.screens.help
 ui.screens.confirm ui.screens.action_menu ui.screens.host_error ui.screens.settings ui.screens.forwards
-ui.notify ui.screens.notifications ui.termbg
+ui.notify ui.screens.notifications ui.screens.attention ui.termbg ui.saved_views ui.screens.save_view
+ui.gpu_watch ui.screens.gpu_watch ui.screens.log_search
 ui.widgets ui.widgets.header ui.widgets.hintbar ui.widgets.tabs ui.widgets.fleet_view ui.widgets.host_card
 ui.widgets.jobs_view ui.widgets.job_table ui.widgets.job_preview ui.widgets.gpus_view ui.widgets.gpu_panel
 ui.widgets.proc_table ui.widgets.node_table ui.widgets.log_view ui.widgets.filter_bar ui.widgets.attach_panel
@@ -161,6 +162,88 @@ def test_ui_imports_only_the_backend_contract() -> None:
     assert not offenders, f"ui/ imports backends beyond backends.base: {offenders}"
 
 
+# POSIX-only local APIs: the whole package must import and run on native Windows (DESIGN §1.2), so these live in
+# util/platform.py behind IS_WINDOWS; ui/termbg.py keeps its own termios code behind `sys.platform` guards.
+POSIX_ONLY_MODULES = frozenset({"fcntl", "termios", "pty", "tty", "pwd", "grp", "resource", "posix", "readline",
+                                "syslog"})
+POSIX_ONLY_ATTRS = frozenset({
+    ("os", "killpg"), ("os", "getuid"), ("os", "geteuid"), ("os", "getgid"), ("os", "getpgrp"), ("os", "getpgid"),
+    ("os", "setpgid"), ("os", "setsid"), ("os", "tcgetpgrp"), ("os", "fork"), ("os", "O_NOCTTY"),
+    ("os", "setpgrp"), ("os", "getsid"), ("os", "mkfifo"), ("os", "chown"), ("os", "lchown"), ("os", "getgroups"),
+    ("os", "wait3"), ("os", "wait4"), ("os", "WNOHANG"), ("os", "openpty"), ("os", "forkpty"), ("os", "uname"),
+    ("os", "getloadavg"), ("os", "sysconf"), ("os", "statvfs"), ("os", "sched_getaffinity"),
+    ("signal", "SIGKILL"), ("signal", "SIGTSTP"), ("signal", "SIGHUP"), ("signal", "SIGQUIT"), ("signal", "SIGSTOP"),
+    ("signal", "SIGCONT"), ("signal", "SIGUSR1"), ("signal", "SIGUSR2"), ("signal", "SIGCHLD"), ("signal", "SIGALRM"),
+    ("signal", "SIGWINCH"), ("signal", "SIGPIPE"), ("signal", "SIGTTOU"), ("signal", "SIGTTIN"), ("signal", "alarm"),
+    ("signal", "setitimer"), ("signal", "pause"),
+})
+# subprocess / asyncio keywords Windows rejects or silently ignores (start_new_session: no new session there, so a
+# child would share the TUI's console and get its Ctrl-C): spawn with `platform.background_spawn_kwargs()` instead
+POSIX_ONLY_KWARGS = frozenset({"preexec_fn", "start_new_session", "process_group", "pass_fds", "user", "group",
+                               "extra_groups", "umask"})
+# event-loop methods the Windows (Proactor) loop does not implement
+POSIX_ONLY_LOOP_METHODS = frozenset({"add_signal_handler", "remove_signal_handler", "add_reader", "add_writer"})
+_SPAWNERS = frozenset({"Popen", "run", "call", "check_call", "check_output", "create_subprocess_exec",
+                       "create_subprocess_shell", "subprocess_exec", "subprocess_shell"})
+POSIX_ALLOWED = frozenset({Path("util/platform.py"), Path("ui/termbg.py")})
+
+
+def _posix_only_uses(path: Path) -> list[str]:
+    """`import fcntl`, `from os import killpg`, `os.getuid`, `signal.SIGKILL` … anywhere in the file."""
+    found: list[str] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+        if isinstance(node, ast.Import):
+            found += [f"import {a.name}" for a in node.names if a.name.split(".")[0] in POSIX_ONLY_MODULES]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            if node.module.split(".")[0] in POSIX_ONLY_MODULES:
+                found.append(f"from {node.module} import …")
+            found += [f"from {node.module} import {a.name}" for a in node.names
+                      if (node.module, a.name) in POSIX_ONLY_ATTRS]
+        elif (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+              and (node.value.id, node.attr) in POSIX_ONLY_ATTRS):
+            found.append(f"{node.value.id}.{node.attr} (line {node.lineno})")
+        elif isinstance(node, ast.Attribute) and node.attr in POSIX_ONLY_LOOP_METHODS:
+            found.append(f".{node.attr} (line {node.lineno})")
+        elif isinstance(node, ast.Call):
+            callee = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            if callee in _SPAWNERS:
+                found += [f"{callee}({k.arg}=…) (line {node.lineno})" for k in node.keywords
+                          if k.arg in POSIX_ONLY_KWARGS]
+    return found
+
+
+def test_posix_only_apis_stay_in_util_platform() -> None:
+    offenders = []
+    for path in _all_module_files():
+        rel = path.relative_to(PKG_DIR)
+        if rel in POSIX_ALLOWED:
+            continue
+        uses = _posix_only_uses(path)
+        if uses:
+            offenders.append(f"{rel}: {uses}")
+    assert not offenders, f"POSIX-only APIs outside util/platform.py (use runfleet.util.platform): {offenders}"
+
+
+def test_posix_only_checker_detects_violations(tmp_path: Path) -> None:
+    probe = tmp_path / "x.py"
+    probe.write_text("import os, signal\nfrom os import killpg\ndef f():\n    import fcntl\n"
+                     "    os.killpg(os.getuid(), signal.SIGKILL)\n    os.kill(1, signal.SIGTERM)\n", encoding="utf-8")
+    assert sorted(_posix_only_uses(probe)) == ["from os import killpg", "import fcntl", "os.getuid (line 5)",
+                                               "os.killpg (line 5)", "signal.SIGKILL (line 5)"]
+
+
+def test_posix_only_checker_detects_spawn_keywords_and_loop_methods(tmp_path: Path) -> None:
+    probe = tmp_path / "x.py"
+    probe.write_text("import asyncio, subprocess\n"
+                     "subprocess.Popen(['a'], start_new_session=True)\n"
+                     "subprocess.run(['a'], preexec_fn=None, check=False)\n"
+                     "asyncio.create_subprocess_exec('a', stdin=None)\n"
+                     "loop = asyncio.get_event_loop(); loop.add_signal_handler(2, print); loop.add_reader(0, print)\n"
+                     "dict(start_new_session=True)\n", encoding="utf-8")
+    assert sorted(_posix_only_uses(probe)) == [".add_reader (line 5)", ".add_signal_handler (line 5)",
+                                               "Popen(start_new_session=…) (line 2)", "run(preexec_fn=…) (line 3)"]
+
+
 def test_backend_import_checker_detects_violations(tmp_path: Path) -> None:
     probe = tmp_path / "x.py"
     probe.write_text("from runfleet.backends.base import Cadence\nfrom runfleet.backends import base, registry\n"
@@ -199,6 +282,14 @@ def _instances() -> list[object]:
                           mem_used_mib=24870.0, mem_total_mib=None)
     job = m.Job(key=key, kind=m.JobKind.SLURM, name="train", user="usr", state=m.JobState.RUNNING,
                 raw_state="RUNNING", job_id_raw="2332861")
+    factor = m.PriorityFactor(name="fairshare", value=950.0, weight=100000.0)
+    share = m.FairShare(account="lab", user="usr", raw_shares="1", norm_shares=0.5, raw_usage=123456,
+                        effective_usage=0.01, fairshare=0.95, level_fs=None)
+    pprio = m.PendingPriority(ranked=True, priority=1234.0, partition="gpu", factors=(factor,), dominant="fairshare",
+                              others=(("gpu-preempt", 1.0),), fairshare=(share,), hints=("fairshare 0.95",),
+                              sampled_at=T0, half_life_s=14 * 86400.0)
+    pending = m.Job(key=m.JobKey("k2", "2334564"), kind=m.JobKind.SLURM, name="smoke", user="usr",
+                    state=m.JobState.PENDING, raw_state="PENDING", job_id_raw="2334564", priority=pprio)
     gres = m.GresCount(name="gpu", type="a30", total=4, used=1, used_indices="0")
     node = m.Node(name="n-31-04", partitions=("lab",), state="mixed", flags=frozenset(), usable=True,
                   cpus_alloc=None, cpus_idle=None, cpus_other=None, cpus_total=None, mem_total_mib=None,
@@ -261,7 +352,7 @@ def _instances() -> list[object]:
             part, step, detail, snap, result, detect, check, doctor, sstatus, sec, sres, script, spec, run, pres,
             c.SlurmSettings(), c.WorkstationSettings(), hcfg, general, c.UISettings(), fleet, cad, ctx, mview,
             cout, param, aspec, plan, hstate, change, lupd, lpeek, c.NotifySettings(), cg, ninsp, live, offer, astate,
-            aplan, *(node.jobs or ())]
+            aplan, *(node.jobs or ()), factor, share, pprio, pending]
 
 
 def test_every_contract_dataclass_constructs() -> None:

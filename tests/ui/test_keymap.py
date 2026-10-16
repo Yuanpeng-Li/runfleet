@@ -9,19 +9,24 @@ import pytest
 from runfleet.ui import keymap
 from runfleet.ui.app import RunFleetApp
 from runfleet.ui.screens.action_menu import ActionLogScreen, ActionMenuScreen
+from runfleet.ui.screens.attention import AttentionScreen
 from runfleet.ui.screens.confirm import AttachConfirmScreen, ConfirmScreen
 from runfleet.ui.screens.forwards import ForwardsScreen, PortPromptScreen
+from runfleet.ui.screens.gpu_watch import WatchesScreen, WatchPromptScreen
 from runfleet.ui.screens.help import HelpScreen
 from runfleet.ui.screens.host_detail import HostDetailScreen
 from runfleet.ui.screens.host_error import HostErrorScreen
 from runfleet.ui.screens.job_detail import JobDetailScreen
+from runfleet.ui.screens.log_search import LogSearchScreen, SearchPromptScreen
 from runfleet.ui.screens.log_viewer import LogScreen
 from runfleet.ui.screens.main import MainScreen
+from runfleet.ui.screens.save_view import SaveViewScreen
 from runfleet.ui.screens.notifications import DigestScreen, NotificationsScreen
 from runfleet.ui.screens.settings import SettingsScreen
 from runfleet.ui.widgets.fleet_view import FleetView
 from runfleet.ui.widgets.gpus_view import GPUsView
 from runfleet.ui.widgets.jobs_view import JobsView
+from runfleet.util import platform
 
 # context -> classes whose actions resolve the context's un-prefixed action names
 OWNERS: dict[str, tuple[type, ...]] = {
@@ -30,8 +35,9 @@ OWNERS: dict[str, tuple[type, ...]] = {
     "host_ws": (HostDetailScreen,), "host_cluster": (HostDetailScreen,), "log": (LogScreen,),
     "confirm": (ConfirmScreen,), "attach_confirm": (AttachConfirmScreen,), "action_menu": (ActionMenuScreen,), "help": (HelpScreen,),
     "host_error": (HostErrorScreen,), "modal": (ActionLogScreen,), "settings": (SettingsScreen,),
-    "notifications": (NotificationsScreen,), "digest": (DigestScreen,),
-    "forwards": (ForwardsScreen,), "prompt": (PortPromptScreen,),
+    "notifications": (NotificationsScreen,), "digest": (DigestScreen,), "attention": (AttentionScreen,),
+    "forwards": (ForwardsScreen,), "prompt": (PortPromptScreen, SaveViewScreen, WatchPromptScreen),
+    "watches": (WatchesScreen,), "search_prompt": (SearchPromptScreen,), "log_hits": (LogSearchScreen,),
 }
 
 
@@ -76,7 +82,8 @@ def test_actions_exist_on_their_owner(context: str) -> None:
         assert any(hasattr(o, f"action_{name}") for o in owners), f"{context}: no action_{name} for {k.action}"
 
 
-def test_bindings_cover_all_keys() -> None:
+def test_bindings_cover_all_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)       # the POSIX behaviour (Windows: test_windows_*.py)
     for context, keys in keymap.KEYMAP.items():
         bound = {b.key for b in keymap.bindings(context)}   # type: ignore[union-attr]
         for k in keys:
@@ -84,7 +91,8 @@ def test_bindings_cover_all_keys() -> None:
                 assert set(k.keys) <= bound, context
 
 
-def test_ctrl_c_and_ctrl_z_are_priority() -> None:
+def test_ctrl_c_and_ctrl_z_are_priority(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)       # the POSIX behaviour (Windows: test_windows_*.py)
     prio = {b.key for b in keymap.bindings("global") if b.priority}  # type: ignore[union-attr]
     assert {"ctrl+c", "ctrl+z"} <= prio
 
@@ -123,7 +131,8 @@ def test_widgets_take_bindings_from_keymap() -> None:
     for cls, ctx in ((JobsView, "jobs"), (FleetView, "fleet"), (GPUsView, "gpus"), (MainScreen, "main"),
                      (LogScreen, "log"), (JobDetailScreen, "job_detail"), (HelpScreen, "help"),
                      (ConfirmScreen, "confirm"), (AttachConfirmScreen, "attach_confirm"), (ActionMenuScreen, "action_menu"), (HostErrorScreen, "host_error"),
-                     (SettingsScreen, "settings"), (NotificationsScreen, "notifications"), (DigestScreen, "digest")):
+                     (SettingsScreen, "settings"), (NotificationsScreen, "notifications"), (DigestScreen, "digest"),
+                     (AttentionScreen, "attention"), (WatchesScreen, "watches"), (WatchPromptScreen, "prompt")):
         assert cls.BINDINGS == keymap.bindings(ctx), cls
     assert inspect.getsource(RunFleetApp).count('keymap.bindings("global")') == 1
 

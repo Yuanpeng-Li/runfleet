@@ -1,0 +1,3 @@
+# Every file byte for byte as committed, on every OS: Windows checkouts (core.autocrlf=true) must not turn LF into
+# CRLF, because tests read fixtures and the .raw snapshots byte-exact and install.sh must stay a POSIX script.
+* -text

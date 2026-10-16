@@ -2,7 +2,7 @@
 
 RunFleet works without any configuration (`runfleet k2 labstation` monitors those ssh aliases), but a config file
 gives your fleet an order, names, protection rules and tuned refresh rates. It lives at
-`~/.config/runfleet/config.toml` (override with `-c PATH`). You rarely need to edit it by hand: the first `runfleet`
+`~/.config/runfleet/config.toml` (Windows: `%APPDATA%\runfleet\config.toml`; override with `-c PATH`). You rarely need to edit it by hand: the first `runfleet`
 offers the hosts of `~/.ssh/config`, hosts you name on the command line are saved once they answer, and **Settings**
 (press `,` in RunFleet) adds, removes, tests and reorders hosts and flips the `[general]` settings below.
 `runfleet hosts import --all --write` does the same from a script.
@@ -106,7 +106,7 @@ name = "lynx"
 | `idle_pause_after` | duration | `2h` | no input for this long → all polling pauses until the next key |
 | `max_parallel_ssh` | int | `8` | global cap on concurrent ssh processes (polls, on-demand probes, and each `hosts import` / first-run probe including its master login; long-lived log streams are bounded per host instead) |
 | `refresh_multiplier` | float | `1.0` | scales every interval (`+`/`-` change it at runtime, 0.5–4); Settings › refresh speed writes `2.0` (slow), `1.0` (normal) or `0.5` (fast) and applies it at once — per-command floors still apply |
-| `pager` | string | `""` | pager for local log copies; empty = `$PAGER`, else `less -R +G` |
+| `pager` | string | `""` | pager for local log copies; empty = `$PAGER`, else `less -R +G` (Windows: `less` when installed, else `more`) |
 | `remember_hosts` | bool | `true` | hosts named on the command line (`runfleet k2 vega`) that are not configured yet are saved (a minimal `[[host]]` table) as soon as they answer or need a login; one notice "saved k2, vega — manage in Settings (,)". That run still shows only the named hosts. |
 | `update_check` | bool | `true` | at start, at most once a day, fetch the version number of RunFleet's main branch from raw.githubusercontent.com (a plain GET; nothing about you or your hosts is sent) and say once per new version that it is out. Settings › About shows the answer and updates. `false`: no request at start; `runfleet update` and the About row still ask when you use them. `--demo` never asks. |
 
@@ -142,7 +142,7 @@ watched_events = ["started", "ended_ok", "ended_other", "gpu_idle"]   # jobs you
 |---|---|---|---|
 | `enabled` | bool | `true` | `false`: no toast, terminal notification or command; events still go to palette › *Notifications* |
 | `terminal` | `auto` \| `osc9` \| `osc777` \| `bell` \| `off` | `auto` | terminal notification: `auto` picks OSC 9 for iTerm2, WezTerm, Windows Terminal, ghostty and kitty, OSC 777 for foot, urxvt and VTE terminals, else the bell. Inside tmux the escape is passed through, which needs `set -g allow-passthrough on` in `~/.tmux.conf` (tmux 3.3+); without it tmux drops it silently |
-| `command` | list of strings \| string | `[]` | run locally for each notification (never on a server): a list is the argv, a string runs through `/bin/sh -c`. It gets `RUNFLEET_EVENT` (`ended_bad`, `time_low`, …, or `summary` for a burst), `RUNFLEET_HOST`, `RUNFLEET_JOB`, `RUNFLEET_NAME`, `RUNFLEET_STATE` (`FAILED`, `TIMEOUT`, …) and `RUNFLEET_SUMMARY` (the one-line text) in its environment, no terminal and no stdin; a failure is logged in `runfleet.log` |
+| `command` | list of strings \| string | `[]` | run locally for each notification (never on a server): a list is the argv, a string runs through `/bin/sh -c` (Windows: `cmd.exe /c`). It gets `RUNFLEET_EVENT` (`ended_bad`, `time_low`, …, or `summary` for a burst; `gpu_free` when a GPU watch fires, `gpu_watch_paused` when an idle pause stops the watches), `RUNFLEET_HOST`, `RUNFLEET_JOB`, `RUNFLEET_NAME` (a GPU watch: the watch, `2× H200 on k2`), `RUNFLEET_STATE` (`FAILED`, `TIMEOUT`, …; empty for a GPU watch) and `RUNFLEET_SUMMARY` (the one-line text) in its environment, no terminal and no stdin; a failure is logged in `runfleet.log` |
 | `command_timeout` | duration | `10s` | the command is killed (with its children) after this long |
 | `events` | list | `["ended_bad", "time_low", "restarted"]` | events reported for every job of yours |
 | `watched_events` | list | `["started", "ended_ok", "ended_other", "gpu_idle"]` | events reported in addition for watched jobs (`w`) |
@@ -164,7 +164,7 @@ The order of `[[host]]` tables is the order of the cards and the scope keys `1`�
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `name` | string | required | unique, `[A-Za-z0-9_.-]+`; shown everywhere |
+| `name` | string | required | unique, `[A-Za-z0-9_.-]+`; shown everywhere. On Windows not a device name (`con`, `nul`, `aux`, `prn`, `com1`…, `lpt1`…) and no trailing dot: it becomes a file name |
 | `ssh` | string | `name` | the ssh alias (anything `ssh` accepts), or `"local"` for this machine |
 | `enabled` | bool | `true` | `false` keeps the host listed but not polled (`t` toggles at runtime) |
 | `backend` | `auto` \| `slurm` \| `workstation` | `auto` | `auto` detects: `squeue` + `sinfo` → Slurm; `nvidia-smi` → GPU workstation; otherwise a CPU workstation |
@@ -243,6 +243,10 @@ host, impolite), so it shares one connection per host:
 
 RunFleet holds at most three sessions on a shared master, so your own `ssh` sessions are never refused. It never
 closes your master on its own; `runfleet doctor --reset HOST` closes managed ones.
+
+On native Windows (preview) `mux` is always `off`, whatever this key or your `~/.ssh/config` say: the Windows OpenSSH
+client has no ControlMaster. Every refresh is a fresh login, so hosts that need Duo or a password cannot be polled
+there; run RunFleet in WSL for them (see the user guide's Windows section).
 
 ## Hosts without a config
 

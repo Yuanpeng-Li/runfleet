@@ -20,6 +20,8 @@ from tests.backends.factories import NOW, ctx, host_config
 from tests.conftest import sample
 from tests.integration.harness import MockEnv, run_sections, shells
 
+pytestmark = pytest.mark.posix                     # real sh / dash / bash with mock Slurm tools
+
 ALL_GROUPS = frozenset({"slurm.jobs", "slurm.usage", "slurm.history", "slurm.logstat", "slurm.nodes"})
 SITE_ENV = {"SQUEUE_FORMAT": "%.12i %.10P %.10j", "SQUEUE_STATES": "PD", "SACCT_FORMAT": "JobID", "SINFO_FORMAT": "%P",
             "SLURM_CLUSTERS": "other", "SLURM_TIME_FORMAT": "relative"}
@@ -170,6 +172,40 @@ def test_detect_probe_through_shell(tmp_path: Path) -> None:
     assert caps.associations == (("k2", "campus01", "", "gpu-priority,normal,labpi"),)
     assert "JobIDRaw" in caps.sacct_fields and "StdOut" not in caps.sacct_fields
     assert abs(caps.clock_skew.total_seconds()) < 10 ** 9
+    # the priority settings of §5.2.10 come through the real grep, the other config keys stay out of it
+    assert {"sprio", "sshare"} <= caps.tools
+    assert caps.slurm_config["PriorityType"] == "priority/multifactor"
+    assert caps.slurm_config["PriorityWeightFairShare"] == "100000" and caps.slurm_config["PriorityFlags"] == ""
+    assert caps.slurm_config["PriorityDecayHalfLife"] == "14-00:00:00" and "GresTypes" not in caps.slurm_config
+
+
+@pytest.mark.parametrize("shell", shells())
+def test_priority_group_through_real_shell(tmp_path: Path, shell: str) -> None:
+    """§5.2.10: sprio + sshare in one probe, own user via "$(id -un)", the format argument intact."""
+    env = MockEnv(tmp_path, "k2", sh=shell)
+    reg = registry.collectors()
+    host = host_config("k2")
+    caps = build_capabilities(run_sections(detect_sections(host, reg), env.env(), purpose="detect", shell=shell),
+                              host, NOW, reg)
+    cx = dataclasses.replace(ctx("k2"), caps=dataclasses.replace(caps, remote_user="alice0001"))
+    c = SlurmCollector(cx.host)
+    c.ingest(run_sections(c.sections(frozenset({"slurm.jobs"}), cx), env.env(), shell=shell), cx, MonitorView())
+    assert "slurm.priority" in {cad.group for cad in c.cadences(cx)}         # 2334564 is pending
+    env.clear()
+    res = run_sections(c.sections(frozenset({"slurm.priority"}), cx), env.env(), shell=shell)
+    assert {n: r.outcome for n, r in res.items()} == {"slurm.sprio": SectionOutcome.OK,
+                                                      "slurm.sshare": SectionOutcome.OK}
+    user = env.calls("sprio")[0][3]
+    assert user and "$" not in user                                           # expanded remotely
+    assert env.calls("sprio") == [["sprio", "-h", "-u", user, "-o", "%i|%u|%r|%Y|%A|%B|%F|%J|%P|%Q|%T|%N"]]
+    assert env.calls("sshare") == [["sshare", "-h", "-U", "-u", user, "-P", "-o",
+                                    "Account,User,RawShares,NormShares,RawUsage,EffectvUsage,FairShare,LevelFS"]]
+    out = c.ingest(res, cx, MonitorView())
+    assert out.errors == ()
+    p = c._live["2334564"]
+    job = c._enrich(p, cx)
+    assert job.priority is not None and job.priority.priority == 1
+    assert [s.account for s in job.priority.fairshare] == ["campus01"]
 
 
 def test_lyra_empty_queue_and_missing_sstat(tmp_path: Path) -> None:

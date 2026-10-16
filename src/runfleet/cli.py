@@ -6,11 +6,12 @@
     runfleet doctor [HOST ...] [--reset]
     runfleet snapshot [HOST ...] [--json] [--timeout SEC]
     runfleet wait HOST:JOBID ... [--timeout SEC] [--json]
+    runfleet status [HOST ...] [--short | --json]
     runfleet update [--check] [--force]
 
 Exit codes: 0 ok, 1 runtime error, 2 config/usage error, 3 no `ssh` client (never with --demo), 4 `snapshot` /
 `doctor`: at least one host failed. `wait` has its own (runfleet.wait): 0 completed, 1 ended otherwise, 2 timeout,
-3 error.
+3 error. `status` (runfleet.status, cache only, no ssh): 0 a summary, 1 no data, 2 usage.
 
 Collaborators are module-level functions (`build_service`, `run_tui`, `open_cache`, `ssh_available`,
 `is_interactive`, `run_command`, `run_step`, `installed_version`, `restart`) so tests replace them with fakes; nothing
@@ -27,8 +28,8 @@ import logging.handlers
 import math
 import os
 import re
-import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -42,11 +43,12 @@ from runfleet.core.clock import Clock, RealClock
 from runfleet.core.service import FleetAPI, FleetService, TransportFactory
 from runfleet.errors import ConfigError, RunFleetError
 from runfleet.models import ConnState, DetectReport, DoctorReport
+from runfleet.util import platform
 
 log = logging.getLogger("runfleet.cli")
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_NO_SSH, EXIT_HOST_FAILED = 0, 1, 2, 3, 4
-SUBCOMMANDS = ("connect", "hosts", "doctor", "snapshot", "wait", "update")
+SUBCOMMANDS = ("connect", "hosts", "doctor", "snapshot", "wait", "status", "update")
 _VALUE_OPTIONS = frozenset({"-c", "--config", "--demo-seed", "--timeout"})
 _WRITABLE = frozenset({ConnState.OK, ConnState.DEGRADED, ConnState.NEEDS_AUTH, ConnState.HOSTKEY})
 
@@ -98,7 +100,10 @@ def is_interactive() -> bool:
 
 
 def has_terminal() -> bool:
-    """The TUI can run: Textual reads keys from stdin and draws on stderr (not stdout), and needs a real TERM."""
+    """The TUI can run: Textual reads keys from stdin and draws on stderr (not stdout), and needs a real TERM.
+    Windows: Textual's Windows driver draws on stdout, and consoles have no TERM."""
+    if platform.IS_WINDOWS:
+        return sys.stdin.isatty() and sys.stdout.isatty()
     return sys.stdin.isatty() and sys.stderr.isatty() and os.environ.get("TERM", "") not in ("", "dumb")
 
 
@@ -123,6 +128,46 @@ def terminal_report(*, demo: bool = False) -> list[str]:
     if env.get("TERM_PROGRAM") == "iTerm.app" or env.get("LC_TERMINAL") == "iTerm2":
         lines.append("  i iTerm2 recolours apps: Profiles › Colors › Minimum contrast, Faint text opacity; "
                      "Advanced › Use P3 color space (vivid reds/greens)")
+    return lines
+
+
+def ssh_version() -> str | None:
+    """`ssh -V` (it prints to stderr), None when ssh cannot run. Local only: no connection."""
+    try:
+        done = subprocess.run(["ssh", "-V"], capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (done.stderr or done.stdout).strip() or None
+
+
+WINDOWS_LIMITS = (
+    "ssh sharing is off: Windows OpenSSH has no ControlMaster, so every poll logs in again",
+    "key / ssh-agent hosts work; Duo or password hosts stay at \"needs auth\" (use WSL for them for now)",
+    "no port forwards, no ssh = \"local\" host, no ^z; `runfleet update` prints the steps to update by hand",
+)
+
+
+def windows_report() -> list[str]:
+    """`doctor` on native Windows: the ssh client this preview relies on, the console, and what does not work yet."""
+    lines = ["windows (preview)"]
+    version = ssh_version()
+    ok = platform.ssh_version_ok(version or "")
+    if version is None:
+        lines.append("  ✗ ssh -V  no ssh client (Settings › System › Optional features › OpenSSH Client)")
+    elif ok is None:
+        lines.append(f"  ! ssh -V  {version} — not Windows OpenSSH; RunFleet expects the built-in client "
+                     "(C:\\Windows\\System32\\OpenSSH) first on PATH")
+    else:
+        lines.append(f"  {_GLYPH[ok]} ssh -V  {version}" + ("" if ok else " — older than 8.1: update the OpenSSH "
+                                                             "Client (Optional features, or winget install "
+                                                             "Microsoft.OpenSSH.Preview)"))
+    if os.environ.get("WT_SESSION"):
+        lines.append("  ✓ console  Windows Terminal")
+    else:
+        lines.append("  ! console  not Windows Terminal: colours and mouse work best there (winget install "
+                     "Microsoft.WindowsTerminal)")
+    lines.append("  · background  not asked on Windows; dark palette unless RUNFLEET_THEME=light")
+    lines += [f"  i {limit}" for limit in WINDOWS_LIMITS]
     return lines
 
 
@@ -156,14 +201,39 @@ def installed_version() -> str | None:
 
 
 def restart(argv: Sequence[str]) -> int:
-    """Replace this process with a fresh RunFleet (returns only when that is impossible)."""
+    """Replace this process with a fresh RunFleet (returns only when that is impossible).
+
+    Windows has no exec: `os.execv` there starts a new process and exits, so the shell prompt would come back while
+    the new TUI fights it for the console. The new RunFleet runs as a child instead and its exit code is passed on;
+    Ctrl-C reaches every process on the console, so this waiting parent ignores it."""
     sys.stdout.flush()
     sys.stderr.flush()
+    if platform.IS_WINDOWS:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            return subprocess.call(list(argv))
+        except OSError as exc:
+            print(f"runfleet: cannot start {argv[0]}: {exc}", file=sys.stderr, flush=True)
+            return EXIT_ERROR
     try:
         os.execv(argv[0], list(argv))
     except OSError as exc:
         print(f"runfleet: cannot start {argv[0]}: {exc}", file=sys.stderr, flush=True)
     return EXIT_ERROR
+
+
+def utf8_output() -> None:
+    """Windows: output redirected to a file or a pipe is encoded with the ANSI code page (cp1252), which cannot
+    write ✓, → or ·; switch such streams to UTF-8 (a console is UTF-8 already). Nothing to do elsewhere."""
+    if not platform.IS_WINDOWS:
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        try:
+            if reconfigure is not None and not stream.isatty():
+                reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
 
 
 # ====================================================================================================== parsing
@@ -174,7 +244,7 @@ def _common(parser: argparse.ArgumentParser, *, suppress: bool) -> None:
         return argparse.SUPPRESS if suppress else value
 
     parser.add_argument("-c", "--config", type=Path, metavar="PATH", default=d(None),
-                        help="config file (default: ~/.config/runfleet/config.toml)")
+                        help=f"config file (default: {_default_config_text()})")
     parser.add_argument("--demo", action="store_true", default=d(False), help="simulated fleet, no network")
     parser.add_argument("--demo-seed", type=int, metavar="N", default=d(7), help="seed of the demo world (default 7)")
     parser.add_argument("--readonly", action="store_true", default=d(False), help="disable every mutating action")
@@ -182,6 +252,13 @@ def _common(parser: argparse.ArgumentParser, *, suppress: bool) -> None:
     parser.add_argument("--no-cache", action="store_true", default=d(False), help="do not read or write the cache")
     parser.add_argument("--debug", action="store_true", default=d(False),
                         help="debug logging and raw dumps of every probe (state dir: debug/)")
+
+
+def _default_config_text() -> str:
+    try:
+        return paths.display_path(paths.config_file())
+    except Exception:                  # help text must never fail (an odd profile on Windows, a broken HOME)
+        return "config.toml in the platform's config directory"
 
 
 def _positive_seconds(text: str) -> float:
@@ -199,7 +276,8 @@ def _positive_seconds(text: str) -> float:
 def main_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="runfleet", description="Jobs, GPUs and hosts of your Slurm clusters and GPU "
                                 "workstations in one terminal UI.",
-                                epilog="subcommands: connect, hosts, doctor, snapshot, wait, update (runfleet <cmd> -h)",
+                                epilog="subcommands: connect, hosts, doctor, snapshot, wait, status, update "
+                                "(runfleet <cmd> -h)",
                                 allow_abbrev=False)
     p.add_argument("--version", action="version", version=f"runfleet {__version__}")
     _common(p, suppress=False)
@@ -241,6 +319,13 @@ def command_parser() -> argparse.ArgumentParser:
     w.add_argument("hosts", nargs="+", metavar="HOST:JOBID", help="k2:2332861, k2:31270818 (whole array), lynx:p642229")
     w.add_argument("--timeout", type=_positive_seconds, default=None, metavar="SEC", help="give up after SEC (exit 2)")
     w.add_argument("--json", action="store_true", help='one JSON object per line, schema "runfleet.wait/1"')
+    st = sub.add_parser("status", allow_abbrev=False, help="summary from the cache for shell prompts and tmux "
+                        "(no ssh; exit 0 summary, 1 no data)")
+    _common(st, suppress=True)
+    st.add_argument("hosts", nargs="*", metavar="HOST")
+    form = st.add_mutually_exclusive_group()
+    form.add_argument("--short", action="store_true", help="one line: R4 PD2 F1 · lynx:auth · 3m")
+    form.add_argument("--json", action="store_true", help='JSON document, schema "runfleet.status/1"')
     u = sub.add_parser("update", allow_abbrev=False, help="update RunFleet to the newest version on GitHub")
     _common(u, suppress=True)
     u.add_argument("--check", action="store_true", help="only say whether a newer version exists")
@@ -284,11 +369,28 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 # ====================================================================================================== helpers
 class PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
-    """runfleet.log and its rotations are 0600 (job names, paths and command lines), whatever the umask."""
+    """runfleet.log and its rotations are 0600 (job names, paths and command lines), whatever the umask.
+
+    A rotation that cannot rename the file (Windows: another RunFleet has it open) keeps writing to the current file
+    and stops rotating for this run, instead of printing a traceback over the TUI on every record."""
+
+    _rotate_failed = False
 
     def _open(self):
         paths.private_file(Path(self.baseFilename))
         return super()._open()
+
+    def shouldRollover(self, record: logging.LogRecord) -> int:
+        return 0 if self._rotate_failed else super().shouldRollover(record)
+
+    def doRollover(self) -> None:
+        try:
+            super().doRollover()
+        except OSError:
+            self._rotate_failed = True
+            if self.stream is None:
+                self.mode = "a"
+                self.stream = self._open()
 
 
 def log_format(demo: bool) -> logging.Formatter:
@@ -323,10 +425,7 @@ def setup_logging(debug: bool, demo: bool = False) -> None:
 
 
 def display_path(path: Path) -> str:
-    try:
-        return "~/" + str(path.relative_to(Path.home()))
-    except ValueError:
-        return str(path)
+    return paths.display_path(path)
 
 
 def default_config_path(args: argparse.Namespace) -> Path:
@@ -474,7 +573,7 @@ def unsaved_hint(reports: Sequence[DetectReport]) -> str | None:
 def shell_word(text: str) -> str:
     import shlex
 
-    return shlex.quote(text)
+    return subprocess.list2cmdline([text]) if platform.IS_WINDOWS else shlex.quote(text)
 
 
 def write_entries(service: FleetAPI, entries: Sequence[HostConfig], path: Path | None,
@@ -646,7 +745,11 @@ def cmd_connect(args: argparse.Namespace, clock: Clock, out: Callable[[str], Non
     out(f"RunFleet → connecting to {args.host} (Duo/password/host-key prompts appear here; Ctrl-C aborts)")
     rc = run_command(argv)
     if rc == 0:
-        out(f"{args.host}: connected; RunFleet reuses this connection while it lasts")
+        if platform.IS_WINDOWS:              # sharing is off: `connect` was only an auth check
+            out(f"{args.host}: login works. Windows ssh cannot keep it open: background polls log in on their own "
+                "(keys / ssh-agent); Duo or password hosts need WSL for now")
+        else:
+            out(f"{args.host}: connected; RunFleet reuses this connection while it lasts")
         return EXIT_OK
     out(f"{args.host}: ssh failed (exit {rc}); `runfleet doctor {args.host}` shows details")
     return EXIT_ERROR
@@ -746,6 +849,9 @@ def cmd_doctor(args: argparse.Namespace, clock: Clock, out: Callable[[str], None
     service = build_service(fleet.config, fleet.transports, clock, open_cache(args.no_cache or args.demo))
     names = probed_names(fleet.config, args)
     out("\n".join(terminal_report(demo=args.demo)))
+    windows = windows_report() if platform.IS_WINDOWS else []
+    if windows:
+        out("\n".join(windows))
 
     async def run_all() -> list[DoctorReport | BaseException]:
         return list(await asyncio.gather(*(service.doctor(n, reset=args.reset) for n in names),
@@ -822,16 +928,78 @@ def cmd_wait(args: argparse.Namespace, clock: Clock, out: Callable[[str], None])
         return failed(f"internal error: {exc!r} (details in runfleet.log)")
 
 
+def status_scope(args: argparse.Namespace) -> tuple[list[str] | None, list[str], float]:
+    """`status`: (enabled host names in config order, every configured name, recent_window). No config, or one that
+    does not load, gives (None, [], default): `status` then summarises every host in the cache."""
+    from runfleet import status
+
+    path = default_config_path(args)
+    if args.config is not None and not path.exists():
+        raise UsageError(f"no such config file: {args.config}")
+    if not path.exists():
+        return None, [], status.DEFAULT_WINDOW
+    try:
+        config = load_config(args.config)
+    except ConfigError as exc:                 # a prompt must keep working while the config is being edited
+        log.warning("status: config not loaded, summarising every cached host: %s", exc)
+        return None, [], status.DEFAULT_WINDOW
+    return ([h.name for h in config.hosts if h.enabled], [h.name for h in config.hosts],
+            config.general.recent_window)
+
+
+def cmd_status(args: argparse.Namespace, clock: Clock, out: Callable[[str], None]) -> int:
+    """Summary of the cache for prompts and status bars (runfleet.status): never ssh, never a write."""
+    from runfleet import status
+
+    if args.demo:
+        raise UsageError("status reads the cache of your fleet; --demo keeps none")
+    if args.no_cache:
+        raise UsageError("status only reads the cache; drop --no-cache")
+    configured, known, window = status_scope(args)
+    now = clock.now()
+    try:
+        rows = status.read_cache(paths.cache_file())
+    except status.NoData as exc:
+        report = status.no_data(now, str(exc), window)
+    else:
+        try:
+            names = status.select_hosts(rows.snapshots.keys() | rows.status.keys(), configured, known, args.hosts)
+        except ValueError as exc:
+            raise UsageError(str(exc)) from None
+        report = status.build_report(rows, names, now, window)
+    if args.json:
+        out(status.dumps(report))
+    elif args.short:
+        out(status.short_line(report))
+    elif report.error is not None:
+        out(f"no data: {report.error}")
+    else:
+        out(export.format_table(status.table_rows(report)).rstrip("\n"))
+    return status.EXIT_NO_DATA if report.error is not None else status.EXIT_OK
+
+
 # ====================================================================================================== update
+def windows_update_steps(install: update.Install) -> list[str]:
+    """Windows (P1): the running runfleet.exe cannot be replaced while it runs (uv: os error 32), so RunFleet never
+    updates itself there; these lines say how to do it by hand."""
+    return ["On Windows RunFleet does not replace itself while it runs. To update:",
+            "  1. quit RunFleet (q) in every window",
+            f"  2. run: {install.manual}"]
+
+
 def run_update(install: update.Install, out: Callable[[str], None]) -> int:
     """Run the install's update commands, then say which version a fresh start runs."""
+    if platform.IS_WINDOWS:
+        for line in windows_update_steps(install):
+            out(line)
+        return EXIT_ERROR
     if install.note:
         out(f"Note: {install.note}.")
     if not install.steps:
         out(f"This copy cannot update itself; run:\n  {install.manual}")
         return EXIT_ERROR
     for argv in install.steps:
-        out("$ " + shlex.join([Path(argv[0]).name, *argv[1:]]))
+        out("$ " + platform.display_argv([Path(argv[0]).name, *argv[1:]]))
         rc = run_step(argv, install.env)
         if rc != 0:
             out(f"Update failed ({Path(argv[0]).name} exited with {rc}). To update by hand: {install.manual}")
@@ -863,7 +1031,9 @@ def cmd_update(args: argparse.Namespace, clock: Clock, out: Callable[[str], None
     else:
         out(f"This is the newest version (GitHub main: {status.latest}).")
     if args.check:
-        if status.available:
+        if status.available and platform.IS_WINDOWS:
+            out(f"Update by hand: quit RunFleet, then run {install.manual}")
+        elif status.available:
             out("Update with `runfleet update`" + (f" (or by hand: {install.manual})" if not install.steps else "")
                 + ".")
         return EXIT_ERROR if status.error is not None else EXIT_OK
@@ -872,15 +1042,17 @@ def cmd_update(args: argparse.Namespace, clock: Clock, out: Callable[[str], None
             out("`runfleet update --force` runs the update anyway.")
             return EXIT_ERROR
         return EXIT_OK
-    rc = run_update(install, out)
+    rc = run_update(install, out)                # Windows: the manual steps (exit 1: nothing was updated)
     if rc == EXIT_OK:
         out("If RunFleet is open in another terminal, quit it (q) and start it again.")
     return rc
 
 
 def update_and_restart(args: argparse.Namespace, out: Callable[[str], None]) -> int:
-    """Settings › About › update: the TUI has quit; update this install, then start RunFleet again as it was."""
-    out("RunFleet → updating; it starts again when done …")
+    """Settings › About › update: the TUI has quit; update this install, then start RunFleet again as it was.
+    Windows: only the manual steps (the TUI does not offer this there)."""
+    if not platform.IS_WINDOWS:
+        out("RunFleet → updating; it starts again when done …")
     rc = run_update(update.detect_install(), out)
     if rc != EXIT_OK:
         return rc
@@ -891,12 +1063,14 @@ def update_and_restart(args: argparse.Namespace, out: Callable[[str], None]) -> 
 
 
 COMMANDS: dict[str, Callable[[argparse.Namespace, Clock, Callable[[str], None]], int]] = {
-    "connect": cmd_connect, "doctor": cmd_doctor, "snapshot": cmd_snapshot, "wait": cmd_wait, "update": cmd_update,
+    "connect": cmd_connect, "doctor": cmd_doctor, "snapshot": cmd_snapshot, "wait": cmd_wait, "status": cmd_status,
+    "update": cmd_update,
 }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    utf8_output()
     args = parse_args(argv)
     args.argv = argv                                 # an update started in the TUI restarts with the same arguments
     setup_logging(args.debug, demo=bool(getattr(args, "demo", False)))

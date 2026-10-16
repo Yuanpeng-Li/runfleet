@@ -22,6 +22,7 @@ from runfleet.transport import mux
 from runfleet.transport.fake import FakeTransport
 from runfleet.transport.local import LocalTransport
 from runfleet.transport.openssh import OpenSSHTransport
+from runfleet.util import platform
 from tests.conftest import CLOCK_START
 from tests.unit.stubs import STUB_HOOKS, run_for
 
@@ -95,6 +96,7 @@ def _prepared(exe: Path, tmp_path: Path, g: str, **kw: object) -> OpenSSHTranspo
     return t
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_openssh_forward_argv_and_run(fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     t = _prepared(fake_ssh, tmp_path, G_USER, ssh_options=("Compression=yes",))
     assert t.forward_blocker() is None
@@ -110,7 +112,8 @@ async def test_openssh_forward_argv_and_run(fake_ssh: Path, tmp_path: Path, monk
     assert err is not None and err.kind is ErrorKind.MUX and "Port forwarding failed" in err.summary
 
 
-def test_openssh_without_a_master_cannot_forward(tmp_path: Path) -> None:
+def test_openssh_without_a_master_cannot_forward(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)       # the POSIX behaviour (Windows: test_windows_*.py)
     t = _prepared(Path("ssh"), tmp_path, G_NOPATH, mux="user")       # user mode, no ControlPath: no master
     assert t.forward_argv("forward", 1, "n", 1) is None and "ControlPath" in (t.forward_blocker() or "")
     fresh = OpenSSHTransport(HostConfig("k2", "k2"), mux_dir=tmp_path, log_path=tmp_path / "l")

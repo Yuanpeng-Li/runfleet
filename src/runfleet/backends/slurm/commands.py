@@ -147,6 +147,16 @@ def occupants_cmd(nodes: Sequence[str], partitions: Sequence[str], sep: str = SE
     return f"squeue -a -h -t R,CG {where} -O {shlex.quote(fmt)}"
 
 
+# pending priority evidence (§5.2.10, cadence group slurm.priority): own jobs / own user only, nothing interpolated
+SPRIO_FORMAT = "%i|%u|%r|%Y|%A|%B|%F|%J|%P|%Q|%T|%N"     # id user partition priority age assoc fairshare jobsize
+                                                          # partition qos tres nice — one row per pending job×partition
+SSHARE_FIELDS = "Account,User,RawShares,NormShares,RawUsage,EffectvUsage,FairShare,LevelFS"
+SPRIO_CMD = f'sprio -h -u "$(id -un)" -o {shlex.quote(SPRIO_FORMAT)}'
+SSHARE_CMD = f'sshare -h -U -u "$(id -un)" -P -o {SSHARE_FIELDS}'
+SPRIO_MAX_STDOUT = 512_000                               # ≈ 8000 rows: a huge own pending array stays bounded
+SSHARE_MAX_STDOUT = 64_000
+
+
 def names_cmd(users: Sequence[str]) -> str:
     """`user:GECOS` per known user (`getent` exits 2 when one is unknown: the rest still print)."""
     return "getent passwd " + _q(check_name(u, "user") for u in users) + " | cut -d: -f1,5; true"
@@ -154,8 +164,11 @@ def names_cmd(users: Sequence[str]) -> str:
 
 # ---------------------------------------------------------------- detect (capability) commands (§5.1)
 VERSION_CMD = "sinfo --version"
+# + the priority settings of §5.2.10 (PriorityType, every PriorityWeight*, flags, decay, max age, usage reset)
 CONFIG_CMD = ("scontrol show config | grep -E '^(ClusterName|AccountingStorageType|JobAcctGatherType|"
-              "JobAcctGatherFrequency|PreemptMode|PrologFlags|LaunchParameters|MinJobAge|PrivateData) '")
+              "JobAcctGatherFrequency|PreemptMode|PrologFlags|LaunchParameters|MinJobAge|PrivateData|"
+              "PriorityType|PriorityWeight[A-Za-z]*|PriorityFlags|PriorityDecayHalfLife|PriorityMaxAge|"
+              "PriorityUsageResetPeriod) '")
 ASSOC_CMD = 'sacctmgr -n -P show assoc where user="$(id -un)" format=Cluster,Account,Partition,QOS'
 # who may submit where (§5.1): the user's groups (group database, comma-separated: names may hold spaces), the parent
 # chain of the user's accounts (Allow/DenyAccounts include sub-accounts; `parent=cluster|account|parent`, up to 6

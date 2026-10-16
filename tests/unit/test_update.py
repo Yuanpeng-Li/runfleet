@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from runfleet import update
+from runfleet.util import platform
 
 T0 = datetime(2026, 10, 15, 9, 0, tzinfo=UTC)
 GIT = "https://github.com/Yuanpeng-Li/runfleet"
@@ -25,7 +26,8 @@ def which_none(name: str) -> str | None:
 
 def receipt(prefix: Path, requirement: str, bin_dir: str = "") -> Path:
     prefix.mkdir(parents=True)
-    entry = f'entrypoints = [{{ name = "runfleet", install-path = "{bin_dir}/runfleet", from = "runfleet" }}]\n'
+    # TOML literal strings ('…'): Windows temp paths are full of backslashes
+    entry = f"entrypoints = [{{ name = 'runfleet', install-path = '{bin_dir}/runfleet', from = 'runfleet' }}]\n"
     (prefix / "uv-receipt.toml").write_text(f"[tool]\nrequirements = [{{ name = \"runfleet\", {requirement} }}]\n"
                                             + (entry if bin_dir else ""))
     return prefix
@@ -55,15 +57,16 @@ def test_uv_tool_pinned_to_a_tag_moves_to_main(tmp_path: Path) -> None:
 def test_uv_tool_from_a_clone_pulls_and_reinstalls(tmp_path: Path) -> None:
     clone = tmp_path / "clone"
     (clone / ".git").mkdir(parents=True)
-    inst = detect(receipt(tmp_path / "a" / "runfleet", f'directory = "{clone}"'))
+    inst = detect(receipt(tmp_path / "a" / "runfleet", f"directory = '{clone}'"))
     assert inst.steps == (("/usr/bin/git", "-C", str(clone), "pull", "--ff-only"),
                           ("/usr/bin/uv", "tool", "install", "--force", "--reinstall", str(clone)))
-    editable = detect(receipt(tmp_path / "b" / "runfleet", f'editable = "{clone}"'))
+    editable = detect(receipt(tmp_path / "b" / "runfleet", f"editable = '{clone}'"))
     assert editable.steps == (("/usr/bin/git", "-C", str(clone), "pull", "--ff-only"),)
-    no_git = detect(receipt(tmp_path / "c" / "runfleet", f'directory = "{tmp_path}"'))
+    no_git = detect(receipt(tmp_path / "c" / "runfleet", f"directory = '{tmp_path}'"))
     assert no_git.steps == () and "pull" in no_git.manual            # not a checkout: by hand
 
 
+@pytest.mark.posix                                    # an executable `uv` (mode bits)
 def test_uv_missing_or_found_outside_path(tmp_path: Path) -> None:
     prefix = receipt(tmp_path / "runfleet", f'git = "{GIT}"')
     assert detect(prefix, which=which_none, home=tmp_path / "home").steps == ()
@@ -72,6 +75,37 @@ def test_uv_missing_or_found_outside_path(tmp_path: Path) -> None:
     uv.write_text("#!/bin/sh\n")
     uv.chmod(0o755)
     assert detect(prefix, which=which_none, home=tmp_path / "home").steps[0][0] == str(uv)
+
+
+def test_windows_finds_uv_exe_outside_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(platform, "IS_WINDOWS", True)
+    monkeypatch.delenv("UV_INSTALL_DIR", raising=False)
+    monkeypatch.delenv("XDG_BIN_HOME", raising=False)
+    home = tmp_path / "home"
+    assert update.find_uv(which_none, home) is None
+    (home / ".local" / "bin").mkdir(parents=True)
+    (home / ".local" / "bin" / "uv").write_text("")            # not what Windows runs
+    assert update.find_uv(which_none, home) is None
+    exe = home / ".cargo" / "bin" / "uv.exe"                   # no mode bits on Windows: existing is enough
+    exe.parent.mkdir(parents=True)
+    exe.write_text("")
+    assert update.find_uv(which_none, home) == str(exe)
+    monkeypatch.setenv("UV_INSTALL_DIR", str(tmp_path / "custom"))
+    (tmp_path / "custom").mkdir()
+    (tmp_path / "custom" / "uv.exe").write_text("")
+    assert update.find_uv(which_none, home) == str(tmp_path / "custom" / "uv.exe")
+    assert update.find_uv(lambda n: r"C:\Users\u\.local\bin\uv.EXE", home) == r"C:\Users\u\.local\bin\uv.EXE"
+
+
+def test_windows_manual_steps_chain_with_semicolons(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clone = tmp_path / "clone"
+    (clone / ".git").mkdir(parents=True)
+    prefix = receipt(tmp_path / "a" / "runfleet", f"directory = '{clone}'")
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)
+    assert " && uv tool install --force --reinstall" in detect(prefix).manual
+    monkeypatch.setattr(platform, "IS_WINDOWS", True)
+    manual = detect(prefix).manual
+    assert manual == f"git -C {clone} pull; uv tool install --force --reinstall {clone}" and "&&" not in manual
 
 
 def test_pipx_source_uvx_and_pip(tmp_path: Path) -> None:
@@ -128,6 +162,7 @@ def test_changes_since_lists_newer_sections_only() -> None:
     assert update.changes_since(CHANGELOG, "0.2.0", max_lines=3)[-1].startswith("… (more in")
 
 
+@pytest.mark.posix                # state file mode 0600
 def test_check_asks_once_a_day_and_keeps_the_answer(tmp_path: Path) -> None:
     path = tmp_path / "update.json"
     asked: list[int] = []

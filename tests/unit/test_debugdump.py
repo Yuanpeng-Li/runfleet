@@ -21,6 +21,7 @@ def dumps(tmp_path: Path) -> Iterator[Path]:
     debugdump.disable()
 
 
+@pytest.mark.posix                # LocalTransport runs sh
 async def test_local_probe_is_dumped_in_wire_format(dumps: Path) -> None:
     t = LocalTransport(HostConfig("atlas", "local"))
     script = framing.make_script([Section("a.one", "echo hello"), Section("a.two", "exit 3")], "poll")
@@ -57,6 +58,7 @@ def test_disabled_and_unwritable(tmp_path: Path) -> None:
         debugdump.disable()
 
 
+@pytest.mark.posix                # umask and file modes
 def test_dumps_and_logs_are_private_whatever_the_umask(dumps: Path, tmp_path: Path) -> None:
     """m3: with umask 002 the debug top dir, runfleet.log and the dumps were group-readable."""
     import logging

@@ -22,7 +22,10 @@ def _deterministic_ui(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> Iterato
     report of a failing UI test must not land in the developer's real ~/.local/state/runfleet)."""
     for var in ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
         monkeypatch.setenv(var, str(tmp_path / var.lower()))
-    monkeypatch.setenv("TZ", "UTC")
+    # Windows: platformdirs reads these overrides (an absolute path with a drive) instead of the known folders
+    for var in ("WIN_PD_OVERRIDE_APPDATA", "WIN_PD_OVERRIDE_LOCAL_APPDATA"):
+        monkeypatch.setenv(var, str(tmp_path / var.lower()))
+    monkeypatch.setenv("TZ", "UTC")      # Windows has no tzset: its runners already run in UTC
     monkeypatch.delenv("NO_COLOR", raising=False)
     # a truecolor terminal, whatever runs the tests: CI runners have no TERM, which Rich reads as 16 colours (and the
     # theme then rightly picks reverse cursor rows); RUNFLEET_THEME / TEXTUAL_COLOR_SYSTEM must not leak in either
@@ -30,11 +33,17 @@ def _deterministic_ui(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> Iterato
     monkeypatch.setenv("COLORTERM", "truecolor")
     for var in ("RUNFLEET_THEME", "TEXTUAL_COLOR_SYSTEM", "COLORFGBG"):
         monkeypatch.delenv(var, raising=False)
-    time.tzset()
+    _tzset()
     monkeypatch.setattr(app_module, "ui_state_path", lambda: None)
     monkeypatch.setattr(JobsView, "PEEK_DWELL", 0.0)
     yield
-    time.tzset()
+    _tzset()
+
+
+def _tzset() -> None:
+    tzset = getattr(time, "tzset", None)          # POSIX only
+    if tzset is not None:
+        tzset()
 
 
 @pytest.fixture

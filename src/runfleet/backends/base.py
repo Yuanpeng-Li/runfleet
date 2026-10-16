@@ -66,12 +66,14 @@ class CollectorOutput:
     caps_patch: Mapping[str, object] | None = None # Capabilities field -> value learned at runtime ({"gpu_tres": True})
     errors: tuple[HostError, ...] = ()             # section-level, classified
     followups: frozenset[str] = frozenset()        # cadence groups (event or interval) to run at the next tick
+    handled: frozenset[str] = frozenset()          # sections whose non-zero exit the collector read as an answer
+                                                   # (sprio: no job pending / not multifactor): ok, no backoff
 # Merge rule (poller, one tick): EVERY collector of the profile has ingest() called on EVERY tick, with an empty
 # results map when none of its sections ran. Outputs are applied monitors first (profile order), scheduler last; for
-# every Optional field the last non-None value wins; errors are concatenated; followups are unioned. MonitorView is
-# updated from monitor outputs only, and only from fields that are not None. A scheduler that annotates GPUs (process)
-# therefore re-annotates MonitorView.gpus from its last known tasks on every tick and returns gpus/procs whenever
-# MonitorView.gpus_at is not None, so annotations never blink on ticks without its own sections.
+# every Optional field the last non-None value wins; errors are concatenated; followups and handled are unioned.
+# MonitorView is updated from monitor outputs only, and only from fields that are not None. A scheduler that annotates
+# GPUs (process) therefore re-annotates MonitorView.gpus from its last known tasks on every tick and returns
+# gpus/procs whenever MonitorView.gpus_at is not None, so annotations never blink on ticks without its own sections.
 
 class Collector(ABC):
     name: ClassVar[str]          # "slurm" | "process" | "nvidia" | "procfs" (== section-name prefix)

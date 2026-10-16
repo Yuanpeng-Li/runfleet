@@ -20,8 +20,56 @@ jobs:
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run mypy src/runfleet
+      - run: uv run mypy --platform win32 src/runfleet   # POSIX-only calls outside util/platform.py, without Windows
       - run: uv run pytest -q   # `-m real` tests are never run in CI
       - run: uv run python scripts/gen_docs.py --check   # docs/USER_GUIDE.md key table matches ui/keymap.py
+      - name: install.ps1 parses (pwsh is preinstalled on ubuntu runners; never executed here)
+        shell: pwsh
+        run: |
+          $e = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$null, [ref]$e)
+          if ($e) { $e; exit 1 }
+
+  test-windows:
+    # Windows preview (DESIGN §1.2): the package, its tests (`posix` ones are skipped) and the demo stack on native
+    # Windows. No ssh to anywhere: the demo world stands in for hosts.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4      # .gitattributes `* -text`: fixtures and snapshots stay byte-exact (no CRLF)
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run mypy src/runfleet  # on Windows mypy checks the win32 side of `sys.platform` guards
+      - run: uv run pytest -q          # tests marked `posix` are skipped by tests/conftest.py
+        env:
+          PYTHONUTF8: "1"              # test code reads its UTF-8 files with read_text(); RunFleet itself names encodings
+      - run: uv run python scripts/gen_docs.py --check
+      - name: demo smoke (PowerShell)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          uv run runfleet --version
+          if ($LASTEXITCODE) { exit 1 }
+          uv run runfleet hosts list --demo
+          if ($LASTEXITCODE) { exit 1 }
+          # one full poll of the simulated fleet (lynx starts NEEDS_AUTH, so leave it out). cmd.exe redirects the
+          # bytes as written (PowerShell before 7.4 re-encodes native output), and no PYTHONUTF8 here: RunFleet
+          # itself must switch redirected output to UTF-8 (strict decode, and the middle dot must survive)
+          cmd /c "uv run runfleet snapshot --demo --json k2 vega lyra labstation > snapshot.json"
+          if ($LASTEXITCODE) { exit 1 }
+          uv run python -c "import json; t = open('snapshot.json', encoding='utf-8').read(); d = json.loads(t); assert d['schema'] == 'runfleet.snapshot/1'; assert len(d['hosts']) == 4; assert '\u00b7' in t"
+          if ($LASTEXITCODE) { exit 1 }
+      - name: install.ps1 parses (Windows PowerShell 5.1 and PowerShell 7)
+        shell: pwsh
+        run: |
+          # no double quotes inside the -Command text: how they reach a native program depends on the pwsh version
+          # Windows PowerShell 5.1 rejects most 7-only syntax (&&, ||, ??, a ? b : c) as parse errors
+          foreach ($exe in 'powershell', 'pwsh') {
+            & $exe -NoProfile -Command '$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD ''install.ps1''), [ref]$null, [ref]$e); if ($e) { $e; exit 1 }'
+            if ($LASTEXITCODE) { exit 1 }
+          }
 
   package:
     # §11.1 WP4 acceptance: the built package installs into a clean tool environment and runs the demo stack.

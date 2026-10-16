@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -17,6 +17,7 @@ from runfleet.transport import make_transport, mux
 from runfleet.transport.base import RunResult
 from runfleet.transport.local import LocalTransport
 from runfleet.transport.openssh import OpenSSHTransport
+from runfleet.util import platform
 
 MUX_DIR = Path("/run/user/1000/runfleet")
 
@@ -33,6 +34,13 @@ G_PERSIST_NO = "user u\nhostname t\nport 22\ncontrolpath /home/u/.ssh/cm-%C\ncon
 
 def settings(text: str, alias: str = "h") -> SshSettings:
     return parse_ssh_g(text, alias)
+
+
+@pytest.fixture(autouse=True)
+def _posix_command_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests pin the POSIX policy and command lines (pure functions, valid on any OS); the Windows forms
+    (sharing forced off, the quoted ssh.exe hop) are tests/unit/test_platform.py's."""
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)
 
 
 # ---------------------------------------------------------------- mux policy (§4.1 table)
@@ -69,7 +77,7 @@ def test_mux_option_lists() -> None:
 def test_jump_rewrite_single_hop() -> None:
     assert mux.jump_rewrite(settings(G_LYRA), batch=True) == (
         "-o", "ProxyCommand=ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -W '[%h]:%p' jumpvm")
-    inter = mux.jump_rewrite(settings(G_LYRA), batch=False, log=Path("/home/u/.local/state/runfleet/ssh-lyra.log"))
+    inter = mux.jump_rewrite(settings(G_LYRA), batch=False, log=PurePosixPath("/home/u/.local/state/runfleet/ssh-lyra.log"))
     assert inter == ("-o", "ProxyCommand=ssh -T -o ConnectTimeout=10 -o LogLevel=ERROR -E "
                            "/home/u/.local/state/runfleet/ssh-lyra.log -W '[%h]:%p' jumpvm")
 
@@ -78,7 +86,7 @@ def test_jump_rewrite_multi_hop_and_escaping() -> None:
     opts = mux.jump_rewrite(settings(G_MULTI), batch=True, log=None)
     assert opts == ("-o", "ProxyCommand=ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -p 2200 "
                           "-l bob -J usr@jump1:2222 -W '[%h]:%p' jump2")
-    weird = mux.jump_rewrite(settings(G_LYRA), batch=False, log=Path("/tmp/a b/50%.log"))
+    weird = mux.jump_rewrite(settings(G_LYRA), batch=False, log=PurePosixPath("/tmp/a b/50%.log"))
     assert "-E '/tmp/a b/50%%.log'" in weird[1]
 
 
@@ -100,6 +108,7 @@ def test_parse_jump() -> None:
     assert hop.spec() == "first.last@corp.com@bastion:2200"
 
 
+@pytest.mark.posix                # the real ssh -G with POSIX command lines
 @pytest.mark.skipif(shutil.which("ssh") is None, reason="needs the local OpenSSH client for ssh -G")
 def test_rewritten_argv_through_real_ssh_g(tmp_path: Path) -> None:
     """§10.3 golden: the real local `ssh -G` sees a BatchMode ProxyCommand and no ProxyJump."""
@@ -171,6 +180,7 @@ def transport(fake: Path, tmp_path: Path, host: HostConfig) -> OpenSSHTransport:
     return OpenSSHTransport(host, ssh=str(fake), mux_dir=tmp_path / "mux", log_path=tmp_path / "ssh-h.log")
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_argv_user_mux(fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     use_g(tmp_path, monkeypatch, G_K2)
     t = transport(fake_ssh, tmp_path, HostConfig("k2", "k2", ssh_options=("Compression=yes",)))
@@ -199,6 +209,7 @@ async def test_argv_user_mux(fake_ssh: Path, tmp_path: Path, monkeypatch: pytest
     assert login.interactive_argv(None) == [ssh, "-t", *cp, "-A", "--", "k2"]
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_argv_managed_mux_with_jump(fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     use_g(tmp_path, monkeypatch, G_LYRA)
     t = transport(fake_ssh, tmp_path, HostConfig("lyra", "lyra", connect_timeout=120))
@@ -227,6 +238,7 @@ async def test_argv_managed_mux_with_jump(fake_ssh: Path, tmp_path: Path, monkey
     assert (tmp_path / "mux").stat().st_mode & 0o777 == 0o700
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_argv_off(fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     use_g(tmp_path, monkeypatch, G_K2)
     t = transport(fake_ssh, tmp_path, HostConfig("k2", "k2", mux="off"))
@@ -237,6 +249,7 @@ async def test_argv_off(fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.Monk
     assert not any(c[0] == "-O" for c in calls(tmp_path))
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_ensure_master_creates_once_and_checks(fake_ssh: Path, tmp_path: Path,
                                                      monkeypatch: pytest.MonkeyPatch) -> None:
     use_g(tmp_path, monkeypatch, G_K2)
@@ -249,6 +262,7 @@ async def test_ensure_master_creates_once_and_checks(fake_ssh: Path, tmp_path: P
     assert [c[0] for c in calls(tmp_path)] == ["-G", "-O", "-fN", "-O", "-O", "-O"]
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_ensure_master_auth_failure_is_classified_and_throttled(
         fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     use_g(tmp_path, monkeypatch, G_LYRA)
@@ -268,6 +282,7 @@ async def test_ensure_master_auth_failure_is_classified_and_throttled(
     assert await t.prepare() is None
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_manual_retry_forces_a_master_attempt(fake_ssh: Path, tmp_path: Path,
                                                      monkeypatch: pytest.MonkeyPatch) -> None:
     """A user retry (r / after connect) must not be swallowed by the 30 s throttle."""
@@ -284,6 +299,7 @@ async def test_manual_retry_forces_a_master_attempt(fake_ssh: Path, tmp_path: Pa
     assert [c[0] for c in calls(tmp_path)].count("-fN") == 2
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_stale_managed_socket_is_removed_before_creating(fake_ssh: Path, tmp_path: Path,
                                                                monkeypatch: pytest.MonkeyPatch) -> None:
     """A master killed with -9 leaves its socket; ControlMaster=yes would then run as a plain, leaked login."""
@@ -296,6 +312,7 @@ async def test_stale_managed_socket_is_removed_before_creating(fake_ssh: Path, t
     assert not sock.exists() and [c[0] for c in calls(tmp_path)][-3:] == ["-O", "-fN", "-O"]
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_busy_socket_blocks_creation(fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     use_g(tmp_path, monkeypatch, G_LYRA)
     t = transport(fake_ssh, tmp_path, HostConfig("lyra", "lyra"))
@@ -308,6 +325,7 @@ async def test_busy_socket_blocks_creation(fake_ssh: Path, tmp_path: Path, monke
     assert sock.exists() and "-fN" not in [c[0] for c in calls(tmp_path)]
 
 
+@pytest.mark.posix                # fake ssh shell script
 @pytest.mark.parametrize(("cm", "unlinked"), [("auto", True), ("yes", False)])
 async def test_stale_user_socket_only_removed_like_openssh_would(
         fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cm: str, unlinked: bool) -> None:
@@ -322,6 +340,7 @@ async def test_stale_user_socket_only_removed_like_openssh_would(
         assert err is not None and err.kind is ErrorKind.MUX and "stale" in err.summary
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_master_that_did_not_take_the_socket_is_an_error_and_reaped(
         fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`ssh -fN -o ControlMaster=yes` exits 0 even when it could not bind; the stray login must not survive."""
@@ -346,6 +365,7 @@ async def test_master_that_did_not_take_the_socket_is_an_error_and_reaped(
     assert stray.wait(timeout=5) == -15
 
 
+@pytest.mark.posix                # ps and a symlinked python
 async def test_pids_with_args_finds_exact_command_lines() -> None:
     import subprocess as sp
 
@@ -367,6 +387,7 @@ async def test_pids_with_args_finds_exact_command_lines() -> None:
         proc.wait()
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_before_connect_resolves_and_reports_live_master(fake_ssh: Path, tmp_path: Path,
                                                               monkeypatch: pytest.MonkeyPatch) -> None:
     use_g(tmp_path, monkeypatch, G_LYRA)
@@ -377,6 +398,7 @@ async def test_before_connect_resolves_and_reports_live_master(fake_ssh: Path, t
     assert await t.before_connect() is True
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_hop_auth_failure_during_master_creation_pauses(fake_ssh: Path, tmp_path: Path,
                                                               monkeypatch: pytest.MonkeyPatch) -> None:
     """The backgrounded hop's stderr is lost (capture=False); its own `-E` puts the failure into the master log."""
@@ -387,6 +409,7 @@ async def test_hop_auth_failure_during_master_creation_pauses(fake_ssh: Path, tm
     assert err is not None and err.kind is ErrorKind.AUTH and "via jumpvm" in err.summary
 
 
+@pytest.mark.posix                # sh wrapper around the real ssh
 @pytest.mark.skipif(shutil.which("ssh") is None, reason="needs the local OpenSSH client for ssh -G")
 async def test_every_command_names_the_same_socket_through_real_ssh_g(tmp_path: Path) -> None:
     """Regression (M3 lyra, review core #1/#3/#4): ProxyJump + %C and identity-changing ssh_options gave the master,
@@ -429,6 +452,7 @@ def test_ssh_options_can_override_tunable_defaults(tmp_path: Path) -> None:
     assert argv.index("BatchMode=yes") < argv.index("ConnectTimeout=30")
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_probe_through_fake_ssh(fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     use_g(tmp_path, monkeypatch, G_K2)
     t = transport(fake_ssh, tmp_path, HostConfig("k2", "k2"))
@@ -438,6 +462,7 @@ async def test_probe_through_fake_ssh(fake_ssh: Path, tmp_path: Path, monkeypatc
     assert res.sections["a.one"].stdout == "hello\n" and res.sections["a.two"].outcome is SectionOutcome.FAILED
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_probe_auth_failure_and_no_markers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     exe = tmp_path / "ssh"
     exe.write_text("#!/bin/sh\ncase \"$1\" in -G) echo 'user u'; echo 'hostname h'; exit 0;; esac\n"
@@ -455,6 +480,7 @@ async def test_probe_auth_failure_and_no_markers(tmp_path: Path, monkeypatch: py
     assert res.error is not None and res.error.kind is ErrorKind.REMOTE    # rc 0, no markers at all (§9 row 8)
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_stream_through_fake_ssh(fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from runfleet.core.logs import tail_spec
 
@@ -473,6 +499,7 @@ async def test_stream_through_fake_ssh(fake_ssh: Path, tmp_path: Path, monkeypat
     assert handle.returncode is not None
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_reset_master_only_for_managed(fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     use_g(tmp_path, monkeypatch, G_K2)
     user = transport(fake_ssh, tmp_path, HostConfig("k2", "k2"))
@@ -524,6 +551,7 @@ async def test_local_transport_basics() -> None:
 G_NOPATH = "user u\nhostname t\nport 22\ncontrolmaster auto\ncontrolpersist 600\n"
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_user_mux_without_controlpath_never_spawns_a_master(fake_ssh: Path, tmp_path: Path,
                                                                   monkeypatch: pytest.MonkeyPatch) -> None:
     plan = mux.decide(settings(G_NOPATH), HostConfig("h", "h", mux="user"), MUX_DIR)
@@ -537,6 +565,7 @@ async def test_user_mux_without_controlpath_never_spawns_a_master(fake_ssh: Path
     assert "-fN" not in connect and connect[-1] == "true"                 # an auth check, not a stray login
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_lost_master_race_reaps_our_stray_login(fake_ssh: Path, tmp_path: Path,
                                                       monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess as sp
@@ -556,6 +585,7 @@ async def test_lost_master_race_reaps_our_stray_login(fake_ssh: Path, tmp_path: 
     assert stray.wait(timeout=5) == -15
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_reset_master_stops_a_master_that_ignores_exit(fake_ssh: Path, tmp_path: Path,
                                                              monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess as sp
@@ -581,9 +611,10 @@ async def test_reset_master_stops_a_master_that_ignores_exit(fake_ssh: Path, tmp
 
 
 def test_managed_path_escapes_percent_in_the_directory() -> None:
-    assert mux.managed_control_path(Path("/run/a%b")) == "/run/a%%b/cm-%C"
+    assert mux.managed_control_path(PurePosixPath("/run/a%b")) == "/run/a%%b/cm-%C"
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_managed_resolve_quotes_a_mux_dir_with_spaces(fake_ssh: Path, tmp_path: Path,
                                                             monkeypatch: pytest.MonkeyPatch) -> None:
     use_g(tmp_path, monkeypatch, G_LYRA)
@@ -594,6 +625,7 @@ async def test_managed_resolve_quotes_a_mux_dir_with_spaces(fake_ssh: Path, tmp_
     assert f'ControlPath="{tmp_path}/a b/cm-%C"' in g_calls[1]
 
 
+@pytest.mark.posix                # sh wrapper around the real ssh
 @pytest.mark.skipif(shutil.which("ssh") is None, reason="needs the local OpenSSH client for ssh -G")
 async def test_user_controlpath_with_literal_percent_is_not_expanded_twice(tmp_path: Path) -> None:
     cfg = tmp_path / "config"
@@ -608,6 +640,7 @@ async def test_user_controlpath_with_literal_percent_is_not_expanded_twice(tmp_p
     assert f"ControlPath={tmp_path}/cm-%%C-lbs.example.org" in t.probe_argv()
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_reset_master_stops_a_wedged_master_left_by_an_interactive_session(
         fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Shells/pagers use `ControlMaster=auto` + `ControlPersist`: the master they fork runs with the interactive
@@ -639,6 +672,7 @@ async def test_reset_master_stops_a_wedged_master_left_by_an_interactive_session
         wedged.kill()
 
 
+@pytest.mark.posix                # ps by uid
 async def test_detached_ssh_with_skips_processes_that_keep_a_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     from runfleet.transport import openssh
 

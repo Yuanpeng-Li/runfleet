@@ -27,6 +27,7 @@ from runfleet.ui.screens.job_detail import JobDetailScreen, title_line
 from runfleet.ui.screens.notifications import DigestScreen, NotificationsScreen
 from runfleet.ui.widgets.job_table import JobTable, left_text, runway_level
 from runfleet.ui.widgets.jobs_view import JobsView
+from runfleet.util import platform
 from tests.ui.fakes import T0, FakeService, slurm_job
 
 MakeApp = Callable[..., tuple[RunFleetApp, FakeService]]
@@ -69,7 +70,8 @@ def test_escape_sequences_and_tmux_passthrough() -> None:
     assert wrapped == "\x1bPtmux;\x1b\x1b]9;t: b\x07\x1b\\"
 
 
-def test_hook_argv_and_env() -> None:
+def test_hook_argv_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)       # the POSIX behaviour (Windows: test_windows_*.py)
     assert hook_argv("notify-send RunFleet \"$RUNFLEET_SUMMARY\"") == ["/bin/sh", "-c",
                                                                        "notify-send RunFleet \"$RUNFLEET_SUMMARY\""]
     assert hook_argv(("notify-send", "x")) == ["notify-send", "x"]
@@ -97,6 +99,7 @@ async def test_run_hook_gets_the_env_and_a_slow_hook_is_killed(tmp_path: Path, c
     assert "exited 3" in caplog.text
 
 
+@pytest.mark.posix                # /bin/sh, process groups, /proc
 async def test_run_hook_timeout_kills_a_background_child_of_an_exited_shell(tmp_path: Path) -> None:
     pidfile = tmp_path / "pid"
     await run_hook(["/bin/sh", "-c", f"sleep 30 & echo $! > {pidfile}"], {}, 0.3)   # sh exits, sleep keeps stderr
@@ -245,7 +248,8 @@ async def test_disabled_notify_keeps_history_but_stays_silent(make_app: MakeApp,
         assert not any("2332861" in m for m in toasts(app))
 
 
-async def test_hook_gets_one_call_per_notice(make_app: MakeApp, clock: Any) -> None:
+async def test_hook_gets_one_call_per_notice(monkeypatch: pytest.MonkeyPatch, make_app: MakeApp, clock: Any) -> None:
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)       # the POSIX behaviour (Windows: test_windows_*.py)
     svc = with_notify(FakeService(clock), command="true", terminal="off")
     app, _ = make_app(svc)
     calls: list[tuple[Any, ...]] = []
@@ -363,3 +367,30 @@ async def test_notifications_screen_when_empty(make_app: MakeApp) -> None:
         await pilot.press("escape")
         await pilot.pause(0.1)
         assert not isinstance(app.screen, NotificationsScreen)
+
+
+async def test_notifications_list_fits_a_short_terminal(make_app: Any) -> None:
+    """At 80×24 a 20-row list sat in a 19-row dialog: its last rows (and the highlighted one) were clipped unseen."""
+    from datetime import timedelta
+
+    from textual.widgets import OptionList
+
+    from runfleet.core.events import JobEvent
+    from runfleet.models import JobKey, JobState
+    from runfleet.ui.screens.notifications import NotificationsScreen
+    from tests.ui.fakes import T0
+
+    app, _svc = make_app()
+    events = [JobEvent("ended", JobKey("k2", f"23300{i:02d}"), f"run-{i}", JobState.FAILED,
+                       T0 - timedelta(minutes=i), "exit 1", 1) for i in range(30)]
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.push_screen(NotificationsScreen(events))
+        await pilot.pause(0.3)
+        menu = app.screen.query_one(OptionList)
+        box = app.screen.query_one("#notify-box")
+        assert menu.outer_size.height <= box.size.height              # size: inside the border
+        for _ in range(29):
+            await pilot.press("down")
+        await pilot.pause()
+        assert menu.highlighted == 29 and menu.region.bottom <= box.region.bottom

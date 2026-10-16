@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import logging
 import re
-import signal
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 from runfleet.models import Job, JobState, JobStep, StateGroup
-from runfleet.util import humanize
+from runfleet.util import humanize, platform
 from runfleet.util.slurmfmt import parse_mem_bytes, seconds_prefix
 
 log = logging.getLogger("runfleet.backends.slurm.states")
@@ -208,10 +207,8 @@ def will_never_run(reason: str | None) -> bool:
 
 # ---------------------------------------------------------------- exit explanations
 def signal_name(n: int) -> str:
-    try:
-        return signal.Signals(n).name
-    except ValueError:
-        return f"signal {n}"
+    """Linux names whatever the local OS: the job ran on a Linux node."""
+    return platform.linux_signal_name(n)
 
 
 def preempt_mode(slurm_config: Mapping[str, str]) -> str:

@@ -10,7 +10,16 @@ from typing import Any
 import pytest
 
 from runfleet import __version__, cli, update
+from runfleet.util import platform
 from tests.cli.test_cli import Harness, _drop_log_handlers, run
+
+
+@pytest.fixture(autouse=True)
+def _posix_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests pin the POSIX behaviour (pure UI/CLI logic, valid on any OS); the Windows branches are tested in
+    test_windows_cli.py / test_windows_ui.py / tests/unit/test_platform.py."""
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)
+
 
 T0 = datetime(2026, 10, 15, 9, 0, tzinfo=UTC)
 UV = update.Install("uv", "https://github.com/Yuanpeng-Li/runfleet", (("/bin/uv", "tool", "upgrade", "runfleet"),),

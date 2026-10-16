@@ -108,6 +108,7 @@ def test_max_stdout_truncates() -> None:
 
 
 # ---------------------------------------------------------------- through the real /bin/sh
+@pytest.mark.posix                # runs the probe under sh
 async def test_round_trip_through_sh(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SQUEUE_STATES", "all")
     monkeypatch.setenv("SQUEUE_FORMAT", "%i")
@@ -145,6 +146,7 @@ async def test_round_trip_through_sh(monkeypatch: pytest.MonkeyPatch) -> None:
     assert all(get(n).ms is not None for n in r)                                   # type: ignore[attr-defined]
 
 
+@pytest.mark.posix                # runs the probe under sh with timeout
 async def test_remote_timeout_gives_124() -> None:
     t0 = time.monotonic()
     r = await run(Section("t.slow", "sleep 10", timeout=1), Section("t.next", "echo next"))
@@ -153,6 +155,7 @@ async def test_remote_timeout_gives_124() -> None:
     assert time.monotonic() - t0 < 6
 
 
+@pytest.mark.posix                # runs the probe under sh
 async def test_local_timeout_partial_rule() -> None:
     s = framing.make_script([Section("t.fast", "echo ok"), Section("t.hang", "sleep 30", timeout=60)])
     res = await LOCAL.probe(s, timeout=1.5)
@@ -164,6 +167,7 @@ async def test_local_timeout_partial_rule() -> None:
     assert res2.error is not None and res2.error.kind.value == "timeout"
 
 
+@pytest.mark.posix                # sh, process groups, signals
 async def test_term_to_the_script_exits_143_and_cleans_up() -> None:
     s = framing.make_script([Section("t.tmp", 'echo "$RF_T"'), Section("t.sleep", "sleep 30", timeout=60)])
     proc = await spawn.spawn(["sh", "-s"], stdin_pipe=True)
@@ -190,6 +194,7 @@ i=0; while [ ! -s "$o.rc" ] && [ $i -lt 60 ]; do sleep 0.1 2>/dev/null || sleep 
 cat "$o"; cat "$o.e" >&2; exit "$(cat "$o.rc")"'''
 
 
+@pytest.mark.posix                # sh with a fake nvidia-smi script
 async def test_hung_nvidia_smi_is_abandoned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """§10.3: a TERM-ignoring nvidia-smi that sleeps 30 s -> rc 124 within ~6 s, earlier sections done, no
     transport failure."""
@@ -233,6 +238,7 @@ def test_cut_between_stderr_and_end_marker_is_incomplete() -> None:
     assert framing.parse(cut, s).sections["slurm.squeue"].outcome is SectionOutcome.INCOMPLETE
 
 
+@pytest.mark.posix                # runs the probe under sh
 async def test_stderr_block_comes_before_the_end_marker() -> None:
     s = framing.make_script([Section("t.e", "echo out; echo err >&2")])
     res = await LOCAL.probe(s, timeout=10)
@@ -241,6 +247,7 @@ async def test_stderr_block_comes_before_the_end_marker() -> None:
     assert (res.sections["t.e"].stdout, res.sections["t.e"].stderr) == ("out\n", "err\n")
 
 
+@pytest.mark.posix                # runs the probe under sh
 async def test_unterminated_banner_does_not_swallow_the_first_marker() -> None:
     s = framing.make_script([Section("detect.id", "echo me"), Section("detect.tools", "echo t")])
     res = await spawn.run(["sh", "-s"], timeout=10, input=("printf Welcome\n" + framing.render(s)).encode())
@@ -248,6 +255,7 @@ async def test_unterminated_banner_does_not_swallow_the_first_marker() -> None:
     assert r["detect.id"].outcome is SectionOutcome.OK and r["detect.id"].stdout == "me\n"
 
 
+@pytest.mark.posix                # runs the probe under sh
 async def test_stderr_survives_an_unusable_tmp(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TMPDIR", "/nonexistent/rf-test")
     r = await run(Section("t.only", "echo only-err >&2"), Section("t.both", "echo out; echo e2 >&2"),
@@ -257,6 +265,7 @@ async def test_stderr_survives_an_unusable_tmp(monkeypatch: pytest.MonkeyPatch) 
     assert r["t.rc"].rc == 3                                                         # type: ignore[attr-defined]
 
 
+@pytest.mark.posix                # runs the probe under bash
 @pytest.mark.skipif(not Path("/bin/bash").exists() and not Path("/usr/bin/bash").exists(), reason="needs bash")
 async def test_inherited_errexit_does_not_abort_the_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SHELLOPTS", "errexit")
@@ -266,6 +275,7 @@ async def test_inherited_errexit_does_not_abort_the_probe(monkeypatch: pytest.Mo
     assert r["t.fail"].outcome is SectionOutcome.FAILED and r["t.after"].stdout == "after\n"
 
 
+@pytest.mark.posix                # runs the probe under sh
 async def test_attach_probes_write_nothing_on_the_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """§7.16.4: an Attach login probe (purpose "attach") never creates a temp dir — stderr goes through a variable —
     while stdout, stderr, rc, the remote timeout and partial output behave as with one."""

@@ -1,6 +1,8 @@
 """[WP2] Shared test helpers: sample()/meta()/frame(), ManualClock fixture, no-ssh guard (DESIGN.md §10.1-10.2).
 
-Helpers are plain functions (``from tests.conftest import sample``) and also fixtures of the same name.
+Helpers are plain functions (``from tests.conftest import sample``) and also fixtures of the same name. Tests marked
+``posix`` (sh scripts, process groups, file modes, ptys, /proc) are skipped on native Windows; ``is_root()`` replaces
+``os.geteuid() == 0`` in skip conditions (no euid on Windows).
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -149,9 +152,23 @@ def manual_clock() -> ManualClock:
     return ManualClock(CLOCK_START)
 
 
-# ---------------------------------------------------------------- `real` marker: opt-in only
+WINDOWS = sys.platform == "win32"
+
+
+def is_root() -> bool:
+    """Running as root (permission tests cannot fail then); never on Windows, which has no euid."""
+    return not WINDOWS and getattr(os, "geteuid")() == 0
+
+
+# ---------------------------------------------------------------- `real` marker: opt-in only; `posix`: not on Windows
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Tests marked `real` touch real hosts: skipped unless selected explicitly with `-m real`."""
+    """Tests marked `real` touch real hosts: skipped unless selected explicitly with `-m real`. Tests marked `posix`
+    need a POSIX system and are skipped on native Windows."""
+    if WINDOWS:
+        posix = pytest.mark.skip(reason="POSIX only (sh, process groups, file modes, ptys); not on native Windows")
+        for item in items:
+            if item.get_closest_marker("posix") is not None:
+                item.add_marker(posix)
     markexpr = config.getoption("markexpr", default="") or ""
     if re.search(r"(?<!not )\breal\b", markexpr):
         return
@@ -165,9 +182,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 def _real_ssh_binaries() -> frozenset[str]:
     found: set[str] = set()
     for d in os.environ.get("PATH", os.defpath).split(os.pathsep):
-        cand = Path(d or ".") / "ssh"
-        if cand.is_file() and os.access(cand, os.X_OK):
-            found.add(os.path.realpath(cand))
+        for name in ("ssh", "ssh.exe"):
+            cand = Path(d or ".") / name
+            if cand.is_file() and os.access(cand, os.X_OK):
+                found.add(os.path.normcase(os.path.realpath(cand)))
     return frozenset(found)
 
 
@@ -190,7 +208,7 @@ def _spawns_real_ssh(argv: list[str], executable: Any, env: Mapping[str, str] | 
     if not argv:
         return False
     prog = os.fsdecode(executable) if executable is not None else argv[0]
-    if os.path.basename(prog) != "ssh":
+    if _ssh_stem(prog) != "ssh":                 # `ssh`, `ssh.exe`, `C:\…\OpenSSH\SSH.EXE`
         return False
     if "-G" in argv[1:]:
         return False                 # local config evaluation, no network (§10.1 exception)
@@ -198,7 +216,13 @@ def _spawns_real_ssh(argv: list[str], executable: Any, env: Mapping[str, str] | 
     resolved = prog if os.sep in prog else shutil.which(prog, path=path)
     if resolved is None:
         return False
-    return os.path.realpath(resolved) in _REAL_SSH   # fake `ssh` scripts on a test PATH are allowed
+    return os.path.normcase(os.path.realpath(resolved)) in _REAL_SSH   # fake `ssh` scripts on a test PATH are allowed
+
+
+def _ssh_stem(prog: str) -> str:
+    """The program name without directory and `.exe`, case-folded (Windows paths use either slash)."""
+    name = prog.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name.removesuffix(".exe")
 
 
 @pytest.fixture(autouse=True)

@@ -13,6 +13,7 @@ from runfleet.util import shell
 
 
 # ---------------------------------------------------------------- paths
+@pytest.mark.posix                # XDG directories
 def test_paths_are_under_platformdirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
@@ -23,6 +24,7 @@ def test_paths_are_under_platformdirs(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert not (tmp_path / "state").exists()                       # computing paths creates nothing
 
 
+@pytest.mark.posix                # XDG_RUNTIME_DIR, socket length, /tmp/runfleet-<uid>
 def test_mux_dir_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
     assert paths.mux_dir() == Path("/run/user/1000/runfleet")
@@ -41,6 +43,7 @@ def test_mux_dir_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert paths.mux_dir() == Path(f"/tmp/runfleet-{os.getuid()}")
 
 
+@pytest.mark.posix                # directory modes
 def test_ensure_private_dir(tmp_path: Path) -> None:
     d = paths.ensure_private_dir(tmp_path / "a" / "b")
     assert d.is_dir() and d.stat().st_mode & 0o777 == 0o700
@@ -102,6 +105,7 @@ def test_list_aliases_uses_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     (tmp_path / ".ssh").mkdir()
     (tmp_path / ".ssh" / "config").write_text("Host a\n", encoding="utf-8")
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))       # what Path.home() reads on Windows
     assert sshconfig.list_aliases() == ["a"]
 
 
@@ -130,6 +134,7 @@ def test_parse_ssh_g() -> None:
         sshconfig.parse_ssh_g("garbage\n", "x")
 
 
+@pytest.mark.posix                # fake ssh shell script
 async def test_resolve_with_fake_ssh(tmp_path: Path) -> None:
     fake = tmp_path / "ssh"
     fake.write_text("#!/bin/sh\n[ \"$1\" = -G ] || exit 9\necho 'user me'\necho 'hostname h.example'\n"
@@ -146,6 +151,7 @@ async def test_resolve_with_fake_ssh(tmp_path: Path) -> None:
         await sshconfig.resolve("box", ssh=str(tmp_path / "missing"))
 
 
+@pytest.mark.posix                # /tmp fallback, uids, symlinks
 def test_tmp_fallback_mux_dir_rejects_planted_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(paths, "_SHARED_TMP", tmp_path)
     victim = tmp_path / "victim"
