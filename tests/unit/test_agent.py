@@ -28,6 +28,9 @@ from runfleet.transport.local import LocalTransport
 
 pytestmark = pytest.mark.posix          # runs POSIX shells, ps, signals
 
+# an external sleep: BusyBox builds with NOFORK applets run a bare `sleep` inside the shell, so `ps` never shows the
+# `sleep 31.4` marker the tests look for (Ubuntu's busybox on CI did that; Debian's does not)
+SLEEP = shutil.which("sleep") or "sleep"
 SHELLS = [s for s in (["sh"], ["dash"], ["bash"], ["busybox", "sh"]) if shutil.which(s[0])
           and (s[0] != "busybox" or subprocess.run(["busybox", "sh", "-c", "true"], capture_output=True).returncode == 0)]
 
@@ -215,8 +218,8 @@ async def test_stream_carriage_returns_arrive_while_running(live: Agent) -> None
 
 
 async def test_kill_ends_only_that_job(live: Agent) -> None:
-    await live.send(agent.probe_request("slow", b"sleep 31.4; echo never"))
-    await live.send(agent.stream_request("tail", "sleep 32.6 & w=$!; cat >/dev/null; kill $w"))
+    await live.send(agent.probe_request("slow", f"{SLEEP} 31.4; echo never".encode()))
+    await live.send(agent.stream_request("tail", f"{SLEEP} 32.6 & w=$!; cat >/dev/null; kill $w"))
     await live.until(lambda: leftovers("sleep 31.4") and leftovers("sleep 32.6"), 5)
     t0 = time.monotonic()
     await live.send(agent.kill("slow"))
@@ -240,9 +243,9 @@ async def test_stderr_and_exit_status_come_back(live: Agent) -> None:
 
 
 async def test_stdin_eof_ends_every_job_and_removes_the_temp_dir(live: Agent, tmp_path: Path) -> None:
-    await live.send(agent.probe_request("p", b"sleep 33.7"))
-    await live.send(agent.stream_request("s", "sleep 34.1"))             # ignores its stdin: needs the kill
-    await live.send(agent.probe_request("q", b"trap '' TERM; sleep 35.3"))   # ignores SIGTERM: needs SIGKILL
+    await live.send(agent.probe_request("p", f"{SLEEP} 33.7".encode()))
+    await live.send(agent.stream_request("s", f"{SLEEP} 34.1"))             # ignores its stdin: needs the kill
+    await live.send(agent.probe_request("q", f"trap '' TERM; {SLEEP} 35.3".encode()))   # ignores SIGTERM: needs SIGKILL
     await live.until(lambda: all(leftovers(m) for m in ("sleep 33.7", "sleep 34.1", "sleep 35.3")), 5)
     t0 = time.monotonic()
     assert await live.eof(10) == 0
@@ -253,10 +256,10 @@ async def test_stdin_eof_ends_every_job_and_removes_the_temp_dir(live: Agent, tm
     assert await gone("rfa_hold") == [] and await gone(str(tmp_path)) == []
 
 
-@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP])
+@pytest.mark.parametrize("sig", [s for s in (signal.SIGTERM, getattr(signal, "SIGHUP", None)) if s is not None])
 async def test_signal_to_the_agent_cleans_up(live: Agent, tmp_path: Path, sig: signal.Signals) -> None:
     assert live.ready is not None
-    await live.send(agent.probe_request("p", b"sleep 36.2"))
+    await live.send(agent.probe_request("p", f"{SLEEP} 36.2".encode()))
     await live.until(lambda: leftovers("sleep 36.2"), 5)
     os.kill(live.ready.pid, sig)
     assert await asyncio.wait_for(live.proc.wait(), 10) in (129, 143, -sig)
@@ -309,7 +312,7 @@ async def test_kill_without_setsid_reaches_descendants(tmp_path: Path, monkeypat
     await a.send(agent.hello())
     await a.until(lambda: a.ready is not None, 10)
     assert a.ready is not None and a.ready.setsid is False
-    await a.send(agent.probe_request("slow", b"(sleep 37.9; echo never) & wait"))
+    await a.send(agent.probe_request("slow", f"({SLEEP} 37.9; echo never) & wait".encode()))
     await a.until(lambda: leftovers("sleep 37.9"), 5)
     await a.send(agent.kill("slow"))
     await a.wait_done("slow", 5)
@@ -373,7 +376,7 @@ async def test_probe_lines_arrive_while_the_job_still_runs(tmp_path: Path, awk: 
     the job ended, so a probe that then timed out lost all of them (review: protocol 1)."""
     a = await start_agent(tmp_path, ["sh"], awk=awk)
     try:
-        await a.send(agent.probe_request("early", b"echo first; sleep 4.31; echo never"))
+        await a.send(agent.probe_request("early", f"echo first; {SLEEP} 4.31; echo never".encode()))
         await a.until(lambda: bytes(a.out.get("early", b"")) == b"first\n", 2.5)
         assert "early" not in a.done
         await a.send(agent.kill("early"))
@@ -445,7 +448,7 @@ async def test_jobs_are_not_children_of_the_agent_shell(live: Agent) -> None:
     """The agent never `wait`s, so a job started with a plain `&` stayed in its shell's job table for good (bash:
     memory and per-job latency grew with every probe; review: protocol 5). Jobs run detached from it instead."""
     assert live.ready is not None
-    await live.send(agent.probe_request("d", b"sleep 43.7"))
+    await live.send(agent.probe_request("d", f"{SLEEP} 43.7".encode()))
     await live.until(lambda: leftovers("sleep 43.7"), 5)
     pid = int(leftovers("sleep 43.7")[0].split()[0])
     assert live.ready.pid not in _ancestors(pid)
@@ -459,7 +462,7 @@ async def test_a_job_that_cannot_be_killed_frees_its_slot(tmp_path: Path) -> Non
     count toward MAX_JOBS forever, so after eight of them every request got `Z 125` (review: protocol 2)."""
     a = await start_agent(tmp_path, ["sh"])
     try:
-        stuck = b"(setsid sh -c 'exec sleep 44.9' &); echo started; sleep 44.8"
+        stuck = f"(setsid sh -c 'exec {SLEEP} 44.9' &); echo started; {SLEEP} 44.8".encode()
         for i in range(agent.MAX_JOBS):
             await a.send(agent.probe_request(f"s{i}", stuck))
         await a.until(lambda: all(bytes(a.out.get(f"s{i}", b"")) == b"started\n" for i in range(agent.MAX_JOBS)), 10)
