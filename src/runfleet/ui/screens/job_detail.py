@@ -621,7 +621,7 @@ class JobDetailScreen(FleetScreen):
         job = self.rf.store.job(self.key)
         self.job = job
         label = job.key.label if job is not None else self.key.id
-        yield FleetHeader(crumbs=["Jobs", label], host=self.key.host, id="header")
+        yield FleetHeader(crumbs=[("Jobs", ("view", "jobs")), label], host=self.key.host, id="header")
         yield Static("", id="title", classes="title-line")
         yield Static("", id="banner", classes="title-line")
         cause = Static("", id="cause", classes="title-line")      # cause chip / pending reason (§5.2.8)

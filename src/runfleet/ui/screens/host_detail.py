@@ -205,7 +205,8 @@ class HostDetailScreen(FleetScreen):
         return f"driver {caps.driver_version}" if caps.driver_version else caps.login_host
 
     def compose(self) -> ComposeResult:
-        yield FleetHeader(crumbs=["Hosts", self.host], host=self.host, extra=self._extra, id="header")
+        yield FleetHeader(crumbs=[("Hosts", ("view", "fleet")), self.host], host=self.host, extra=self._extra,
+                          id="header")
         yield Static("", id="banner", classes="title-line")
         # scrolling layouts: near the minimum terminal size the panels below the tables stay reachable
         with VerticalScroll(id="ws-layout"):

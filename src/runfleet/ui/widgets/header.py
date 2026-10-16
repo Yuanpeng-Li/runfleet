@@ -3,7 +3,9 @@
 One line. The main screen shows the scope chip, one chip per host and the totals over the scope; detail screens show
 a breadcrumb and the status of their host instead of the chips. Responsive per §7.4: full chips >= 110 columns, no
 ages < 110, dots + names < 90, dots + numbers < 70. Chips are clickable (scope / error details); the `RunFleet`
-logo goes back to the Fleet view and the `⚙` chip at the right edge opens Settings.
+logo goes back to the Fleet view and the `⚙` chip at the right edge opens Settings. On detail screens every part of
+the breadcrumb but the last (the screen itself) is clickable and goes back there (``app.crumb``): the host name to
+its host detail, ``Jobs`` / ``Hosts`` to that view, a job to its detail.
 """
 
 from __future__ import annotations
@@ -27,6 +29,15 @@ def _click(action: str) -> Style:
     return Style(meta={"@click": action})
 
 
+# A breadcrumb part: plain text (not clickable: the current screen) or (label, target). Targets go to
+# RunFleetApp.action_crumb: ("view", "jobs" | "fleet" | "gpus"), ("host", name), ("job", host, id).
+Crumb = str | tuple[str, tuple[str, ...]]
+
+
+def crumb_action(target: tuple[str, ...]) -> str:
+    return "app.crumb(" + ", ".join(repr(t) for t in target) + ")"
+
+
 class FleetHeader(Static):
     """The first line of every full screen."""
     @property
@@ -42,7 +53,7 @@ class FleetHeader(Static):
     FleetHeader { height: 1; width: 1fr; }
     """
 
-    def __init__(self, *, crumbs: Sequence[str] = (), host: str | None = None,
+    def __init__(self, *, crumbs: Sequence[Crumb] = (), host: str | None = None,
                  extra: Callable[[], str] | None = None, id: str | None = None) -> None:
         super().__init__("", id=id)
         self.crumbs = tuple(crumbs)
@@ -191,11 +202,18 @@ class FleetHeader(Static):
         left.append("RunFleet", style=f"bold {theme.ACCENT}" if not theme.no_color() else "bold")
         left.stylize(_click("app.home"), 1)             # the logo goes home (Fleet view) from any screen
         left.append(" ")
-        left.append_text(self._scope_chip(compact and not self.crumbs))
+        chip = self._scope_chip(compact and not self.crumbs)
+        if self.crumbs and self.host:                   # a detail screen's host: back to (or into) its host detail
+            chip.stylize(_click(crumb_action(("host", self.host))))
+        left.append_text(chip)
         if self.crumbs:
             for c in self.crumbs:
                 left.append(" › ", style=theme.dim())
-                left.append(c)
+                label, target = (c, None) if isinstance(c, str) else c
+                part = Text(label)
+                if target:
+                    part.stylize(_click(crumb_action(target)))
+                left.append_text(part)
             right = Text()
             right.append_text(self._host_status(width < 100) if self.host else Text())
             right.append("  ")

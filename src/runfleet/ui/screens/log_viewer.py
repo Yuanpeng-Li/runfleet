@@ -46,10 +46,14 @@ class LogScreen(FleetScreen):
         self.ended = False
         self.follower: LogFollower | None = None
 
+    def _crumbs(self, label: str) -> list[Any]:
+        """Jobs › <job> (back to its detail) › <stream>."""
+        return [("Jobs", ("view", "jobs")), (label, ("job", self.key.host, self.key.id)), self.stream]
+
     def compose(self) -> ComposeResult:
         job = self.rf.store.job(self.key)
         label = job.key.label if job is not None else self.key.id
-        yield FleetHeader(crumbs=["Jobs", label, self.stream], host=self.key.host, id="header")
+        yield FleetHeader(crumbs=self._crumbs(label), host=self.key.host, id="header")
         yield Static("", id="streams", classes="title-line")
         yield LogView(id="log-view")
         search = Input(placeholder="search the buffer (enter: find · esc: cancel)", id="log-search", compact=True)
@@ -85,7 +89,7 @@ class LogScreen(FleetScreen):
         view = self.query_one(LogView)
         view.ended = job.state.is_terminal
         header = self.query_one(FleetHeader)
-        header.crumbs = ("Jobs", job.key.label, self.stream)
+        header.crumbs = tuple(self._crumbs(job.key.label))
         header.refresh_content()
         if ref is not None:
             start = self._hit_start(ref)

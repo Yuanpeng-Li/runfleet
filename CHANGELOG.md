@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-16
+
+### Added
+- **Clickable path at the top of detail screens**: in `RunFleet | k2 › Jobs › 4024018`, a click on `k2` goes to its
+  host detail, `Jobs` to the Jobs view and, in the log viewer, the job id back to that job — returning to the screen
+  you came through when it is still open (cursor and tab as you left them). The last part is the screen you are on.
+
 ## [0.7.0] - 2026-10-16
 
 ### Added
@@ -382,7 +389,8 @@ First public release.
   opt-in with `--yes`); `scripts/gen_docs.py`; `scripts/screenshots.py`.
 - CI: lint, types and tests on Python 3.11 and 3.13, plus a packaging job that runs the demo from the built wheel.
 
-[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.4.0...v0.5.0

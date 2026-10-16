@@ -526,6 +526,41 @@ class RunFleetApp(App[None]):
         """Header logo click: close every detail screen and show the Fleet view."""
         self.go_main("fleet")
 
+    def action_crumb(self, kind: str, *target: str) -> None:
+        """A header breadcrumb click: back to that place. A screen for it further down the stack is returned to as it
+        was (cursor, tab, scroll); otherwise the main screen shows the view, or the host / job detail opens on it."""
+        from runfleet.ui.screens.host_detail import HostDetailScreen
+        from runfleet.ui.screens.job_detail import JobDetailScreen
+
+        if kind == "view":
+            self.go_main(target[0] if target else None)
+            return
+        if kind == "host" and target:
+            host = target[0]
+
+            def wanted(s: Any) -> bool:
+                return isinstance(s, HostDetailScreen) and s.host == host
+        elif kind == "job" and len(target) == 2:
+            key = JobKey(target[0], target[1])
+
+            def wanted(s: Any) -> bool:
+                return isinstance(s, JobDetailScreen) and s.key == key
+        else:
+            return
+        stack = self.screen_stack
+        for i in range(len(stack) - 1, -1, -1):
+            if wanted(stack[i]):
+                while self.screen is not stack[i] and len(self.screen_stack) > i + 1:
+                    self.pop_screen()
+                return
+        self.go_main()
+        if kind == "host":
+            self.action_open_host(target[0])
+        elif self.store.job(JobKey(target[0], target[1])) is not None:
+            self.open_job(JobKey(target[0], target[1]))
+        else:
+            self.toast(f"{target[0]}:{target[1]} is no longer listed", severity="warning")
+
     def action_settings(self, section: str = "hosts") -> None:
         """``,`` / palette › Settings / header chip: the settings overlay (``,`` again closes it)."""
         from runfleet.ui.screens.settings import SettingsScreen

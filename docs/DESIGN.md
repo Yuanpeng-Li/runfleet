@@ -3644,7 +3644,7 @@ digest's `f` sets the preset aside); changing it back does not bring the name ba
   the scope (like the cards and the default Jobs view; the Jobs view's `u` adds other users'),
   refresh indicator `⟳ 15s` (fastest current tick; a spinner replaces `⟳` while any probe is in flight), `R/O` in
   read-only mode, `idle ×4` when throttled, `paused (idle) — any key resumes` when paused. Clicking a host chip scopes to
-  it; clicking a red chip opens HostErrorScreen. The `RunFleet` logo returns to the Fleet view from any screen; a `⚙` chip at the right edge opens Settings (same as `,`). The
+  it; clicking a red chip opens HostErrorScreen. The `RunFleet` logo returns to the Fleet view from any screen; on detail screens the host chip and every breadcrumb part but the last (the screen itself) is clickable — `app.crumb(kind, …)`: `("view", jobs|fleet)` shows that main view, `("host", name)` / `("job", host, id)` pop back to that screen when it is further down the stack (state kept), else open it from the main screen; a `⚙` chip at the right edge opens Settings (same as `,`). The
   compact chip forms (name or number only, when the full chips do not fit) end in `:d`/`:a`/`:k` for unreachable,
   needs auth and host key (`✖lynx:a`).
 - **Stale data** (`HostState.stale(now)`: state ∉ {OK, DEGRADED}, or data older than 2 × the host's *effective* tick +

@@ -328,7 +328,8 @@ Every view lists its keys with `?`. The table below is generated from the same s
 <!-- keymap:end -->
 
 **Mouse.** Click selects rows, cards, tabs and header chips (a job row in a Fleet card or the fleet panel opens that
-job); the `RunFleet` logo at the top left goes back to the Fleet view from any screen; double-click drills in; right-click opens the action menu;
+job); the `RunFleet` logo at the top left goes back to the Fleet view from any screen, and on a detail screen every part
+of the path after it goes back there (`k2` to its host detail, `Jobs` to the Jobs view, a log's job to that job); double-click drills in; right-click opens the action menu;
 clicking a column header sorts. To select text hold `Shift` while dragging (most terminals), or start with
 `--no-mouse`; `y` copies the id and `Y` opens the copy menu (below) without selecting. Copying uses OSC 52, which the
 terminal never acknowledges, so the toast says what was sent and shows the text for you to select if nothing arrived:
