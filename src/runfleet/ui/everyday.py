@@ -527,7 +527,7 @@ async def login_all(app: RunFleetApp) -> None:
     re-prepare each and toast a summary."""
     hosts = [h for h in login_targets(app) if h not in app._connecting]
     if not hosts:
-        app.toast("no host needs a login")
+        app.toast("no host needs a login", reply=True)
         return
     app._connecting.update(hosts)
     try:

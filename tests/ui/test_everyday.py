@@ -418,6 +418,10 @@ async def test_log_in_to_all_in_one_suspend(make_app: MakeApp, monkeypatch: pyte
         assert svc.called("after_connect") == [("vega", 0), ("lynx", 255)]
         assert "logged in: vega · failed: lynx (rc 255)" in toasts(app)
         svc.set_ok("lynx")
+        for _ in range(50):             # the recovery toast comes with the next store flush (<= 0.25 s): let it land
+            if "lynx is back (ok)" in toasts(app):    # first, so it cannot follow the answer to C (slow CI runners)
+                break
+            await pilot.pause(0.05)
         await pilot.press("C")
         await app.workers.wait_for_complete()
         await pilot.pause()
@@ -522,3 +526,16 @@ async def test_busy_controller_note_in_card_and_error_screen(make_app: MakeApp) 
         await pilot.pause()
         assert "controller busy — slowed 4×" in str(app.screen.query_one("#err-body").render())
     assert busy_note(dataclasses.replace(st, controller_slowdown=1.0)) is None
+
+
+async def test_a_reply_toast_is_never_dropped_by_the_rate_limit(make_app: MakeApp) -> None:
+    """Three background notices filled the 10 s window, so `C`'s "no host needs a login" vanished (flaky on CI)."""
+    app, _svc = make_app()
+    async with app.run_test(size=BIG) as pilot:
+        await pilot.pause()
+        for i in range(3):
+            app.toast(f"background {i}")
+        app.toast("dropped")                              # a 4th background notice: coalesced into the next one
+        app.toast("the answer", reply=True)
+        await pilot.pause()
+        assert toasts(app)[-1].startswith("the answer") and "dropped" not in toasts(app)

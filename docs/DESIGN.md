@@ -3665,7 +3665,8 @@ digest's `f` sets the preset aside); changing it back does not bring the name ba
 - **Unavailable metrics** render `–` (never 0) with the reason in the detail view: "n/a — no GPU accounting on this
   cluster", "n/a — job pending", "unavailable — nvidia-smi hung (retry in 60 s)".
 - **Toasts** (`App.notify`): host transitions to/from UNREACHABLE / NEEDS_AUTH / HOSTKEY (one per transition), action
-  results, second-instance warning. At most 3 per 10 s; extras coalesce ("+2 more").
+  results, second-instance warning. At most 3 per 10 s; extras coalesce ("+2 more"). Errors and the direct reply to the
+  user's own key or click (`toast(reply=True)`, e.g. "no host needs a login") are never dropped by that limit.
 
 ### 7.8 Key bindings (`ui/keymap.py` is the single source; help overlay and `docs/USER_GUIDE.md` are generated from it)
 

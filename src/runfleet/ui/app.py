@@ -448,12 +448,15 @@ class RunFleetApp(App[None]):
         return main
 
     # ------------------------------------------------------------------ toasts
-    def toast(self, message: str, *, severity: str = "information", timeout: float | None = None) -> None:
-        """App.notify with the §7.7 rate limit (3 per 10 s, extras coalesced into the next toast)."""
+    def toast(self, message: str, *, severity: str = "information", timeout: float | None = None,
+              reply: bool = False) -> None:
+        """App.notify with the §7.7 rate limit (3 per 10 s, extras coalesced into the next toast). `reply`: the direct
+        answer to the user's own key or click ("no host needs a login"): never dropped for background notices that
+        happened to fill the window first (it still counts towards it)."""
         now = time.monotonic()
         while self._toasts and now - self._toasts[0] > TOAST_WINDOW:
             self._toasts.popleft()
-        if len(self._toasts) >= TOAST_MAX and severity != "error":
+        if len(self._toasts) >= TOAST_MAX and severity != "error" and not reply:
             self._suppressed += 1
             return
         self._toasts.append(now)

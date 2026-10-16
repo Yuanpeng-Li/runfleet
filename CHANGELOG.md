@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The answer to your own key press (e.g. `C` with no host needing a login says "no host needs a login") could be
+  dropped when three background notices had just been shown; such replies are never rate-limited now.
+
 ## [0.7.1] - 2026-10-16
 
 ### Added
