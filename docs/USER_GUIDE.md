@@ -145,7 +145,8 @@ the Summary's right column shows an ended job's **Efficiency** box instead of it
 below) and a pending job's **Priority** box (see *Why isn't it starting?* under *States and hints*).
 
 **Host detail** (`enter` on a host). Workstations: per-GPU bars, host CPU/memory, and processes (GPU holders
-of all users plus the members of your tasks; `u` toggles other users). Click a GPU row (or step with `[` / `]`) to
+of all users plus the members of your tasks; other users' are shown by default, `u` hides or shows them and the
+next host detail opens the same way). Click a GPU row (or step with `[` / `]`) to
 list only the processes on that GPU, whoever owns them; click it again for all processes. Clusters: partitions with
 free GPUs by type (those of your recent jobs, plus every GPU partition your accounts may submit to, such as a lab's
 paid partition you have not used lately; `partitions` in the config pins the list), nodes (state, CPU, memory, GPU
@@ -159,6 +160,9 @@ connected shows only its connection panel (`c` log in, `e` details, `t` disable)
 
 **Log viewer** (`l`). The job's stdout or stderr (`o`/`e`), following the file as it grows (`F` toggles). Progress
 bars that rewrite one line with carriage returns (tqdm) show up as a live line under the log instead of flooding it.
+When a program writes nothing but such a progress bar for a long time (the end of the log has no complete line at all),
+the viewer shows the start of the log instead of an empty pane, with a note that the latest progress is on the `↻`
+line below.
 Search the log in your pager with `p` (`less` on the remote host when available, else a downloaded copy). `/` searches
 the loaded buffer (`n`/`N`); `]`/`[` jump to the next / previous error or warning line (Traceback, `…Error`, CUDA out
 of memory, NCCL errors, `Killed`, OOM kills, `slurmstepd: error`, `DUE TO TIME LIMIT`, preemption, segmentation

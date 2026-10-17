@@ -226,6 +226,10 @@ def _h_peek(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
     return render.log_peek(h, path=_meta_str(s.meta, "path", ""), nbytes=_meta_int(s.meta, "bytes", 4096))
 
 
+def _h_head(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
+    return render.log_head(h, path=_meta_str(s.meta, "path", ""), nbytes=_meta_int(s.meta, "bytes", 32768))
+
+
 def _h_fetch(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
     return render.log_fetch(h, path=_meta_str(s.meta, "path", ""), nbytes=_meta_int(s.meta, "bytes", 4 << 20))
 
@@ -300,6 +304,7 @@ HANDLERS: dict[str, Handler] = {
     "process.detail": _h_detail,
     "log.peek": _h_peek,
     "log.fetch": _h_fetch,
+    "log.head": _h_head,
     "log.search": _h_search,
     "slurm.attach.audit": _h_attach_audit,
 }

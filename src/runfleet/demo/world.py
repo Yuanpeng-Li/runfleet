@@ -78,6 +78,10 @@ class SimLog:
     def tail(self, nbytes: int) -> bytes:
         return bytes(self._buf[-nbytes:]) if nbytes > 0 else b""
 
+    def head(self, nbytes: int) -> bytes:
+        """The first bytes still kept (the simulation drops a very long log's head; a real file keeps it)."""
+        return bytes(self._buf[:nbytes]) if nbytes > 0 else b""
+
     def read_from(self, offset: int) -> bytes:
         """Bytes written after absolute offset `offset` (what `tail -F` delivers next)."""
         return bytes(self._buf[max(0, offset - self._base):])

@@ -164,6 +164,31 @@ def peek_section(path: str, nbytes: int) -> Section:
                    meta={"path": path, "bytes": int(nbytes)})
 
 
+HEAD_BYTES = 32768             # start of a log shown when its tail holds only "\r" progress (tqdm), §4.7
+HEAD_LINES = 200
+
+
+def head_section(path: str, nbytes: int) -> Section:
+    """`log.head`: size/mtime, then the first `nbytes` (one read, on demand: the follower asks for it once when the
+    tail has no complete line, so the pane shows the log's start instead of nothing)."""
+    p = shell.quote(shell.path(path))
+    return Section("log.head", cmd=f"stat -L -c '%s|%Y' -- {p}; head -c {int(nbytes)} -- {p}", timeout=10,
+                   meta={"path": path, "bytes": int(nbytes)}, max_stdout=2 * int(nbytes) + 256)
+
+
+def parse_head(stdout: str, stderr: str, nbytes: int, now: datetime) -> LogPeek:
+    """`size|mtime` line, then the head bytes -> its complete lines (``\r`` progress collapsed to its last state, at
+    most HEAD_LINES); an unterminated end (the read stopped mid-line, or a progress line) is left out."""
+    head, _, body = stdout.partition("\n")
+    m = re.fullmatch(r"(\d+)\|(\d+)", head.strip())
+    if m is None:
+        return LogPeek(lines=(), size=None, mtime=None, fetched_at=now, error=_file_error(stderr) or "no output")
+    size, mtime = int(m.group(1)), datetime.fromtimestamp(int(m.group(2)), tz=UTC)
+    asm = LineAssembler()
+    lines = asm.feed(body.encode("utf-8", errors="replace")) if body else []
+    return LogPeek(lines=tuple(lines[:HEAD_LINES]), size=size, mtime=mtime, fetched_at=now)
+
+
 def fetch_section(path: str, nbytes: int) -> Section:
     p = shell.quote(shell.path(path))
     return Section("log.fetch", cmd=f"tail -c {int(nbytes)} -- {p}", timeout=30,
@@ -404,6 +429,18 @@ class LogService:
         peek = parse_peek(r.stdout, r.stderr, nbytes, now)
         self._peeks[key] = _Peeked(peek, mono)
         return peek
+
+    async def head(self, host: str, ref: LogRef, *, nbytes: int = HEAD_BYTES) -> LogPeek:
+        """The start of a log (its complete lines), read once on demand; never raises."""
+        now = self.clock.now()
+        if not ref.path:
+            return LogPeek(lines=(), size=None, mtime=None, fetched_at=now, error="log path unknown")
+        script = framing.make_script([head_section(ref.path, nbytes)], "log")
+        res = await self._probe(host, script)
+        if res.error is not None:
+            return LogPeek(lines=(), size=None, mtime=None, fetched_at=now, error=res.error.summary)
+        r = res.sections["log.head"]
+        return parse_head(r.stdout, r.stderr, nbytes, now)
 
     async def fetch(self, host: str, ref: LogRef, *, nbytes: int = 4 << 20) -> Path:
         if not ref.path:

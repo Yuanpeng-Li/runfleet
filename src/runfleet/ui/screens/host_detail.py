@@ -178,7 +178,7 @@ class HostDetailScreen(FleetScreen):
     def __init__(self, host: str) -> None:
         super().__init__()
         self.host = host
-        self.show_others = False
+        self.show_others = True                 # set from ui.json on mount (`u` remembers; others shown by default)
         self.gpu: int | None = None             # workstation: the GPU whose processes the table shows (all users)
         self.sort = "gpu_mem"
         self.reverse = False
@@ -226,6 +226,7 @@ class HostDetailScreen(FleetScreen):
         yield HintBar(self.help_contexts(), id="hints")
 
     def on_mount(self) -> None:
+        self.show_others = self.rf.ui_state.get("host_others", True) is not False
         for box_id, title in (("#gpu-panel", "GPUs"), ("#host-box", "Host"), ("#ws-conn", "Connection"),
                               ("#parts-box", "Partitions (assoc, recent jobs, GPU partitions open to you)"),
                               ("#caps-box", "Capabilities / connection"), ("#myjobs-box", f"My jobs on {self.host}")):
@@ -406,6 +407,7 @@ class HostDetailScreen(FleetScreen):
 
     def action_toggle_users(self) -> None:
         self.show_others = not self.show_others
+        self.rf.save_ui_state(host_others=self.show_others)   # the next host detail opens the same way
         self.refresh_data(None)
 
     def action_next_sort(self) -> None:

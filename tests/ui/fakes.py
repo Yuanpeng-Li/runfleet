@@ -557,11 +557,11 @@ LOG_LINES = (
 class FakeLogSession:
     """LogSession whose updates come from an initial tail plus whatever the test pushes."""
 
-    def __init__(self, host: str, ref: LogRef, initial: Sequence[str]) -> None:
+    def __init__(self, host: str, ref: LogRef, initial: Sequence[str], live: str | None = None) -> None:
         self.host = host
         self.ref = ref
         self.queue: asyncio.Queue[LogUpdate | None] = asyncio.Queue()
-        self.queue.put_nowait(LogUpdate(lines=tuple(initial)))
+        self.queue.put_nowait(LogUpdate(lines=tuple(initial), live=live))
         self.closed = False
 
     async def updates(self) -> AsyncIterator[LogUpdate]:
@@ -612,6 +612,8 @@ class FakeService:
         self.logs: dict[str, list[str]] = {}
         self.stream_starts: list[int | None] = []          # stream_log(start=…) per stream, in order
         self.missing_logs: set[str] = set()                 # log.search answers "@@err I missing" for these
+        self.log_live: dict[str, str] = {}                  # path -> the live (\r progress) line of its tail
+        self.log_head: dict[str, list[str]] = {}            # path -> head_log lines (default: the first log_lines)
         self.search_errors: dict[str, str] = {}             # host -> search_logs error (no probe)
         self.search_gate: asyncio.Event | None = None       # set: search_logs waits for it (a slow host)
         self.already_connected: set[str] = set()
@@ -726,7 +728,7 @@ class FakeService:
         lines: Sequence[str] = self.log_lines(ref.path)
         if start is not None:                      # `tail -c +K`: from that byte on (the first line may be partial)
             lines = self.log_bytes(ref.path)[start:].decode("utf-8", errors="replace").split("\n")[:-1]
-        session = FakeLogSession(host, ref, lines)
+        session = FakeLogSession(host, ref, lines, self.log_live.get(ref.path or ""))
         self.sessions.append(session)
         self.stream_starts.append(start)
         self._record("stream_log", host, ref.stream, ref.path)
@@ -761,6 +763,13 @@ class FakeService:
         res = SectionResult(section.name, SectionOutcome.OK if out.stdout else SectionOutcome.EMPTY, out.rc,
                             out.stdout, out.stderr, 7)
         return logsearch.parse(host, query, search, res, max_matches=max_matches)
+
+    async def head_log(self, host: str, ref: LogRef, *, nbytes: int = 32768) -> LogPeek:
+        self._record("head_log", host, ref.path)
+        lines = self.log_head.get(ref.path or "")
+        if lines is None:
+            lines = self.log_lines(ref.path)[:200]
+        return LogPeek(tuple(lines), ref.size, ref.mtime, self.clock.now())
 
     async def fetch_log(self, host: str, ref: LogRef, *, nbytes: int = 4 << 20) -> Path:
         fd, name = tempfile.mkstemp(prefix="rf-log-")

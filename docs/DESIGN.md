@@ -1604,6 +1604,9 @@ class FleetAPI(Protocol):
         # start: from that absolute byte offset instead of the last tail_bytes (a log search hit, §4.7.1)
     async def fetch_log(self, host: str, ref: LogRef, *, nbytes: int = 4 << 20) -> Path: ...
         # last nbytes into a private temp file (local $PAGER fallback)
+    async def head_log(self, host: str, ref: LogRef, *, nbytes: int = 32768) -> LogPeek: ...
+        # the first nbytes' complete lines (≤ 200): read once by LogFollower when a followed log's tail holds no
+        # complete line, only "\r" progress (tqdm); never raises (LogPeek.error)
     async def search_logs(self, host: str, query: LogQuery, *, max_matches: int = 200) -> LogSearchResult: ...
         # palette › Search logs… only (never a timer): one `log.search` probe over the host's own recent log files
         # (logsearch.plan: ≤ 20 files, last 256 KiB each, ≤ 1 MiB, ≤ max_matches excerpts); never raises (§4.7.1)
@@ -2062,6 +2065,12 @@ def run_external(self, argv: list[str], *, banner: str | None = None, fail_log: 
 - **Pager** (`p`): `ssh -t <alias> less -R +G -- <path>` if `less` ∈ caps.tools; else `fetch_log` (`log.fetch` =
   `tail -c 4194304 -- {path}`) into a 0600 temp file and the local `general.pager` / `$PAGER` / `less -R +G`. In v0.1
   the pager is where log search happens.
+- **Progress-only tail** (tqdm writing only `\r` updates, no newline in the whole tail window): the stream gives a live
+  line and no complete line, so the pane was empty. On that first update (and only when the view starts at the tail,
+  not at a search hit) `LogFollower` asks `head_log` once — probe `log.head` = `stat -L -c '%s|%Y' -- {path}; head -c
+  32768 -- {path}` — and `LogView.show_head` writes the log's first complete lines (≤ 200) and a dim note "start of the
+  3.1M log · after this it only rewrites one progress line with \r (tqdm) · the latest is below ↻" (no head lines: "no
+  complete line …"). Skipped when complete lines arrived meanwhile.
 - LogView keeps ≤ 20 000 lines (RichLog `max_lines`). Older-chunk paging, wrap toggle and save are **v0.2**; `/`
   searches the loaded buffer, and §4.7.1 searches several jobs' files on the host.
 
@@ -4239,7 +4248,7 @@ Nested node sections (owner `node`, each `timeout -k 2 5` via framing; order fix
 |---|---|
 | `~/.config/runfleet/config.toml` | user config (optional) |
 | `~/.local/state/runfleet/cache.sqlite` | cache (§5.5) |
-| `~/.local/state/runfleet/ui.json` | view, sort, filter text, state preset, grouping, saved Jobs views (`views`, `active_view`, §7.6), theme (auto/dark/light/ansi), Fleet card size (`fleet_layout`: auto/compact), watched jobs and the last visit (`watch`, `last_seen`), GPU availability watches (`watches`, §7.14) |
+| `~/.local/state/runfleet/ui.json` | view, sort, filter text, state preset, grouping, saved Jobs views (`views`, `active_view`, §7.6), theme (auto/dark/light/ansi), Fleet card size (`fleet_layout`: auto/compact), watched jobs and the last visit (`watch`, `last_seen`), GPU availability watches (`watches`, §7.14), host detail's other users' processes (`host_others`, default shown) |
 | `~/.local/state/runfleet/update.json` | update check (§8.6): newest version on main, when asked, the last version announced |
 | `~/.local/state/runfleet/runfleet.log` | rotating log (5 MB × 3); `--debug` raises the level and adds `debug/` raw dumps; `--demo` records carry `[demo]` |
 | `~/.local/state/runfleet/ssh-<host>.log` | `-E` log of master creation / connect / the session ssh (§4.2, §4.8) |
@@ -4914,6 +4923,7 @@ Owner = `Section.owner` (name prefix). All `meta` values are also interpolated (
 | `log.tail` (StreamSpec) | `path: str`, `bytes: int`, `start: int` (optional: `tail -c +<start+1>`, a search hit) | follow |
 | `log.peek` | `path: str`, `bytes: int` | preview |
 | `log.fetch` | `path: str`, `bytes: int` | pager fallback |
+| `log.head` | `path: str`, `bytes: int` | start of a progress-only log (once per followed log) |
 | `log.search` | `paths: list[str]`, `pattern: str` (the ERE grep runs), `icase: bool`, `regex: bool`, `max_matches: int`, `per_file: int`, `budget: int` | cross-job log search, on demand (§4.7.1) |
 | `slurm.attach.node<i>` (Attach, §7.16) | `mode: "ssh"\|"srun"`, `node: str`, `job_id_raw: str`, `jobs_raw: list[str]` (own running jobs on the node read by node.cg/node.pids, target first), `sluids: list[str]` (parallel to jobs_raw, "" unknown), `inner_nonce: str`, `inner: list[str]` (nested section names in order) | one node hop carrying the nested node script |
 | `slurm.attach.audit` (late, Attach) | `mode: str`, `job_id_raw: str`, `nodes: list[str]` | no-leftover audit |

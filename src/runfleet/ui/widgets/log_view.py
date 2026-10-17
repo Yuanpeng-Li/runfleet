@@ -25,6 +25,7 @@ from textual.widgets import RichLog, Static
 from runfleet.core.service import LogUpdate
 from runfleet.models import LogRef
 from runfleet.ui import theme
+from runfleet.util import humanize
 from runfleet.util.logscan import line_level
 
 MAX_LINES = 20_000
@@ -135,6 +136,26 @@ class LogView(Widget):
             self.note = update.note or "stream ended"
             self.stream_ended = True
         self._render_live()
+
+    def show_head(self, lines: Sequence[str], size: int | None) -> None:
+        """The tail held no complete line, only a progress line rewritten with "\\r" (tqdm): show the log's first
+        complete lines instead of an empty pane, then say where the rest went. Nothing when complete lines arrived
+        meanwhile (they are the better view)."""
+        if self.count:
+            return
+        log = self.richlog
+        for line in lines:
+            log.write(_highlight(line), scroll_end=self.follow)
+        what = f"the {humanize.size(size)} log" if size else "the log"
+        if lines:
+            note = (f"── start of {what} · after this it only rewrites one progress line with \\r (tqdm) · "
+                    f"the latest is below ↻ ──")
+        else:
+            note = ("── no complete line: the program only rewrites one progress line with \\r (tqdm) · "
+                    "the latest is below ↻ ──")
+        log.write(Text(note, style=theme.dim()), scroll_end=self.follow)
+        self._raw.extend([*lines, note])
+        self.count += len(lines) + 1
 
     def forget_rendered(self) -> None:
         """The palette changed: draw the kept lines and the status line again in the new colours, at the same scroll
@@ -355,6 +376,7 @@ class LogFollower:
         self.on_update = on_update
         self.ref: LogRef | None = None
         self.host: str | None = None
+        self._head_asked = False           # the log's start was asked for (its tail held only "\\r" progress)
         self.session: Any = None
         self.state = "idle"
         self.attempts = 0                  # automatic reopens since the last explicit start
@@ -381,6 +403,7 @@ class LogFollower:
         self.stop()
         self.attempts = self.attempts + 1 if retry else 0
         self.host, self.ref = host, ref
+        self._head_asked = start is not None    # a search hit starts mid-file on purpose: never add the head
         for view in self.views:
             view.reset()
             if ref.path is None:
@@ -414,6 +437,24 @@ class LogFollower:
                 view.apply(update)
         if self.on_update is not None:
             self.on_update(update)
+        if (not self._head_asked and update.live is not None and self.host is not None and self.ref is not None
+                and not any(view.count for view in self.views)):
+            self._head_asked = True             # a tail of only "\r" progress (tqdm): show the log's start, once
+            self.owner.run_worker(self._head(self.host, self.ref, gen), group="log-head", exit_on_error=False)
+
+    async def _head(self, host: str, ref: LogRef, gen: int) -> None:
+        service = self.owner.app.service   # type: ignore[attr-defined]
+        if not hasattr(service, "head_log"):
+            return
+        try:
+            peek = await service.head_log(host, ref)
+        except Exception:                  # a missing head is just the old empty pane
+            return
+        if gen != self._gen or peek.error is not None:
+            return
+        for view in self.views:
+            if view.is_attached:
+                view.show_head(peek.lines, peek.size)
 
     async def _run(self, host: str, ref: LogRef, gen: int, start: int | None = None) -> None:
         service = self.owner.app.service   # type: ignore[attr-defined]

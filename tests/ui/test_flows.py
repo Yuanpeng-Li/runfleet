@@ -599,13 +599,23 @@ async def test_host_detail_processes_and_other_users(make_app: MakeApp) -> None:
         screen = app.screen
         assert isinstance(screen, HostDetailScreen) and not screen.cluster
         procs = screen.query_one(ProcTable)
+        assert 771002 in procs.order                            # other users' processes are shown by default
+        assert procs.order[0] == 363948                         # sorted by GPU memory
+        await pilot.press("u")
+        await pilot.pause()
+        assert set(procs.order) == {363948, 363942}             # u: mine only
+        assert app.ui_state["host_others"] is False
+        app.pop_screen()
+        await pilot.pause()
+        app.action_open_host("labstation")                      # the next host detail remembers it
+        await pilot.pause()
+        procs = app.screen.query_one(ProcTable)
         assert set(procs.order) == {363948, 363942}
         await pilot.press("u")
         await pilot.pause()
-        assert 771002 in procs.order
-        assert procs.order[0] == 363948                         # sorted by GPU memory
+        assert 771002 in procs.order and app.ui_state["host_others"] is True
         await pilot.press("o")
-        assert screen.sort == "cpu"
+        assert app.screen.sort == "cpu"
         procs.move_cursor(row=procs.order.index(363942))
         await pilot.press("enter")
         await pilot.pause()
@@ -621,7 +631,7 @@ async def test_host_detail_gpu_click_shows_its_processes(make_app: MakeApp) -> N
         screen = app.screen
         assert isinstance(screen, HostDetailScreen)
         procs = screen.query_one(ProcTable)
-        assert 771002 not in procs.order                        # another user's process: hidden by default
+        assert 771002 in procs.order                            # another user's process: shown by default
         await pilot.click("#gpu-panel", offset=(10, 3))         # border, header, GPU 0, GPU 1
         await pilot.pause()
         assert screen.gpu == 1 and procs.order == [771002]      # alice's eval.py on GPU 1, shown without `u`
@@ -630,7 +640,7 @@ async def test_host_detail_gpu_click_shows_its_processes(make_app: MakeApp) -> N
         assert app.focused is procs
         await pilot.click("#gpu-panel", offset=(10, 3))         # the same GPU again: all processes
         await pilot.pause()
-        assert screen.gpu is None and set(procs.order) == {363948, 363942}
+        assert screen.gpu is None and set(procs.order) == {363948, 363942, 771002}
         await pilot.press("right_square_bracket")               # [ ] step all -> GPU 0 -> … -> all
         await pilot.pause()
         assert screen.gpu == 0 and procs.order == []

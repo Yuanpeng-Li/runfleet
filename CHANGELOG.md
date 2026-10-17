@@ -5,7 +5,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-17
+
+### Changed
+- Host detail of a workstation shows other users' processes by default (it used to need `u`); `u` still hides or
+  shows them, and the next host detail opens the way you left it.
+
 ### Fixed
+- **Empty Logs tab for tqdm-only output**: a job writing nothing but a `\r` progress bar (no newline in the last
+  64 KiB) showed an empty log pane. RunFleet now reads the log's first 32 KiB once and shows its start, with a note
+  that the program only rewrites a progress line and the latest is on the `↻` line below.
 - The answer to your own key press (e.g. `C` with no host needing a login says "no host needs a login") could be
   dropped when three background notices had just been shown; such replies are never rate-limited now.
 - Session transport (`mux = "session"`, Windows): when the login ended while jobs were being killed, a job's last
@@ -396,7 +405,8 @@ First public release.
   opt-in with `--yes`); `scripts/gen_docs.py`; `scripts/screenshots.py`.
 - CI: lint, types and tests on Python 3.11 and 3.13, plus a packaging job that runs the demo from the built wheel.
 
-[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.5.0...v0.6.0

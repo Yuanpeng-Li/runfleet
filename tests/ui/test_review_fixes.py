@@ -583,9 +583,7 @@ async def test_proc_table_keeps_the_selected_pid_across_a_resize(make_app: MakeA
     app, svc = make_app()
     async with app.run_test(size=BIG) as pilot:
         app.action_open_host("labstation")
-        await pilot.pause()
-        await pilot.press("u")
-        await pilot.pause()
+        await pilot.pause()                                 # other users' processes are shown by default
         procs = app.screen.query_one(ProcTable)
         pid = procs.order[-1]
         procs.move_cursor(row=len(procs.order) - 1)

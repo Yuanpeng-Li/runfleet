@@ -94,6 +94,9 @@ class FleetAPI(Protocol):
         # start: from that absolute byte offset instead of the last tail_bytes (a log search hit, §4.7.1)
     async def fetch_log(self, host: str, ref: LogRef, *, nbytes: int = 4 << 20) -> Path: ...
         # last nbytes into a private temp file (local $PAGER fallback)
+    async def head_log(self, host: str, ref: LogRef, *, nbytes: int = 32768) -> LogPeek: ...
+        # the first nbytes' complete lines (≤ 200), read once when a followed log's tail holds no complete line
+        # (only "\r" progress, tqdm): the pane then shows the log's start; never raises (error in LogPeek.error)
     async def search_logs(self, host: str, query: LogQuery, *, max_matches: int = 200) -> LogSearchResult: ...
         # palette › Search logs… only (never a timer): one `log.search` probe over the host's own recent log files
         # (logsearch.plan: ≤ 20 files, last 256 KiB each, ≤ 1 MiB, ≤ max_matches excerpts); never raises (§4.7.1)
@@ -701,6 +704,9 @@ class FleetService(FleetAPI):
 
     async def fetch_log(self, host: str, ref: LogRef, *, nbytes: int = 4 << 20) -> Path:
         return await self.logs.fetch(host, ref, nbytes=nbytes)
+
+    async def head_log(self, host: str, ref: LogRef, *, nbytes: int = 32768) -> LogPeek:
+        return await self.logs.head(host, ref, nbytes=nbytes)
 
     async def search_logs(self, host: str, query: LogQuery, *, max_matches: int = 200) -> LogSearchResult:
         from runfleet.core import logsearch

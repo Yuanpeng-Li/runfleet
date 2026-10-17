@@ -883,6 +883,14 @@ def log_peek(h: SimHost, *, path: str, nbytes: int) -> Out:
     return Out(f"{lg.size}|{int(lg.mtime)}\n" + lg.tail(nbytes).decode("utf-8", errors="replace"))
 
 
+def log_head(h: SimHost, *, path: str, nbytes: int) -> Out:
+    """`stat -L -c '%s|%Y' -- P; head -c N -- P`."""
+    lg = h.logs.get(path)
+    if lg is None:
+        return Out("", 1, f"{_stat_error(h, path)}\nhead: cannot open '{path}' for reading: No such file or directory")
+    return Out(f"{lg.size}|{int(lg.mtime)}\n" + lg.head(nbytes).decode("utf-8", errors="replace"))
+
+
 def log_fetch(h: SimHost, *, path: str, nbytes: int) -> Out:
     lg = h.logs.get(path)
     if lg is None:
