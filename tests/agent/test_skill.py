@@ -7,6 +7,7 @@ test_skill_content.py; the renders here use a synthetic template."""
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import shutil
@@ -1219,6 +1220,21 @@ def test_f4_a_symlink_inside_our_copy_is_backed_up_as_a_link_record(home: Path, 
     assert backup_files(state) == {"shared/data.link.txt": f"link to {outside}\n"}
 
 
+def test_link_records_drop_the_windows_extended_length_prefix(tmp_path: Path,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    """os.readlink on Windows reports an absolute target as \\\\?\\C:\\…: the backup record and the tree name the
+    plain path (a UNC target as \\\\server\\…); POSIX link text is kept byte for byte."""
+    assert skill._strip_extended("\\\\?\\C:\\Users\\ana\\out") == "C:\\Users\\ana\\out"
+    assert skill._strip_extended("\\\\?\\UNC\\srv\\share\\x") == "\\\\srv\\share\\x"
+    assert skill._strip_extended("\\\\?\\Volume{1}\\x") == "\\\\?\\Volume{1}\\x"   # no plain form: kept
+    assert skill._strip_extended("..\\rel") == "..\\rel"
+    monkeypatch.setattr(skill.os, "readlink", lambda p: "\\\\?\\C:\\out")
+    monkeypatch.setattr(rf_platform, "IS_WINDOWS", True)
+    assert skill._link_text(tmp_path) == "C:\\out"
+    monkeypatch.setattr(rf_platform, "IS_WINDOWS", False)
+    assert skill._link_text(tmp_path) == "\\\\?\\C:\\out"
+
+
 def test_f5_update_reads_the_recorded_config_under_the_lock(home: Path, state: Path,
                                                             monkeypatch: pytest.MonkeyPatch) -> None:
     env = make_env(home)
@@ -1430,6 +1446,16 @@ def test_e7_stale_claude_link_when_claude_config_dir_is_set(home: Path, state: P
     line = next(ln for ln in st.lines() if "stale link" in ln)
     assert "~/.claude/skills/runfleet" in line and "$CLAUDE_CONFIG_DIR/skills" in line and \
         "`rm ~/.claude/skills/runfleet`" in line and "duplicate" not in line
+    # Windows: native separators throughout, and a command that removes the link alone from cmd and PowerShell
+    win = make_env(home, environ={"CLAUDE_CONFIG_DIR": str(tmp_path / "cc")}, windows=True)
+    line = next(ln for ln in skill.status(win, state_dir=state).lines() if "stale link" in ln)
+    assert "stale link: ~\\.claude\\skills\\runfleet →" in line and \
+        f'`cmd /c rmdir "{claude_link(home)}"`' in line and "~/" not in line
+    # a path either shell would expand inside double quotes: no command, never a wrong one
+    st = skill.status(win, state_dir=state)
+    odd = skill.Stray(st.strays[0].agent, Path("C:/Users/a%USERNAME%$x/.claude/skills/runfleet"), "stale_link")
+    line = next(ln for ln in dataclasses.replace(st, strays=(odd,)).lines() if "stale link" in ln)
+    assert "rmdir" not in line and "delete that link (only the link, not the folder it points to)" in line
 
 
 def test_e7_follow_ups_name_the_files_the_agents_read_here(home: Path, state: Path, tmp_path: Path) -> None:

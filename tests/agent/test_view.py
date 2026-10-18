@@ -198,9 +198,18 @@ ROUND_TRIPPED: set[tuple[tuple[str, ...], bool, int | None, str | None, str]] = 
 
 
 @pytest.fixture(autouse=True)
+def _posix_quoting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Printed commands are quoted for a POSIX shell here on every OS (the expectations below are shlex-quoted);
+    the Windows quoting (double quotes for cmd and PowerShell) is tested with IS_WINDOWS patched back on:
+    test_windows_commands_use_double_quotes, test_windows_trailing_backslash_is_unprintable."""
+    from runfleet.util import platform
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)
+
+
+@pytest.fixture(autouse=True)
 def _printed_commands_round_trip(monkeypatch: pytest.MonkeyPatch) -> Iterable[None]:
-    """J3: every command any test makes `agent.view` print is parsed back through the real CLI parser (POSIX runs;
-    the Windows-quoting tests are skipped: shlex is POSIX)."""
+    """J3: every command any test makes `agent.view` print is parsed back through the real CLI parser (on every OS,
+    as _posix_quoting pins POSIX quoting; the Windows-quoting tests are skipped: shlex is POSIX)."""
     from runfleet.util import platform
     seen: set[tuple[tuple[str, ...], bool, int | None, str | None, str]] = set()
     real = view._rf
@@ -1757,6 +1766,7 @@ def test_windows_commands_use_double_quotes(monkeypatch: pytest.MonkeyPatch) -> 
     shell would expand inside double quotes makes the command unprintable; POSIX keeps shlex quoting."""
     from runfleet.util import platform
     fv = fleet(mk_host("k2"), config_path="C:\\Users\\Ana Ü\\cfg dir\\rf.toml")
+    monkeypatch.setattr(platform, "IS_WINDOWS", False)         # POSIX first, whatever this machine is
     assert view._cmd("job", ["lyra:32377076_[5-12%2]"], fv) == \
         "runfleet -c 'C:\\Users\\Ana Ü\\cfg dir\\rf.toml' agent job 'lyra:32377076_[5-12%2]'"
     monkeypatch.setattr(platform, "IS_WINDOWS", True)

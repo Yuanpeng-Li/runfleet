@@ -216,13 +216,21 @@ def test_tool_arguments_mirror_the_cli_flags(tool: mcp.Tool) -> None:
     assert dests - ignored <= set(tool.properties)
     cli_required = {a.dest for a in _cli_parser_required(tool.verb)}
     assert set(tool.required) == cli_required
+    if not tool.required:                                    # the CLI agrees: the verb runs with no argument at all
+        assert cli.parse_args(["agent", tool.verb]).agent_verb == tool.verb
 
 
 def _cli_parser_required(verb: str) -> list[argparse.Action]:
     parser = cli.command_parser()
     agent = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction)).choices["agent"]
     vp = next(a for a in agent._actions if isinstance(a, argparse._SubParsersAction)).choices[verb]
-    return [a for a in vp._actions if a.required]
+    return [a for a in vp._actions if a.required and not _takes_none(a)]
+
+
+def _takes_none(action: argparse.Action) -> bool:
+    """A positional argparse accepts zero values of (nargs "?" or "*"): never required, whatever `.required` says
+    (Python 3.11 marks a nargs="*" positional without a default required=True; 3.13 does not)."""
+    return not action.option_strings and action.nargs in (argparse.OPTIONAL, argparse.ZERO_OR_MORE)
 
 
 def test_older_protocols_get_no_title_or_annotations() -> None:

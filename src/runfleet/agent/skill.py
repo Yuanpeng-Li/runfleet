@@ -459,11 +459,8 @@ def _tag() -> str:
 
 
 def _show(env: Env, path: Path) -> str:
-    try:
-        rel = path.relative_to(env.home)
-    except ValueError:
-        return str(path)
-    return ("~\\" if env.is_windows else "~/") + str(rel)
+    """`path` for messages: `~/…` (`~\\…` on Windows) under this Env's home, one separator throughout."""
+    return paths.display_path(path, home=env.home, windows=env.is_windows)
 
 
 def _create_junction(target: Path, link: Path) -> None:
@@ -480,12 +477,26 @@ def _create_junction(target: Path, link: Path) -> None:
         raise OSError(f"mklink /J failed: {(proc.stderr or proc.stdout).strip()[:200]}")
 
 
+_WIN_EXPANDS = re.compile(r'[%$`"]')         # text cmd or PowerShell would expand (or end) inside double quotes
+
+
 def _link_text(p: Path) -> str:
-    """Where the link `p` points (its text; a junction's target), never followed further."""
+    """Where the link `p` points (its text; a junction's target), never followed further. On Windows without the
+    `\\\\?\\` extended-length prefix `os.readlink` reports for absolute targets (`C:\\…`, `\\\\server\\…`)."""
     try:
-        return os.readlink(p)
+        text = os.readlink(p)
     except (OSError, ValueError):
         return os.path.realpath(p)
+    return _strip_extended(text) if platform.IS_WINDOWS else text
+
+
+def _strip_extended(text: str) -> str:
+    r"""A Windows path without its extended-length prefix: `\\?\C:\x` → `C:\x`, `\\?\UNC\srv\x` → `\\srv\x`."""
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[8:]
+    if text.startswith("\\\\?\\") and len(text) > 5 and text[5] == ":":
+        return text[4:]
+    return text
 
 
 def _tree(d: Path) -> dict[str, str]:
@@ -1106,9 +1117,17 @@ class StatusReport:
         for s in self.strays:
             if s.kind == "stale_link":
                 var = _BY_ID[s.agent].home_var if s.agent in _BY_ID else None
-                rm = f"rmdir {s.path}" if env.is_windows else f"rm {_show(env, s.path)}"
+                # Windows: the junction / directory link alone, from cmd and PowerShell alike (PowerShell 5.1's
+                # Remove-Item can recurse into the shared copy it points to); no command when either shell would
+                # expand part of the path inside the double quotes (%VAR%, $, a backtick)
+                if not env.is_windows:
+                    how = f"`rm {_show(env, s.path)}` removes it"
+                elif _WIN_EXPANDS.search(str(s.path)):
+                    how = "delete that link (only the link, not the folder it points to) to remove it"
+                else:
+                    how = f'`cmd /c rmdir "{s.path}"` removes it'
                 out.append(f"  stale link: {_show(env, s.path)} → the shared copy, unused ({_label(s.agent)} reads "
-                           f"${var}/skills now); `{rm}` removes it")
+                           f"${var}/skills now); {how}")
                 continue
             what = {"stamped_copy": "a stray RunFleet copy (`runfleet skill uninstall` removes it)",
                     "link_to_ours": "a second link to the shared copy (`runfleet skill uninstall` removes it)",

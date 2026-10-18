@@ -405,10 +405,13 @@ def test_display_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(platform, "IS_WINDOWS", False)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     inside = tmp_path / ".config" / "runfleet" / "config.toml"
-    assert paths.display_path(inside) == "~/" + str(Path(".config", "runfleet", "config.toml"))
+    assert paths.display_path(inside) == "~/.config/runfleet/config.toml"         # one separator, on every OS
     assert paths.display_path(Path("/etc/x")) == str(Path("/etc/x"))
+    assert paths.display_path(tmp_path) == "~"
     monkeypatch.setattr(platform, "IS_WINDOWS", True)
-    assert paths.display_path(inside).startswith("~\\")
+    assert paths.display_path(inside) == "~\\.config\\runfleet\\config.toml"
+    # an explicit home and platform (agent.skill's injected Env) win over this machine's
+    assert paths.display_path(inside, home=tmp_path / ".config", windows=False) == "~/runfleet/config.toml"
 
 
 # ---------------------------------------------------------------- mux policy and the jump rewrite (§4.1-4.2)

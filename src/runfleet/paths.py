@@ -95,14 +95,16 @@ def mux_dir() -> Path:
     return base
 
 
-def display_path(path: Path) -> str:
+def display_path(path: Path, *, home: Path | None = None, windows: bool | None = None) -> str:
     """`path` for messages: `~/…` under the home directory (`~\\…` on Windows, which PowerShell understands too),
-    else as is."""
+    else as is. One separator throughout, the platform's (`windows`, default: this one): never `~/.a\\b`.
+    `home` defaults to the user's home directory."""
     try:
-        rel = path.relative_to(Path.home())
+        rel = path.relative_to(Path.home() if home is None else home)
     except ValueError:
         return str(path)
-    return ("~\\" if platform.IS_WINDOWS else "~/") + str(rel)
+    sep = "\\" if (platform.IS_WINDOWS if windows is None else windows) else "/"
+    return "~" + sep + sep.join(rel.parts) if rel.parts else "~"
 
 
 def ensure_private_dir(path: Path) -> Path:

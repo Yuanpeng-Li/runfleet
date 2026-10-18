@@ -237,6 +237,6 @@ def test_config_help_and_paths_name_the_real_location(windows: None, monkeypatch
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(paths, "config_file", lambda: tmp_path / "AppData" / "Roaming" / "runfleet" / "config.toml")
     text = cli.main_parser().format_help()
-    assert "~\\" + str(Path("AppData", "Roaming", "runfleet", "config.toml")) in " ".join(text.split())
+    assert "~\\AppData\\Roaming\\runfleet\\config.toml" in " ".join(text.split())
     assert cli.display_path(tmp_path / "x") == "~\\x"
     assert cli.shell_word("a b") == '"a b"' and cli.shell_word("k2") == "k2"

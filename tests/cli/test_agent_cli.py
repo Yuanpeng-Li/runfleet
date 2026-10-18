@@ -859,12 +859,15 @@ def test_printed_commands_carry_the_named_config(env: Env, capsys: pytest.Captur
     c.put_health("k2", ok, dest_hash=dest_hash("k2"), remote_user=None, at=NOW - timedelta(minutes=1))
     c.flush_sync()
     c._db.close()
+    # quoted for this OS's shells: POSIX shlex; Windows double quotes (cmd and PowerShell; the path has a space)
+    quoted = f'"{other}"' if sys.platform == "win32" else shlex.quote(str(other))
     rc, doc = run_json(["-c", str(other), "agent", "jobs", "--limit", "2"], capsys)
-    assert doc["truncated"]["next"].startswith(f"runfleet -c {shlex.quote(str(other))} agent jobs ")
-    assert shlex.split(doc["truncated"]["next"])[1:3] == ["-c", str(other)]       # runnable as printed
+    assert doc["truncated"]["next"].startswith(f"runfleet -c {quoted} agent jobs ")
+    if sys.platform != "win32":
+        assert shlex.split(doc["truncated"]["next"])[1:3] == ["-c", str(other)]   # runnable as printed
     rc, out, _ = run(["-c", str(other), "agent", "brief"], capsys)
     nxt = [ln for ln in out.splitlines() if "runfleet " in ln and not ln.startswith("# runfleet")]
-    assert nxt and all(f"runfleet -c {shlex.quote(str(other))} " in ln for ln in nxt)
+    assert nxt and all(f"runfleet -c {quoted} " in ln for ln in nxt)
     env.config('[[host]]\nname = "k2"\nssh = "k2"\n')
     rc, doc = run_json(["agent", "jobs", "--limit", "2"], capsys)                  # the default config: no -c
     assert doc["truncated"]["next"].startswith("runfleet agent jobs ")
