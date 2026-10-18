@@ -58,6 +58,33 @@ def task_id(pid: int, start: int) -> str:
     return f"p{pid}-{start}"
 
 
+_TASK_ID = re.compile(r"p([0-9]{1,10})-([0-9]{1,12})")
+
+
+def parse_task_id(text: str) -> tuple[int, int] | None:
+    """(root pid, start epoch) of a full task id `p<pid>-<start>`; None for anything else."""
+    m = _TASK_ID.fullmatch(text)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def nearest_task(job_id: str, jobs: Mapping[str, Job]) -> Job | None:
+    """The task `job_id` (a full id `p<pid>-<start>`) names when no id matches exactly: same root pid, start within
+    START_TOLERANCE_S. A task's start is `date - etimes`, recomputed by every collector (each `runfleet` call), so
+    the id another call printed may be a second off; the closest start wins (then the smaller id). None: not a full
+    task id, or no such task."""
+    want = parse_task_id(job_id)
+    if want is None:
+        return None
+    best: tuple[int, str, Job] | None = None
+    for key, job in jobs.items():
+        if job.kind is not JobKind.TASK or (got := parse_task_id(key)) is None or got[0] != want[0]:
+            continue
+        delta = abs(got[1] - want[1])
+        if delta <= START_TOLERANCE_S and (best is None or (delta, key) < best[:2]):
+            best = (delta, key, job)
+    return best[2] if best is not None else None
+
+
 @dataclass(frozen=True, slots=True)
 class TaskRecord:
     key: JobKey

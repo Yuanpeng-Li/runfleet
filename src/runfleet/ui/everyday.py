@@ -25,7 +25,9 @@ from runfleet.core.forwards import UrlCandidate, find_urls
 from runfleet.errors import RunFleetError
 from runfleet.models import GPU, ConnState, Job, JobDetail, JobKey, JobKind, LogRef, StateGroup
 from runfleet.util import humanize
+from runfleet.util.gpufree import FREE_MEM_MIB as FREE_MEM_MIB, FREE_UTIL_PCT as FREE_UTIL_PCT, split_free
 from runfleet.util.logscan import cause_of
+from runfleet.util.redact import scrub as scrub      # moved to util.redact (shared with `runfleet agent`)
 
 if TYPE_CHECKING:
     from runfleet.ui.app import RunFleetApp
@@ -35,40 +37,8 @@ log = logging.getLogger("runfleet.ui.everyday")
 BUNDLE_LOG_LINES = 30
 FETCH_TAIL = 16 << 10          # support bundle: the log's last 16 KiB when RunFleet holds fewer lines
 URL_SCAN_BYTES = 1 << 20       # port forward: service URLs are printed at start-up, so look at up to 1 MiB
-FREE_MEM_MIB = 1024.0          # a GPU is free below 1 GiB used …
-FREE_UTIL_PCT = 5.0            # … and 5 % utilisation, with no process on it
 LOGIN_STATES = frozenset({ConnState.NEEDS_AUTH, ConnState.HOSTKEY, ConnState.UNREACHABLE})
 LABEL_WIDTH = 60               # menu labels fit one line of the 66-wide menu
-
-
-# ====================================================================================================== secrets
-_SECRETS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(?<![0-9A-Fa-f])[0-9a-f]{40}(?![0-9A-Fa-f])"), "<redacted-40hex>"),     # wandb API keys
-    (re.compile(r"\bhf_[A-Za-z0-9]{20,}"), "hf_<redacted>"),
-    (re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}"), "sk-<redacted>"),
-    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "gh*_<redacted>"),
-    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "<redacted-aws-key-id>"),
-    (re.compile(r"(?i)\b(aws_secret_access_key|aws_session_token)(\s*[=:]\s*)\S+"), r"\1\2<redacted>"),
-    (re.compile(r"(?i)\b((?:access_)?token=)[^&\s#'\"]+"), r"\1<redacted>"),
-    # PEM private keys (to the END line, else to the end of the code fence / text: a tail can cut the block)
-    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|(?=\n```)|\Z)",
-                re.DOTALL), "<redacted-private-key>"),
-    (re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/\-]{8,}=*"), r"\1 <redacted>"),
-    (re.compile(r"\b([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s:@'\"]+:[^/\s@'\"]+@"), r"\1<redacted>@"),   # user:pw@ in URLs
-    # NAME=value / NAME: value / "name": "value" whose name ends in password, secret, token, api key …
-    (re.compile(r"(?i)\b([A-Za-z0-9_.\-]*(?:password|passwd|passphrase|secret|token|api_?key|access_?key)"
-                r"[\"']?\s*[=:]\s*[\"']?)(?!<redacted)[^\s\"',;&]+"), r"\1<redacted>"),
-)
-
-
-def scrub(text: str) -> str:
-    """Secrets out of text that leaves the machine (support bundle): wandb keys (40 hex), ``hf_…``, ``sk-…``,
-    ``ghp_…``, AWS key ids and secrets, ``token=`` query parameters, PEM private keys, ``Bearer`` / ``Basic``
-    credentials, ``user:password@`` in URLs and values of ``…PASSWORD`` / ``…SECRET`` / ``…TOKEN`` / ``…API_KEY``
-    assignments."""
-    for rx, repl in _SECRETS:
-        text = rx.sub(repl, text)
-    return text
 
 
 # ====================================================================================================== copy menu
@@ -262,17 +232,8 @@ def _holder(gpu: GPU, jobs: Mapping[JobKey, Job]) -> str:
 def free_gpus(gpus: Iterable[GPU], jobs: Mapping[JobKey, Job] | None = None) -> tuple[list[GPU], list[str]]:
     """(free GPUs idlest first, who holds the others). Free = no process, < 1 GiB used, < 5 % utilisation; ranked
     by memory used, then utilisation, then index."""
-    jobs = jobs or {}
-    free: list[GPU] = []
-    held: list[str] = []
-    for g in sorted(gpus, key=lambda g: g.index):
-        if (not g.processes and g.mem_used_mib is not None and g.mem_used_mib < FREE_MEM_MIB
-                and g.util_pct is not None and g.util_pct < FREE_UTIL_PCT):
-            free.append(g)
-        else:
-            held.append(_holder(g, jobs))
-    free.sort(key=lambda g: (g.mem_used_mib or 0.0, g.util_pct or 0.0, g.index))
-    return free, held
+    free, held = split_free(gpus)                      # util.gpufree: the rule, shared with `runfleet agent`
+    return free, [_holder(g, jobs or {}) for g in held]
 
 
 GPU_SECTIONS = ("nvidia.gpu", "process.ps")   # the GPU table and who runs on it

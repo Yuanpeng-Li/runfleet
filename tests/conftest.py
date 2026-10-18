@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -176,6 +177,56 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if item.get_closest_marker("real") is not None:
             item.add_marker(skip)
+
+
+# ---------------------------------------------------------------- isolated user dirs
+# Every place RunFleet could read or write user state: XDG dirs (Linux, BSD), HOME (macOS ~/Library, ~/.ssh,
+# ~/.claude skill installs), USERPROFILE (Path.home() on Windows) and platformdirs' Windows overrides.
+ISOLATED_ENV = ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+                "XDG_RUNTIME_DIR", "WIN_PD_OVERRIDE_APPDATA", "WIN_PD_OVERRIDE_LOCAL_APPDATA")
+# Where coding agents keep their config and skills (`runfleet skill` reads them): unset, so the defaults under the
+# isolated HOME apply and no test can reach the developer's real ~/.claude, $CODEX_HOME, … through them.
+AGENT_ENV = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "COPILOT_HOME", "OPENCODE_CONFIG_DIR",
+             "OPENCODE_CONFIG", "GEMINI_CLI_HOME", "GOOSE_PATH_ROOT", "AMP_SETTINGS_FILE", "FACTORY_HOME")
+
+
+def _short_tmp_dir() -> Path:
+    """A fresh private dir with a short path: the mux dir is ``$XDG_RUNTIME_DIR/runfleet`` only while a socket path
+    there fits 86 bytes, else the *shared* ``/tmp/runfleet-<uid>``, and pytest's tmp_path is often too long."""
+    base = "/tmp" if not WINDOWS and os.path.isdir("/tmp") else None
+    return Path(tempfile.mkdtemp(prefix="rft-", dir=base))
+
+
+@pytest.fixture(autouse=True)
+def isolated_user_dirs(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+    """Point HOME and every XDG / platformdirs location at fresh per-test dirs, so no test (nor a subprocess it
+    starts) ever reads or writes the developer's real config, cache, log, ui.json, mux sockets, instance locks or agent
+    skill dirs (the AGENT_ENV variables are unset).
+
+    ``runfleet.paths`` computes every location at call time from the environment (nothing is cached at import), so
+    the environment is enough; tests that check path rules still override these variables themselves. Yields the
+    root of the isolated tree. Its own MonkeyPatch (not the ``monkeypatch`` fixture): this autouse fixture is set up
+    first and so torn down last, after a test's own patches (say of ``os.lstat``) are undone, before ``rmtree``.
+    """
+    root = tmp_path_factory.mktemp("userdirs")
+    runtime = _short_tmp_dir()
+    values = {
+        "HOME": root / "home", "USERPROFILE": root / "home",
+        "XDG_CONFIG_HOME": root / "config", "XDG_STATE_HOME": root / "state", "XDG_CACHE_HOME": root / "cache",
+        "XDG_DATA_HOME": root / "data", "XDG_RUNTIME_DIR": runtime,
+        "WIN_PD_OVERRIDE_APPDATA": root / "appdata", "WIN_PD_OVERRIDE_LOCAL_APPDATA": root / "localappdata",
+    }
+    assert set(values) == set(ISOLATED_ENV)
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            for name, path in values.items():
+                path.mkdir(parents=True, exist_ok=True)
+                mp.setenv(name, str(path))
+            for name in AGENT_ENV:
+                mp.delenv(name, raising=False)
+            yield root
+    finally:
+        shutil.rmtree(runtime, ignore_errors=True)
 
 
 # ---------------------------------------------------------------- no-ssh guard

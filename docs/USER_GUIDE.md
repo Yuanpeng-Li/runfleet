@@ -29,6 +29,7 @@ Exit codes: `0` ok · `1` runtime error · `2` configuration or usage error · `
 `--demo`) · `4` `snapshot`/`doctor`: at least one host failed (unreachable, needs auth, a failed check). `wait` has its
 own, above: every error, a bad configuration included, is `3` (an argument error caught by the parser stays `2`).
 `status`: `0` a summary (even a stale one) · `1` no data · `2` usage (an unknown host, `--demo`, `--no-cache`).
+`agent`: `0` ok · `4` partial · `1` no data / not found · `2` usage (below).
 
 ### In your prompt or status bar
 
@@ -87,6 +88,163 @@ when = "runfleet status --short >/dev/null"   # hidden while there is no data (e
 format = "[$output]($style) "
 style = "dimmed"
 ```
+
+### Using RunFleet from an AI agent (Claude Code, Codex, Copilot, Gemini, Cursor, …)
+
+`runfleet agent` is a read-only command family made for coding agents: compact answers about your jobs, GPUs and
+hosts, straight from RunFleet's cache (no ssh, about 0.1 s), with how old each piece of data is. Install the skill
+once, so the agent knows when and how to use it:
+
+```console
+$ runfleet skill install
+Installed the runfleet skill 0.8.0 in ~/.agents/skills/runfleet (created)
+  read there by Codex, Pi, Copilot CLI, OpenCode, Gemini CLI, Cursor, Amp, Goose, Factory Droid, Windsurf, Cline, Warp and other agents that read ~/.agents/skills
+Claude Code: ~/.claude/skills/runfleet → ~/.agents/skills/runfleet (symlink, created)
+Trigger words: k2 vega lyra lynx labstation
+Kept up to date automatically when RunFleet is upgraded
+Permission rule: Bash(runfleet agent *)
+…
+```
+
+**Where it goes.** One copy in `~/.agents/skills/runfleet/`, the shared skills folder that Codex, GitHub Copilot CLI,
+Gemini CLI, OpenCode, Cursor, Amp, Goose, Factory Droid, Windsurf, Pi, Cline and Warp all read. Claude Code does not
+read that folder, so it gets a link: `~/.claude/skills/runfleet` (or `$CLAUDE_CONFIG_DIR/skills/runfleet`) → the
+copy. Copilot gets a link in `$COPILOT_HOME/skills` only when you set `COPILOT_HOME` (then it stops reading the
+shared folder). Links are symlinks (on Windows: junctions, which need no admin rights; a copy as the last resort).
+`--agent auto` (the default) links the agents it finds on this machine; `--agent all` every agent that needs a link;
+`--agent claude,antigravity` exactly these (Antigravity CLI is only ever linked when you name it). Your configured
+host names are added to the skill's description as trigger words. `--print` shows the skill without writing
+anything.
+
+**It stays up to date.** RunFleet keeps a record of what it installed (`skill.json` in its state directory) and
+refreshes the skill whenever that is out of date: after `runfleet update`, after the install lines, and at the start
+of any `runfleet` command after an upgrade done some other way (`uv tool upgrade runfleet`) or after you add or
+remove hosts in the config (it never prints anything there, and costs about a millisecond when nothing changed).
+`runfleet skill update` does it by hand; `--no-auto-update` at install turns the automatic refresh off, including
+the refresh after `runfleet update` and the install lines (they then only remind you to run `runfleet skill update`).
+A refresh that keeps failing (say, a read-only `~/.agents/skills`) is retried at most once an hour, and `runfleet
+skill status` shows the last failure. A skill written by a newer RunFleet is never downgraded behind your back: an
+explicit `runfleet skill update` does it and says "downgrading skill 0.9.0 → 0.8.0". Two RunFleets of the same
+version (a development checkout run with `uv run` and the installed tool) do not keep overwriting each other's skill
+text: only the one that wrote it refreshes it on its own. If you install an agent after the skill (say Claude Code),
+`runfleet skill status` lists it as not covered with the command that fixes it (`runfleet skill install --agent
+claude`); `runfleet skill update` also adds it when the skill was installed with `--agent auto` (the default) — the
+automatic refresh never writes into a new agent's folder.
+
+```console
+$ runfleet skill status
+runfleet skill 0.8.0 in ~/.agents/skills/runfleet: up to date
+  automatic refresh: on
+  trigger words: k2 vega lyra lynx labstation
+  Claude Code: link ~/.claude/skills/runfleet
+  Codex: reads the shared copy
+  Gemini CLI: reads the shared copy
+```
+
+`runfleet skill status` (`--json`) shows, per agent, whether it is installed here, whether it sees the skill (through
+the shared folder, a link, or not at all), the installed version, files you edited, broken links and stray copies in
+other skill folders (an agent that finds two copies lists the skill twice).
+
+**Your files are safe.** RunFleet only replaces or removes what it wrote itself (each copy carries a
+`.runfleet-skill.json` stamp that matches its record). A skill directory or link it did not write is left alone
+(`--force` moves it aside instead of deleting it), and a file you edited or added inside the skill is moved to
+`skill-backup/<time>/` in the state directory before an update or removal, and the command says so (after an
+automatic refresh, `runfleet skill status` shows where they went). A link inside the skill folder is saved as a
+small `<name>.link.txt` note of where it pointed, never followed.
+
+**Removing it.** `runfleet skill uninstall` (`--dry-run` to look first) removes the links, the copy, stray copies
+RunFleet wrote in other skill folders, its record and lock file, and the skills folders it created if they are now
+empty. Links it did not make are left alone, also when they point at the same place (if `~/.agents/skills/runfleet`
+is your own skill, nothing pointing to it is touched). It never edits an agent's settings, so it prints what to
+remove by hand if you set it up: `claude mcp remove runfleet -s user`, the `[mcp_servers.runfleet]` block in
+`~/.codex/config.toml` (`$CODEX_HOME/config.toml` if set), and the `Bash(runfleet agent *)` permission rule in
+`~/.claude/settings.json` (`$CLAUDE_CONFIG_DIR/settings.json` if set). The uninstall lines in the README run it for
+you before removing RunFleet itself. If the agent cannot find `runfleet`, the skill first has it check whether
+RunFleet is merely not on the agent's PATH (`~/.local/bin/runfleet`, or it asks you); only if RunFleet is really gone
+does it tell you how to delete the skill (`rm -r -- ~/.agents/skills/runfleet ~/.claude/skills/runfleet`; on
+Windows `Remove-Item -Recurse` on the same two folders).
+
+**Permissions.** RunFleet never edits your agent settings: to let the agent run the read-only verbs without asking,
+add `Bash(runfleet agent *)` to `permissions.allow` in `~/.claude/settings.json` (or `/permissions`); in Codex approve
+the `runfleet agent` prefix when asked. The skill's `allowed-tools` pre-approves the same commands in agents that
+honour it (Claude Code, Copilot); others ignore it.
+
+What the agent runs (`runfleet agent help` has every flag, JSON field and code):
+
+```sh
+runfleet agent brief                         # start here: hosts, my R/PD/failed, what needs a look, free GPUs
+runfleet agent jobs k2 --state failed        # groups queued active finished done failed cancelled ended, or R PD OOM …
+runfleet agent jobs --state finished --since 1d    # everything that ended in the last day
+runfleet agent jobs --workdir DIR --name 'orb-*'   # one project's jobs
+runfleet agent job k2:2332861                # times, placement, why it pends, why it ended, log paths
+runfleet agent log k2:2332861 --lines 80     # bounded, scrubbed log tail — the only verb that runs ssh (1 probe)
+runfleet agent gpus --type h100 --min 4      # where N free GPUs of a type are
+runfleet agent host k2                       # login, failing probes, data ages, partitions, load
+runfleet agent events --since 2h             # submitted / started / ended / time low / host problems
+runfleet wait k2:2332861 --json               # waits for a job: in the background, else --timeout 540 repeated
+```
+
+Every verb takes `--json` (schema `runfleet.agent.<verb>/1`) and `--timeout SEC` (default 30 s for the whole call).
+`--state finished` means every job that ended (done, failed, cancelled and ended); `ended` alone is a workstation task
+that is gone with its exit code unknown. Ids are what the ID column shows (`labstation:p642229`); the JSON `key`
+(`labstation:p642229-1788696459`) works as well. Values RunFleet does not know print as `unknown` — a host without
+current job data is never counted as "0 jobs".
+Exit codes: `0` all fine · `4` partial (a host is stale, failing or needs a login — the answer is still complete
+otherwise) · `1` no data or not found · `2` usage. When a Slurm host's accounting (sacct) fails, finished and failed
+jobs may be missing: `brief` and `agent host` mark those counts as lower bounds (`failed/24h ≥2`, `failed ≥1`),
+however old the job data is, text headers say `[accounting failing]` (a failing job list: `[job list failing]`), and
+the answer is partial. A host with no GPU counts — its GPU probe (sinfo / nvidia-smi) fails, or there is no data for
+it at all (it needs a login, was never reachable) — shows as "GPU data unavailable" in `agent gpus` and `brief`:
+unknown, never "no GPUs"; "no GPUs match" then says it only covers the hosts with GPU data. A long answer ends in
+`# +N more → <command>`: a command you can run exactly as printed (it repeats `-c PATH` / `--demo`, quoted for your
+shell — double quotes on Windows; a value starting with `-` as `--name=-x*`; a workstation task by its full key,
+`labstation:p642229-1788696459`), narrowed to one host when one call cannot hold the rest, with a hint in
+parentheses. When an argument holds text RunFleet redacts (a `-c` path with `token=` in it) or the command would not
+fit, no command is printed and the hint says why and what to change ("repeat your command with --limit 37").
+
+- **Freshness.** The answers are as fresh as the cache: a running TUI saves it every 10 s. `--refresh` polls once
+  first, but only hosts whose data is over a minute old, that nobody tried to refresh in the last minute (otherwise
+  `stale (rate_limited)`, also while another refresh of it is running) and that no other RunFleet is polling (it
+  never doubles the load of a running TUI). A probe that fails during a refresh keeps the last good data instead of
+  erasing it — so does `runfleet snapshot`: a failed job listing or accounting no longer wipes the cached jobs. A TUI started during an agent refresh
+  takes the host's lock once the refresh is done (it retries about every 30 s), so later refreshes leave that host
+  to it; the "another RunFleet is polling" notice is not repeated.
+  A TUI paused after 2 hours without input shows up as `stale (tui_idle)`: press a key in it. Data older than
+  5 minutes is marked `as of <age> ago`.
+- **Logins are yours.** An agent never logs in. A host that needs Duo or a password is reported as `auth_required`
+  with what to do: the agent asks you to run `runfleet connect HOST` in your own terminal (it may prompt for Duo or a
+  password), or, for session-transport hosts (Windows), to press `c` on it in the TUI; until then the agent sees that
+  host's cached data only.
+- **Read-only.** There is no cancel, hold, requeue, kill, port forward, Attach or config change under `agent`. The
+  skill tells the agent to hand you the job id and suggest the TUI (`x`) instead.
+- **Privacy.** Agent transcripts go to a cloud model, so the output only ever has your own jobs (others' rows, with
+  `--all-users` on `jobs`, show user, id, state, GPUs and partition only; their logs are `not_allowed`), secrets are
+  scrubbed from every string (best effort: API keys and tokens, AWS keys, PEM private keys even when cut off,
+  `Bearer`/`Basic` credentials, `user:password@` in URLs, `…PASSWORD=` / `…TOKEN=` style values), and host errors are
+  fixed messages — never ssh error text, jump hosts or ssh targets. Every log line is printed after `| `, so log
+  content can never pass for RunFleet's own lines, and the skill tells the agent it is data, never instructions.
+
+`--demo` works with every verb (`runfleet --demo agent brief`): the simulated fleet, nothing touched.
+
+**Clients without a shell: `runfleet mcp`.** The same read-only verbs as MCP tools (`fleet_brief`, `list_jobs`,
+`job_detail`, `read_log`, `gpu_availability`, `host_health`, `fleet_events`, `runfleet_help`) over stdio, for
+clients that cannot run commands. Register it yourself (RunFleet never edits these files):
+
+```sh
+claude mcp add --scope user runfleet -- runfleet mcp      # Claude Code
+```
+
+```toml
+# Codex: ~/.codex/config.toml
+[mcp_servers.runfleet]
+command = "runfleet"
+args = ["mcp"]
+```
+
+Global flags go before `mcp`: `runfleet --demo mcp` serves the simulated fleet, `runfleet -c PATH mcp` another config.
+It answers from the cache like `runfleet agent` (a tool's `refresh` argument polls first), never polls in the
+background and has no wait tool: to wait for a job the agent runs `runfleet wait` in a shell. With a shell, the skill
+is the better fit (smaller context, one permission rule).
 
 ## Screens
 

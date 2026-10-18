@@ -11,6 +11,7 @@ from typing import Protocol
 import asyncio
 import contextlib
 import dataclasses
+import hashlib
 import logging
 import os
 import random
@@ -18,6 +19,7 @@ import re
 import tomllib
 from typing import TYPE_CHECKING, Any, Literal
 
+from runfleet.agent.data import SECTION_GROUPS
 from runfleet.backends.base import ActionPlan, ActionSpec, HostContext, SchedulerCollector
 from runfleet.config import FleetConfig, GeneralSettings, HostConfig, NotifySettings, host_name_for
 from runfleet.core.cache import Cache, JobMeta
@@ -25,8 +27,8 @@ from runfleet.core.clock import Clock
 from runfleet.core.store import ChangeSet, FleetStore
 from runfleet.errors import ConfigError, RunFleetError
 from runfleet.models import (ActionResult, AttachMode, AttachState, Capabilities, ConnState,
-                             DetectReport, DoctorReport, ErrorKind, HostError, Job, JobDetail, JobKey, JobLive, LogRef,
-                             Visibility)
+                             DetectReport, DoctorReport, ErrorKind, HostError, HostSnapshot, Job, JobDetail, JobKey,
+                             JobLive, LogRef, SectionStatus, Visibility)
 from runfleet.probe.section import SectionResult
 from runfleet.transport.base import ProbeResult, Transport
 
@@ -195,6 +197,7 @@ class FleetService(FleetAPI):
 
     REFRESH_FLOOR = 3.0
     FLUSH_EVERY = 10.0
+    LOCK_RETRY_EVERY = 30.0      # §5.4: instance locks another RunFleet held at start are tried again this often
 
     def __init__(self, config: FleetConfig, transports: TransportFactory, clock: Clock,
                  cache: Cache | None) -> None:
@@ -237,6 +240,7 @@ class FleetService(FleetAPI):
         self._bg: list[asyncio.Task[None]] = []
         self._lock_fds: list[int] = []
         self._host_locks: dict[str, int] = {}
+        self._lock_missing: set[str] = set()     # enabled hosts whose lock another RunFleet held (retried, no notice)
         self._started = False
         # Settings: where saves go (None = in memory, the list below), where alias candidates come from
         self.config_path: Path | None = config.source
@@ -390,7 +394,7 @@ class FleetService(FleetAPI):
             if hs.config.enabled:
                 self._start_poller(name)
         self._bg.append(asyncio.ensure_future(self._idle_watch()))
-        if self.cache is not None:
+        if self.cache is not None or self._lock_base() is not None:
             self._bg.append(asyncio.ensure_future(self._flush_loop()))
 
     def _start_poller(self, host: str) -> None:
@@ -399,31 +403,56 @@ class FleetService(FleetAPI):
         p = self._poller(host)
         self._tasks[host] = asyncio.ensure_future(p.run())
 
-    async def _load_cache(self, *, snapshots: bool = True) -> None:
-        """Cache -> store (snapshots, only for the TUI: a `snapshot` must never print cached rows as current), caps,
-        jobmeta, ended tasks."""
+    async def _load_cache(self, *, snapshots: bool | Iterable[str] = True,
+                          strict: bool = False) -> dict[str, HostSnapshot]:
+        """Cache -> store (snapshots: True for every host, the TUI; or only the named ones, `agent --refresh`; never
+        for `snapshot`, which must not print cached rows as current), caps, jobmeta, ended tasks. Returns every
+        cached snapshot read that is a configured host's own (none without a cache or when it cannot be read).
+
+        A host whose cached host_health names another ssh destination (a second config reusing the display name)
+        gets none of it: no snapshot, no caps (detection runs), no jobmeta, no ended tasks (once its own health is
+        written, the cache drops them: Cache._forget_other_destinations). `strict` (collect_once): a host whose
+        host_health row cannot be read (damaged, another version), or every host when the table cannot be read,
+        has no known identity and gets none of it either."""
+        wanted = (set(self.store.hosts) if snapshots is True else set() if snapshots is False
+                  else set(snapshots))
         if self.cache is None:
-            return
+            return {}
         cache, now = self.cache, self.clock.now()
         from datetime import timedelta
+
+        from runfleet.agent.data import dest_hash
+
+        def foreign_hosts() -> set[str]:
+            unreadable: set[str] = set()
+            try:
+                health = cache.load_health(unreadable=unreadable)
+            except Exception as e:             # unreadable: identity unknown
+                log.info("cache health unreadable: %s", e)
+                return set(self.store.hosts) if strict else set()
+            return {h for h, hs in self.store.hosts.items()
+                    if (strict and h in unreadable)            # a damaged / other-version row: identity unknown
+                    or ((hh := health.get(h)) is not None and hh.dest_hash not in (None, dest_hash(hs.config.ssh)))}
 
         def load() -> tuple[Any, ...]:
             cache.prune(now)
             snaps = cache.load_snapshots()
-            caps = {h: cache.load_caps(h, now) for h in self.store.hosts}
-            meta = {h: cache.load_jobmeta(h) for h in self.store.hosts}
+            foreign = foreign_hosts()
+            own = [h for h in self.store.hosts if h not in foreign]
+            caps = {h: cache.load_caps(h, now) for h in own}
+            meta = {h: cache.load_jobmeta(h) for h in own}
             since = now - timedelta(seconds=self.config.general.recent_window)
-            ended = {h: cache.load_ended_tasks(h, since) for h in self.store.hosts}
-            return snaps, caps, meta, ended
+            ended = {h: cache.load_ended_tasks(h, since) for h in own}
+            return {h: s for h, s in snaps.items() if h not in foreign}, caps, meta, ended
 
         try:
             snaps, caps, meta, ended = await asyncio.to_thread(load)
         except Exception as e:                 # a broken cache must never block startup
             log.warning("cache load failed: %s", e)
             self.notices.append(f"cache could not be read ({e}); starting without it")
-            return
+            return {}
         for host, snap in snaps.items():
-            if host in self.store.hosts and snapshots:
+            if host in self.store.hosts and host in wanted:
                 self.store.set_snapshot(host, snap)
         for host, entry in caps.items():
             if entry is not None:
@@ -431,6 +460,7 @@ class FleetService(FleetAPI):
             elif host in snaps and snaps[host].caps is not None:
                 self._cached_caps[host] = (snaps[host].caps, None)   # profile known, re-detect soon
         self._jobmeta, self._ended = meta, ended
+        return dict(snaps)
 
     @property
     def _lock_fd(self) -> int | None:            # tests / introspection: the first held lock, if any
@@ -453,56 +483,54 @@ class FleetService(FleetAPI):
         for other, names in busy.items():
             shown = ", ".join(names[:4]) + (f" +{len(names) - 4}" if len(names) > 4 else "")
             self.notices.append(f"another RunFleet (pid {other}) is polling {shown} — remote load doubles there")
+            self._lock_missing.update(names)
+
+    def _retry_instance_locks(self) -> None:
+        """§5.4: take the locks another RunFleet held at start once they are free (a TUI started during `agent
+        --refresh` ends up holding them); silent: the notice was given once."""
+        base = self._lock_base()
+        if base is None:
+            self._lock_missing.clear()
+            return
+        for name in sorted(self._lock_missing):
+            hs = self.store.hosts.get(name)
+            if hs is None:
+                self._lock_missing.discard(name)
+            elif not hs.config.enabled:
+                continue                               # kept: tried again once re-enabled
+            elif any(self.store.hosts[n].config.ssh == hs.config.ssh for n in self._host_locks if n != name
+                     and n in self.store.hosts):
+                self._lock_missing.discard(name)       # same destination under another name: ours already
+            elif self._lock_host(name, base) is None:
+                self._lock_missing.discard(name)
 
     def _lock_base(self) -> Path | None:
-        from runfleet import paths
         if self.lock_path is False:
             return None
-        try:
-            return self.lock_path or paths.ensure_private_dir(paths.mux_dir()) / "instance.lock"
-        except OSError as e:
-            log.info("instance lock unavailable: %s", e)
-            return None
+        return self.lock_path or default_lock_base()
 
     def _lock_host(self, name: str, base: Path) -> str | None:
         """Take the host's instance lock; returns the pid text of the instance holding it, else None."""
-        import hashlib
-
-        from runfleet.util import platform
-
         if name in self._host_locks:
             return None
-        dest = self.store.hosts[name].config.ssh
-        key = re.sub(r"[^A-Za-z0-9_.\-]", "_", dest)[:40] + "-" + hashlib.sha1(dest.encode()).hexdigest()[:8]
-        try:
-            fd = os.open(base.with_name(f"{base.name}.{key}"), os.O_RDWR | os.O_CREAT, 0o600)
-        except OSError as e:
-            log.info("instance lock for %s unavailable: %s", name, e)
-            return None
-        try:
-            locked = platform.try_lock(fd)
-        except OSError:
-            locked = False
-        if not locked:
-            try:
-                other = os.read(fd, 32).decode(errors="replace").strip() or "?"
-            except OSError:
-                other = "?"
-            os.close(fd)
+        fd, other = try_instance_lock(instance_lock_file(base, self.store.hosts[name].config.ssh))
+        if fd is None:
             return other
-        os.ftruncate(fd, 0)
-        os.write(fd, str(os.getpid()).encode())
         self._lock_fds.append(fd)
         self._host_locks[name] = fd
         return None
 
     def _unlock_host(self, name: str) -> None:
+        self._lock_missing.discard(name)
         fd = self._host_locks.pop(name, None)
         if fd is not None:
             if fd in self._lock_fds:
                 self._lock_fds.remove(fd)
-            with contextlib.suppress(OSError):
-                os.close(fd)
+            release_instance_lock(fd)
+            hs = self.store.hosts.get(name)
+            if hs is not None:          # another name for the same destination polls on: it needs the lock now
+                self._lock_missing.update(n for n, o in self.store.hosts.items()
+                                          if n != name and o.config.ssh == hs.config.ssh and n not in self._host_locks)
 
     async def stop(self) -> None:
         if self._forward_ops:                          # a forward a cancelled worker started is recorded first …
@@ -528,23 +556,30 @@ class FleetService(FleetAPI):
             with contextlib.suppress(Exception):
                 await transport.close()
         for fd in self._lock_fds:
-            os.close(fd)
+            release_instance_lock(fd)
         self._lock_fds.clear()
         self._host_locks.clear()
+        self._lock_missing.clear()
         if self._remember_unsub is not None:
             self._remember_unsub()
             self._remember_unsub = None
         self._started = False
 
-    async def collect_once(self, hosts: Iterable[str] | None = None, *, timeout: float = 60) -> None:
+    async def collect_once(self, hosts: Iterable[str] | None = None, *, timeout: float = 60,
+                           keep_cached: bool = False) -> None:
         """`snapshot`: prepare + detect + one full poll per host, no pollers left running. Failures end up in
-        each host's status (state / error); this method does not raise for host problems."""
+        each host's status (state / error); this method does not raise for host problems. `keep_cached` (`agent
+        --refresh`, not in FleetAPI): the polled hosts' cached snapshots are loaded first, as start() does, so a
+        section that fails keeps its last good data instead of overwriting it with nothing."""
         if self._tasks:
             raise RunFleetError("collect_once() while pollers are running")
         names = list(hosts) if hosts is not None else [n for n, hs in self.store.hosts.items() if hs.config.enabled]
         for n in names:
             self._host_cfg(n)                                  # unknown host -> RunFleetError
-        await self._load_cache(snapshots=False)                # cached caps skip the detect probe; jobmeta log paths
+        # cached caps skip the detect probe; jobmeta log paths. Only these hosts' own rows (strict: not a row
+        # another ssh destination wrote under the same display name, nor one whose identity cannot be read)
+        stored = await self._load_cache(snapshots=names if keep_cached else False, strict=True)
+        cached = {n: snap for n in names if (snap := self.store.hosts[n].snapshot) is not None} if keep_cached else {}
 
         async def one(host: str) -> None:
             p = self._poller(host)
@@ -555,10 +590,90 @@ class FleetService(FleetAPI):
                 err = HostError(ErrorKind.TIMEOUT, f"snapshot timed out after {timeout:.0f} s", at=self.clock.now())
                 self.store.set_status(host, _replace(st, state=ConnState.UNREACHABLE, error=err, in_flight=False,
                                                      consecutive_failures=st.consecutive_failures + 1))
+            finally:                    # per host: a deadline cancelling the others must not skip this one
+                if keep_cached:
+                    old = cached.get(host)
+                    if old is not None:
+                        self._keep_cached(host, old)
+                else:
+                    self._cache_merged(host, stored.get(host))
 
         await asyncio.gather(*(one(n) for n in names))
         if self.cache is not None:
             await self.cache.flush()
+
+    def _cache_merged(self, host: str, old: HostSnapshot | None) -> None:
+        """`snapshot` (no keep_cached): prints what this poll saw, but when a group of sections failed, the row it
+        queues (the poller did) would replace good cached data with nothing or a partial list (a fresh collector
+        knows only what answered). The queued row becomes the poll merged with the host's own cached row
+        (:meth:`_merged`), as keep_cached does; the host_health written with it keeps each failed group's last
+        success, so the carried data keeps its age. No cached row: nothing to lose, the poll's row stays."""
+        snap = self.store.hosts[host].snapshot
+        if self.cache is None or snap is None or old is None:
+            return
+        merged = self._merged(host, snap, old)
+        if merged is not None:
+            self.cache.put_snapshot(host, merged)        # replaces the queued one; the store keeps the poll
+
+    def _group_failed(self, host: str, group: str) -> bool:
+        """Every section of agent.data.SECTION_GROUPS[group] that ran this poll failed (none ran: False)."""
+        return self._sections_failed(host, SECTION_GROUPS[group])
+
+    def _sections_failed(self, host: str, names: Iterable[str]) -> bool:
+        """Every one of `names` that ran this poll failed (none ran: False)."""
+        wanted = frozenset(names)
+        ran = [s for n, s in self.store.hosts[host].status.sections.items() if n in wanted]
+        return bool(ran) and not any(s.ok or _empty_answer(s) for s in ran)
+
+    def _merged_jobs(self, host: str, snap: HostSnapshot, old: HostSnapshot) -> HostSnapshot | None:
+        """A fresh collector lists only what this poll's sections returned, so a failed group would drop good cached
+        rows. The job listing failed (every section of SECTION_GROUPS["jobs"] that ran): every cached job comes
+        back. Only accounting failed (SECTION_GROUPS["history"]): the cached finished jobs come back (live rows
+        are the listing's to tell; a job that left it since is not revived). Fresh rows win on the same id
+        either way; the group's age stays its last success (cache.merge_health). None: nothing to add."""
+        if snap is old:
+            return None
+        if self._group_failed(host, "jobs"):
+            kept = dict(old.jobs)
+        elif self._group_failed(host, "history"):
+            kept = {k: j for k, j in old.jobs.items() if j.state.is_terminal}
+        else:
+            return None
+        jobs = {**kept, **snap.jobs}
+        if jobs.keys() == snap.jobs.keys():
+            return None
+        return dataclasses.replace(snap, jobs=jobs)
+
+    def _merged(self, host: str, snap: HostSnapshot, old: HostSnapshot) -> HostSnapshot | None:
+        """The poll merged with the host's own cached row: the jobs as :meth:`_merged_jobs`; and every other field
+        whose own source section failed (_CARRIED: partitions and nodes with slurm.sinfo, GPUs with nvidia.gpu,
+        metrics with procfs.host, the process table with process.ps) and that the poll left empty comes back from
+        the cached row. Per section, not per group: a login node's working nvidia-smi does not make a failing sinfo
+        an answer. A field the poll did fill (an answer, or a failing section's partial output) stays the poll's,
+        as in the TUI. None: nothing to add."""
+        if snap is old:
+            return None
+        out = self._merged_jobs(host, snap, old) or snap
+        carried: dict[str, Any] = {}
+        for sections, fields in _CARRIED:
+            if self._sections_failed(host, sections):
+                carried.update({f: v for f in fields
+                                if _empty(getattr(snap, f)) and not _empty(v := getattr(old, f))})
+        if carried:
+            out = dataclasses.replace(out, **carried)
+        return None if out is snap else out
+
+    def _keep_cached(self, host: str, old: HostSnapshot) -> None:
+        """`keep_cached`: the poll merged with the cached row (:meth:`_merged`), in the store and the cache. The
+        store started from that row and keeps a field no section answered (FleetStore.apply), so this mostly
+        restores jobs; the rest guards a section that answered nothing while failing."""
+        snap = self.store.hosts[host].snapshot
+        merged = None if snap is None else self._merged(host, snap, old)
+        if merged is None:
+            return
+        self.store.set_snapshot(host, merged)
+        if self.cache is not None:
+            self.cache.put_snapshot(host, merged)
 
     # ================================================================ scheduling hints
     def set_visibility(self, levels: Mapping[str, Visibility]) -> None:
@@ -652,13 +767,21 @@ class FleetService(FleetAPI):
                     w.cancel()
 
     async def _flush_loop(self) -> None:
-        assert self.cache is not None
+        """Every FLUSH_EVERY: the cache's queued writes; every LOCK_RETRY_EVERY: the instance locks still missing."""
+        last_retry = self.clock.monotonic()
         while True:
             await self.clock.sleep(self.FLUSH_EVERY)
-            try:
-                await self.cache.flush()
-            except Exception as e:
-                log.warning("cache flush failed: %s", e)
+            if self.cache is not None:
+                try:
+                    await self.cache.flush()
+                except Exception as e:
+                    log.warning("cache flush failed: %s", e)
+            if self._lock_missing and self.clock.monotonic() - last_retry >= self.LOCK_RETRY_EVERY:
+                last_retry = self.clock.monotonic()
+                try:
+                    self._retry_instance_locks()
+                except Exception as e:                 # a lock problem must never end the flushes
+                    log.info("instance lock retry failed: %s", e)
 
     # ================================================================ details and logs
     async def job_detail(self, key: JobKey, *, max_age_s: float = 30) -> JobDetail:
@@ -1034,6 +1157,7 @@ class FleetService(FleetAPI):
             if other is not None:
                 self.notices.append(f"another RunFleet (pid {other}) is polling {cfg.name} — remote load doubles "
                                     "there")
+                self._lock_missing.add(cfg.name)
             self._start_poller(cfg.name)
         return running
 
@@ -1209,6 +1333,129 @@ class FleetService(FleetAPI):
                 self._memory_hosts.sort(key=lambda h: order.get(h.name, len(order)))
 
 
+# ================================================================ instance locks (§5.4)
+# Module-level (not FleetAPI): `snapshot` and `runfleet agent --refresh` take the same per-destination locks as a
+# running FleetService, without one.
+def default_lock_base() -> Path | None:
+    """``<mux_dir>/instance.lock`` (the directory made private); None when it cannot be created."""
+    from runfleet import paths
+    try:
+        return paths.ensure_private_dir(paths.mux_dir()) / "instance.lock"
+    except OSError as e:
+        log.info("instance lock unavailable: %s", e)
+        return None
+
+
+def instance_lock_file(base: Path, ssh_dest: str) -> Path:
+    """``<base>.<dest, filename-safe, ≤ 40 chars>-<sha1 8>``: one lock per ssh destination (not per display name)."""
+    key = re.sub(r"[^A-Za-z0-9_.\-]", "_", ssh_dest)[:40] + "-" + hashlib.sha1(ssh_dest.encode()).hexdigest()[:8]
+    return base.with_name(f"{base.name}.{key}")
+
+
+def try_instance_lock(path: Path) -> tuple[int | None, str | None]:
+    """Take the lock without waiting: ``(fd, None)`` when taken (our pid written into it; keep the fd open, then
+    :func:`release_instance_lock`), ``(None, pid text or "?")`` when another instance holds it, ``(None, None)``
+    when the file cannot be opened (no lock to take: callers carry on unlocked)."""
+    fd, other, _ = try_instance_lock_at(path)
+    return fd, other
+
+
+def try_instance_lock_at(path: Path, *, write_pid: bool = True) -> tuple[int | None, str | None, float | None]:
+    """:func:`try_instance_lock`, plus when the lock was last taken before this call (the file's mtime read under
+    the lock, before our pid is written; None for a file nobody wrote a pid into yet, e.g. created just now).
+    `agent --refresh` re-checks its rate limit on it: another refresh may have come and gone since it looked.
+    `write_pid=False`: the lock is taken but the file left as it was (its mtime dates the last attempt); the caller
+    either lets go untouched or proceeds with :func:`claim_instance_lock`. Our pid that cannot be written: the lock
+    is let go again, ``(None, None, None)`` (as an unopenable file: carry on unlocked)."""
+    from runfleet.util import platform
+
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as e:
+        log.info("instance lock %s unavailable: %s", path.name, e)
+        return None, None, None
+    try:
+        locked = platform.try_lock(fd)
+    except OSError:
+        locked = False
+    if not locked:
+        other = _lock_pid(fd)
+        os.close(fd)
+        return None, other, None
+    try:
+        st = os.fstat(fd)
+        previous = st.st_mtime if st.st_size > 0 else None
+    except OSError:
+        previous = None
+    if write_pid and not claim_instance_lock(fd):
+        release_instance_lock(fd)
+        return None, None, None
+    return fd, None, previous
+
+
+def claim_instance_lock(fd: int) -> bool:
+    """Write our pid into a lock we hold (this dates the attempt: :func:`lock_attempt_at`); False when it cannot
+    be written (logged; the lock itself stays held)."""
+    try:
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, str(os.getpid()).encode())
+    except OSError as e:
+        log.info("instance lock: could not write our pid: %s", e)
+        return False
+    return True
+
+
+def release_instance_lock(fd: int) -> None:
+    """Unlock (at once, also on Windows) and close a descriptor :func:`try_instance_lock` returned. Never raises."""
+    from runfleet.util import platform
+
+    platform.unlock(fd)
+    with contextlib.suppress(OSError):
+        os.close(fd)
+
+
+def lock_attempt_at(path: Path) -> float | None:
+    """When the lock at `path` was last taken (its mtime: :func:`try_instance_lock` writes the pid on every
+    acquisition), as a POSIX timestamp; None when there is no such file, or it is empty (no pid ever written: no
+    attempt, as :func:`try_instance_lock_at`). `agent --refresh` rate-limits on it."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime if st.st_size > 0 else None
+
+
+def lock_holder(path: Path) -> str | None:
+    """Pid text of the instance holding the lock at `path`, else None (free, or no such file). Probes by taking the
+    lock and dropping it at once; never creates the file, never writes our pid."""
+    from runfleet.util import platform
+
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return None
+    try:
+        try:
+            locked = platform.try_lock(fd)
+        except OSError:
+            return None
+        if locked:
+            platform.unlock(fd)
+            return None
+        return _lock_pid(fd)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+def _lock_pid(fd: int) -> str:
+    try:
+        return os.read(fd, 32).decode(errors="replace").strip() or "?"
+    except OSError:
+        return "?"
+
+
 _ANSWERED = frozenset({ConnState.OK, ConnState.DEGRADED, ConnState.NEEDS_AUTH, ConnState.HOSTKEY})
 # `ssh -O cancel` without a master to talk to: the forward went with the master
 _NO_MASTER = ("No such file or directory", "Connection refused", "no ssh master", "not connected")
@@ -1222,6 +1469,30 @@ def _master_gone(err: HostError) -> bool:
 def _list_aliases() -> list[str]:
     from runfleet import sshconfig
     return sshconfig.list_aliases()
+
+
+# collect_once's cache merge (FleetService._merged): the snapshot fields a failed section group's cached values
+# come back for when the poll left them empty (jobs themselves: FleetService._merged_jobs)
+# (source sections, snapshot fields they fill) for FleetService._merged: the sinfo listing fills partitions and
+# nodes (slurm.occupants / slurm.names only annotate known nodes); nvidia-smi fills the GPUs (a workstation's, or
+# a Slurm login node's; process.ps only re-emits the monitor's sample); /proc the metrics; ps the process table.
+_CARRIED: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("slurm.sinfo",), ("partitions", "nodes")),
+    (("nvidia.gpu",), ("gpus",)),
+    (("procfs.host",), ("metrics",)),
+    (("process.ps",), ("procs",)),
+)
+
+
+def _empty_answer(st: SectionStatus) -> bool:
+    """A failing section whose empty result is an answer, not a gap: nvidia-smi's rc 6 / "No devices were found"
+    (NvidiaMonitor reports no GPUs for it), so the cached GPUs of a box whose GPUs went away do not come back."""
+    return st.name == "nvidia.gpu" and (st.rc == 6 or (st.error is not None
+                                                       and "No devices were found" in st.error.detail))
+
+
+def _empty(value: object) -> bool:
+    return value is None or value == ()
 
 
 def _replace(obj: Any, **changes: Any) -> Any:

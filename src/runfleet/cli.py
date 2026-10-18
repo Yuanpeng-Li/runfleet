@@ -8,21 +8,32 @@
     runfleet wait HOST:JOBID ... [--timeout SEC] [--json]
     runfleet status [HOST ...] [--short | --json]
     runfleet update [--check] [--force]
+    runfleet agent brief|jobs|job|log|gpus|host|events|help … [--json] [--refresh] [--timeout SEC] [--limit N]
+    runfleet skill install [--agent auto|all|IDS] [--print] [--force] [--no-auto-update]
+    runfleet skill update [--if-installed] [--quiet] | uninstall [--dry-run] | status [--json]
+    runfleet mcp
 
 Exit codes: 0 ok, 1 runtime error, 2 config/usage error, 3 no `ssh` client (never with --demo), 4 `snapshot` /
 `doctor`: at least one host failed. `wait` has its own (runfleet.wait): 0 completed, 1 ended otherwise, 2 timeout,
-3 error. `status` (runfleet.status, cache only, no ssh): 0 a summary, 1 no data, 2 usage.
+3 error. `status` (runfleet.status, cache only, no ssh): 0 a summary, 1 no data, 2 usage. `agent` (runfleet.agent,
+read-only, cache first, §8.7): 0 ok, 4 partial (a host stale / failing / needs a login), 1 no data / not found, 2
+usage. `mcp` (runfleet.agent.mcp) serves the agent verbs as MCP tools on stdin/stdout until end of input: 0, 2 usage.
+`skill` (runfleet.agent.skill): 0 ok (also "nothing installed"), 1 refused or a target failed, 2 usage. Every other
+command first refreshes an installed skill that is out of date (`skill_auto_refresh`; silent, never fails it).
 
 Collaborators are module-level functions (`build_service`, `run_tui`, `open_cache`, `ssh_available`,
-`is_interactive`, `run_command`, `run_step`, `installed_version`, `restart`) so tests replace them with fakes; nothing
-here touches the network itself (`update` asks GitHub through `runfleet.update`).
+`is_interactive`, `run_command`, `run_step`, `installed_version`, `refresh_skill`, `restart`) so tests replace them
+with fakes; nothing here touches the network itself (`update` asks GitHub through `runfleet.update`).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import dataclasses
+import functools
+import json
 import logging
 import logging.handlers
 import math
@@ -34,13 +45,14 @@ import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from runfleet import __version__, debugdump, export, paths, sshconfig, update
 from runfleet.config import FleetConfig, HostConfig, host_name_for, load_config, load_config_with_warnings
 from runfleet.core.cache import Cache
 from runfleet.core.clock import Clock, RealClock
-from runfleet.core.service import FleetAPI, FleetService, TransportFactory
+from runfleet.core.service import (FleetAPI, FleetService, TransportFactory, default_lock_base, instance_lock_file,
+                                   release_instance_lock, try_instance_lock)
 from runfleet.errors import ConfigError, RunFleetError
 from runfleet.models import ConnState, DetectReport, DoctorReport
 from runfleet.util import platform
@@ -48,7 +60,8 @@ from runfleet.util import platform
 log = logging.getLogger("runfleet.cli")
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_NO_SSH, EXIT_HOST_FAILED = 0, 1, 2, 3, 4
-SUBCOMMANDS = ("connect", "hosts", "doctor", "snapshot", "wait", "status", "update")
+SUBCOMMANDS = ("connect", "hosts", "doctor", "snapshot", "wait", "status", "update", "agent", "skill", "mcp")
+AGENT_COMMANDS = ("agent", "mcp")     # read by agents: error texts that echo input are scrubbed, config errors cut
 _VALUE_OPTIONS = frozenset({"-c", "--config", "--demo-seed", "--timeout"})
 _WRITABLE = frozenset({ConnState.OK, ConnState.DEGRADED, ConnState.NEEDS_AUTH, ConnState.HOSTKEY})
 
@@ -200,6 +213,11 @@ def installed_version() -> str | None:
     return m.group(1) if done.returncode == 0 and m else None
 
 
+def refresh_skill() -> str | None:
+    """After an update: the new executable refreshes the installed agent skill (update.refresh_skill)."""
+    return update.refresh_skill()
+
+
 def restart(argv: Sequence[str]) -> int:
     """Replace this process with a fresh RunFleet (returns only when that is impossible).
 
@@ -271,13 +289,147 @@ def _positive_seconds(text: str) -> float:
     return value
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {text!r}")
+    return value
+
+
+def _count(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {text!r}")
+    return value
+
+
+AGENT_HELP = {
+    "brief": "entry point: hosts, my R/PD/failed counts, attention items, free GPUs (≤2 KB)",
+    "jobs": "one row per job, filtered",
+    "job": "one card per job: times, placement, pending reason, exit cause, log paths (≤10 ids)",
+    "log": "bounded, scrubbed log tail of one job (the one verb that runs ssh: 1 probe)",
+    "gpus": "free GPUs: Slurm per partition and type, workstations per GPU",
+    "host": "one host's health: login, failing probes, data ages, partitions, load",
+    "events": "submitted / started / ended / time low / host problems since a time",
+    "help": "every flag, JSON field, exit and problem code of this version",
+}
+
+
+class Parser(argparse.ArgumentParser):
+    """``safe_errors``: the parser's error messages (an invalid choice, unrecognized arguments, a bad value: they
+    quote the caller's input) are scrubbed, escaped and capped like every other `agent` / `mcp` error text."""
+
+    safe_errors = False
+
+    def error(self, message: str) -> NoReturn:
+        if self.safe_errors:
+            from runfleet.agent.commands import safe_text
+
+            message = safe_text(message)
+        super().error(message)
+
+
+def _agent_parsers(sub: Any) -> None:
+    """`runfleet agent <verb>` (docs/AGENT_INTERFACE.md §3): read-only; never starts the TUI."""
+    a = sub.add_parser("agent", allow_abbrev=False, help="read-only fleet view for AI agents (cache first; "
+                       "runfleet agent help)")
+    a.safe_errors = True
+    _common(a, suppress=True)
+    verbs = a.add_subparsers(dest="agent_verb", required=True, metavar="VERB")
+    for verb, text in AGENT_HELP.items():
+        v = verbs.add_parser(verb, allow_abbrev=False, help=text, description=text)
+        v.safe_errors = True
+        _common(v, suppress=True)
+        if verb == "help":
+            v.add_argument("topic", nargs="?", metavar="VERB")
+        v.add_argument("--json", action="store_true", help=f'JSON document, schema "runfleet.agent.{verb}/1"')
+        v.add_argument("--refresh", action="store_true", help="first poll the hosts whose job data is >60 s old and "
+                       "that no other RunFleet is polling")
+        v.add_argument("--timeout", type=_positive_seconds, default=30.0, metavar="SEC",
+                       help="deadline of the whole call (default 30)")
+        v.add_argument("--limit", type=_positive_int, default=None, metavar="N", help="at most N rows")
+        if verb == "help":
+            pass
+        elif verb == "job":
+            v.add_argument("ids", nargs="+", metavar="HOST:ID", help="k2:2332861, k2:31270818_7, labstation:p642229")
+        elif verb == "log":
+            v.add_argument("id", metavar="HOST:ID")
+            v.add_argument("--stream", choices=("out", "err"), default=None,
+                           help="default: stderr when it is a separate non-empty file, else stdout")
+            v.add_argument("--lines", type=_positive_int, default=60, metavar="N", help="last N lines (≤400, "
+                           "default 60)")
+            v.add_argument("--bytes", type=_positive_int, default=32 << 10, metavar="N",
+                           help="bytes read from the end (≤256 KiB, default 32 KiB)")
+            v.add_argument("--head", action="store_true", help="the start of the file instead")
+            v.add_argument("--grep", metavar="'A|B'", help="literal, case-insensitive alternatives; ≤50 hits")
+            v.add_argument("--path-only", action="store_true", help="only the path (no ssh)")
+        elif verb == "host":
+            v.add_argument("host", metavar="HOST")
+        else:
+            v.add_argument("hosts", nargs="*", metavar="HOST")
+        if verb == "jobs":
+            v.add_argument("--state", metavar="S", help="groups (queued active done failed cancelled ended finished "
+                           "all) or codes (R PD OOM TO …), comma-separated; default active,queued,failed. finished = "
+                           "done,failed,cancelled,ended; ended = workstation task gone, exit unknown")
+            v.add_argument("--name", metavar="GLOB")
+            v.add_argument("--workdir", metavar="PREFIX")
+            v.add_argument("--partition", metavar="P")
+            v.add_argument("--since", metavar="DUR|ISO", help="ended since (2h, 90m, 1d or an ISO time)")
+            v.add_argument("--attention", action="store_true", help="only jobs that need a look")
+            v.add_argument("--all-users", action="store_true",
+                           help="add other users' rows (user, id, state, GPUs, partition only)")
+        elif verb == "gpus":
+            v.add_argument("--type", metavar="T", help="GPU type, e.g. h100, a6000")
+            v.add_argument("--min", type=_count, default=0, metavar="N", help="at least N free")
+        elif verb == "events":
+            v.add_argument("--since", required=True, metavar="DUR|ISO", help="2h, 90m, 1d or an ISO time")
+
+
 # allow_abbrev=False everywhere: find_command() skips the values of exactly these option spellings (`--conf x.toml
 # snapshot` must not make `x.toml` the command position)
+def _skill_parsers(sub: Any) -> None:
+    """`runfleet skill install|update|uninstall|status` (§8.7): local files only, never an agent's settings."""
+    k = sub.add_parser("skill", allow_abbrev=False, help="install, update, check or remove the `runfleet` agent skill "
+                       "(Claude Code, Codex, Copilot, Gemini, Cursor, OpenCode, …)")
+    _common(k, suppress=True)
+    ksub = k.add_subparsers(dest="skill_command", required=True, metavar="install|update|uninstall|status")
+    ki = ksub.add_parser("install", allow_abbrev=False, help="copy the skill to ~/.agents/skills/runfleet (read by "
+                         "most agents) and link it where an agent needs a link (Claude Code: ~/.claude/skills)")
+    _common(ki, suppress=True)
+    ki.add_argument("--agent", default="auto", metavar="AGENTS",
+                    help="auto (default: the agents found on this machine), all, or a comma list of agent ids "
+                    "(claude, copilot, antigravity, …; `runfleet skill status` lists them)")
+    ki.add_argument("--print", action="store_true", help="print the rendered SKILL.md; write nothing")
+    ki.add_argument("--force", action="store_true", help="move a skill directory or link RunFleet did not write to "
+                    "the backup dir and install anyway (never deletes it)")
+    ki.add_argument("--no-auto-update", action="store_true",
+                    help="do not refresh the skill when RunFleet or the config's hosts change")
+    ku = ksub.add_parser("update", allow_abbrev=False, help="refresh the installed skill to this version and the "
+                         "config's host names (runs by itself after an upgrade)")
+    _common(ku, suppress=True)
+    ku.add_argument("--if-installed", action="store_true", help="nothing installed: say nothing, exit 0")
+    ku.add_argument("--quiet", action="store_true", help="one line at most")
+    kx = ksub.add_parser("uninstall", allow_abbrev=False, help="remove the skill RunFleet installed (edited files "
+                         "are backed up first)")
+    _common(kx, suppress=True)
+    kx.add_argument("--dry-run", action="store_true", help="say what would be removed; remove nothing")
+    ks = ksub.add_parser("status", allow_abbrev=False, help="where the skill is installed, for which agents, and "
+                         "whether it is up to date")
+    _common(ks, suppress=True)
+    ks.add_argument("--json", action="store_true", help="JSON document")
+
+
 def main_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="runfleet", description="Jobs, GPUs and hosts of your Slurm clusters and GPU "
                                 "workstations in one terminal UI.",
-                                epilog="subcommands: connect, hosts, doctor, snapshot, wait, status, update "
-                                "(runfleet <cmd> -h)",
+                                epilog="subcommands: connect, hosts, doctor, snapshot, wait, status, update, "
+                                "agent, skill, mcp (runfleet <cmd> -h)",
                                 allow_abbrev=False)
     p.add_argument("--version", action="version", version=f"runfleet {__version__}")
     _common(p, suppress=False)
@@ -285,8 +437,8 @@ def main_parser() -> argparse.ArgumentParser:
     return p
 
 
-def command_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="runfleet", allow_abbrev=False)
+def command_parser() -> Parser:
+    p = Parser(prog="runfleet", allow_abbrev=False)          # sub-parsers are Parsers too (argparse's default)
     p.add_argument("--version", action="version", version=f"runfleet {__version__}")
     _common(p, suppress=False)
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
@@ -330,6 +482,12 @@ def command_parser() -> argparse.ArgumentParser:
     _common(u, suppress=True)
     u.add_argument("--check", action="store_true", help="only say whether a newer version exists")
     u.add_argument("--force", action="store_true", help="update even when no newer version is known")
+    _agent_parsers(sub)
+    _skill_parsers(sub)
+    m = sub.add_parser("mcp", allow_abbrev=False, help="MCP server on stdio: the read-only agent verbs as tools "
+                       "(register: claude mcp add --scope user runfleet -- runfleet mcp)")
+    m.safe_errors = True
+    _common(m, suppress=True)
     return p
 
 
@@ -358,8 +516,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         ns.command = None
         return ns
     parser = command_parser()         # parse_intermixed_args does not support sub-parsers: collect the leftovers
+    parser.safe_errors = command in AGENT_COMMANDS     # its errors (unrecognized arguments) echo the input
     ns, extra = parser.parse_known_args(list(argv))
-    dest = "aliases" if getattr(ns, "hosts_command", None) == "import" else "hosts"
+    dest = "aliases" if getattr(ns, "hosts_command", None) == "import" else \
+        "ids" if getattr(ns, "agent_verb", None) == "job" else "hosts"
     if extra and isinstance(getattr(ns, dest, None), list) and not any(t.startswith("-") for t in extra):
         getattr(ns, dest).extend(extra)
     elif extra:
@@ -875,6 +1035,20 @@ def cmd_doctor(args: argparse.Namespace, clock: Clock, out: Callable[[str], None
     return EXIT_HOST_FAILED if failed else EXIT_OK
 
 
+def take_free_locks(config: FleetConfig, names: Sequence[str]) -> list[int]:
+    """`snapshot`: the instance locks (§5.4) of the hosts it polls that no other RunFleet holds, so a TUI started
+    meanwhile sees the poll; a held one is polled anyway, as before, without touching its lock."""
+    base = default_lock_base()
+    if base is None:
+        return []
+    fds: list[int] = []
+    for dest in dict.fromkeys(h.ssh for h in config.hosts if h.name in names):
+        fd, _ = try_instance_lock(instance_lock_file(base, dest))
+        if fd is not None:
+            fds.append(fd)
+    return fds
+
+
 def cmd_snapshot(args: argparse.Namespace, clock: Clock, out: Callable[[str], None]) -> int:
     fleet = demo_fleet(args, args.hosts, clock) if args.demo else real_fleet(args, args.hosts)
     if not fleet.config.hosts:
@@ -883,7 +1057,12 @@ def cmd_snapshot(args: argparse.Namespace, clock: Clock, out: Callable[[str], No
     # cached capabilities (< 1 h) replace the detect probe; cached job rows are never printed (collect_once)
     service = build_service(fleet.config, fleet.transports, clock, open_cache(args.no_cache or args.demo))
     names = probed_names(fleet.config, args)
-    asyncio.run(service.collect_once(names, timeout=args.timeout))
+    locks = [] if args.demo else take_free_locks(fleet.config, names)
+    try:
+        asyncio.run(service.collect_once(names, timeout=args.timeout))
+    finally:
+        for fd in locks:
+            release_instance_lock(fd)
     if args.json:
         out(export.dumps(export.build_snapshot(service.store, generated_at=clock.now(), hosts=names)).rstrip("\n"))
     else:
@@ -984,7 +1163,255 @@ def cmd_status(args: argparse.Namespace, clock: Clock, out: Callable[[str], None
     return status.EXIT_NO_DATA if report.error is not None else status.EXIT_OK
 
 
+# ====================================================================================================== agent
+_AGENT_KEYS = ("hosts", "ids", "id", "host", "topic", "refresh", "timeout", "limit", "state", "name", "workdir",
+               "partition", "since", "attention", "all_users", "stream", "lines", "bytes", "head", "grep",
+               "path_only", "type", "min")
+
+
+def cmd_agent(args: argparse.Namespace, clock: Clock, out: Callable[[str], None]) -> int:
+    """`runfleet agent <verb>` (runfleet.agent.commands): read-only, cache first; never the TUI, never a prompt."""
+    from runfleet.agent import commands, view
+
+    if args.no_cache and not args.demo and args.agent_verb != "help":
+        raise UsageError("agent reads the cache; drop --no-cache")
+    params = {k: getattr(args, k) for k in _AGENT_KEYS if getattr(args, k, None) is not None}
+    try:
+        doc = commands.run(args.agent_verb, params, config_path=args.config, demo=args.demo,
+                           demo_seed=args.demo_seed, clock=clock)
+    except commands.UsageError as exc:          # echoes the caller's input: scrubbed, escaped, capped
+        raise UsageError(commands.safe_text(str(exc))) from None
+    out(view.dumps(doc.data) if getattr(args, "json", False) else doc.text)
+    return doc.exit_code
+
+
+def agent_config_error(args: argparse.Namespace, exc: ConfigError) -> str:
+    """A config error under `agent` / `mcp` (read by an agent): where, never what — the message may quote config
+    values (ssh targets, paths) — as `runfleet mcp` reports it; the full text goes to runfleet.log."""
+    from runfleet.agent.commands import safe_text
+
+    log.warning("%s: config error: %s", args.command, safe_text(str(exc)))
+    where = f" at {safe_text(exc.key_path)}" if exc.key_path else ""
+    doctor = ("`runfleet doctor` with the same -c option" if getattr(args, "config", None) is not None
+              else "`runfleet doctor`")
+    return (f"runfleet: the RunFleet config is invalid{where}; ask the user to run {doctor} "
+            "(details in runfleet.log)")
+
+
+SKILL_MANIFEST = "skill.json"     # = skill.MANIFEST_FILE, in the state dir; here so the hook needs no import first
+SKILL_BACKOFF = 3600.0            # = skill.BACKOFF_SECONDS: a failed refresh is retried at most this often
+SKILL_SCHEMA = 1                  # = skill.SCHEMA
+# = skill._VERSION / skill._PHASE (a test pins skill_version_key to skill._version_key)
+_SKILL_VERSION = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?(?:[.-]?(dev|a|b|rc|post)(\d*))?(?:\+.*)?")
+_SKILL_PHASE = {"dev": 0, "a": 1, "b": 2, "rc": 3, None: 4, "post": 5}
+
+
+def skill_version_key(text: str) -> tuple[int, int, int, int, int] | None:
+    m = _SKILL_VERSION.fullmatch(text.strip())
+    if m is None:
+        return None
+    major, minor, patch, phase, n = m.groups()
+    return int(major), int(minor), int(patch or 0), _SKILL_PHASE[phase], int(n or 0)
+
+
+def file_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def config_host_names(path: Path | None, warn: Callable[[str], None] | None = None) -> list[str] | None:
+    """Enabled host names of a config file (None: the default one) for the skill's trigger words: [] when the default
+    config does not exist (no hosts yet); None when a recorded config is gone or a config does not load (logged, or
+    passed to `warn`): the caller keeps the names it has rather than erasing them."""
+    if not (path or paths.config_file()).exists():
+        return None if path is not None else []
+    try:
+        config = load_config(path)
+    except ConfigError as exc:
+        message = f"skill: config not loaded, host names left as they were: {exc}"
+        if warn is None:
+            log.warning("%s", message)
+        else:
+            warn(message)
+        return None
+    return [h.name for h in config.hosts if h.enabled]
+
+
+def skill_config(args: argparse.Namespace, clock: Clock, *, recorded: Path | None = None
+                 ) -> tuple[list[str] | None, str | None, float | None]:
+    """(host names, config path to record, its mtime) for `skill install` / `update`: -c PATH, else the one the
+    install recorded, else the default config (recorded as None). --demo: the demo fleet's names. Names None: that
+    config cannot be read now (update keeps the recorded names, install writes none)."""
+    if args.demo:
+        return [h.name for h in demo_fleet(args, [], clock).config.hosts], None, None
+    if args.config is not None and not args.config.exists():
+        raise UsageError(f"no such config file: {args.config}")
+    chosen = args.config.resolve() if args.config is not None else recorded
+    return (config_host_names(chosen), str(chosen) if chosen is not None else None,
+            file_mtime(chosen or paths.config_file()))
+
+
+def cmd_skill(args: argparse.Namespace, clock: Clock, out: Callable[[str], None]) -> int:
+    """`runfleet skill install|update|uninstall|status` (runfleet.agent.skill, §8.7): writes local files only (hence
+    not under `agent`); never edits an agent's settings (MCP, permission rules: the user's)."""
+    from runfleet.agent import skill
+
+    verb = args.skill_command
+    if args.demo and not (verb == "status" or (verb == "install" and args.print)):
+        raise UsageError("--demo never writes anything; use `runfleet --demo skill install --print` to preview")
+    env, state, now = skill.Env.current(), paths.state_dir(), clock.now()
+    result: Any                                  # SkillInstallError (a RunFleetError): exit 1 with its message
+    if verb == "install":
+        try:
+            skill.select_agents(env, args.agent)
+        except ValueError as exc:
+            raise UsageError(f"--agent: {exc}") from None
+        names, config_path, mtime = skill_config(args, clock)
+        result = skill.install(env, state_dir=state, host_names=names or [], config_path=config_path,
+                               config_mtime=mtime,
+                               agents=args.agent, force=args.force, auto_update=not args.no_auto_update,
+                               print_only=args.print, now=now)
+    elif verb == "update":
+        if args.config is not None and not args.demo and not args.config.exists():
+            raise UsageError(f"no such config file: {args.config}")
+
+        def config(recorded: str | None) -> tuple[list[str] | None, str | None, float | None]:
+            """Read under the skill lock: the config the manifest records then (-c PATH wins)."""
+            return skill_config(args, clock, recorded=Path(recorded) if recorded else None)
+        result = skill.update(env, state_dir=state, host_names=None, config_path=None, config_mtime=None,
+                              config=config, if_installed=args.if_installed, add_new_agents=not args.if_installed,
+                              now=now)
+    elif verb == "uninstall":
+        result = skill.uninstall(env, state_dir=state, dry_run=args.dry_run, now=now)
+    else:
+        result = skill.status(env, state_dir=state)
+    if verb == "status" and args.json:
+        out(json.dumps(result.to_json(), indent=1, ensure_ascii=False))
+        return int(result.exit_code)
+    if verb == "update" and args.quiet:
+        line = result.summary()
+        lines = [line] if line else []
+    else:
+        lines = result.lines()
+    for line in lines:
+        out(line)
+    return int(result.exit_code)
+
+
+@functools.cache
+def skill_bundle_sha256() -> str | None:
+    """skill.bundle_sha256() without importing runfleet.agent.skill (that import alone costs several ms on every
+    command): the packaged skill files read from the package directory; None when they are not plain files (a
+    zipped install: the hook then asks the skill module). A test pins it to skill.bundle_sha256()."""
+    import hashlib
+
+    root = Path(__file__).resolve().parent / "agent" / "skill"
+    files: dict[str, str] = {}
+
+    def walk(d: Path, prefix: str) -> None:
+        for entry in os.scandir(d):
+            if entry.name == "__pycache__" or entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                walk(Path(entry.path), f"{prefix}{entry.name}/")
+            else:
+                files[prefix + entry.name] = hashlib.sha256(Path(entry.path).read_bytes()).hexdigest()
+
+    try:
+        walk(root, "")
+    except OSError:
+        return None
+    h = hashlib.sha256()
+    for rel, digest in sorted(files.items()):
+        h.update(f"{rel}\0{digest}\n".encode())
+    return h.hexdigest()
+
+
+@functools.cache
+def skill_install_identity() -> str:
+    """skill.install_identity() without importing runfleet.agent.skill: this install's resolved package dir (a test
+    pins the two)."""
+    return os.path.normcase(str(Path(__file__).resolve().parent))
+
+
+def skill_refresh_due(data: dict[str, Any], *, config_mtime: float | None, now: float) -> bool:
+    """The fast path's half of skill.refresh_reason for the recorded config (a test pins the two): False when
+    automatic refresh is off, a refresh failed less than SKILL_BACKOFF ago, a newer RunFleet wrote the skill, the
+    shared copy is gone, or version, config mtime and bundle all match (a bundle that differs at the same version
+    counts only when this install wrote it). True: let skill.auto_refresh decide."""
+    if data.get("schema") != SKILL_SCHEMA or data.get("auto_update") is not True:
+        return False
+    failed_at = data.get("last_failure_at")
+    if isinstance(failed_at, (int, float)) and not isinstance(failed_at, bool) and 0 <= now - failed_at < SKILL_BACKOFF:
+        return False
+    if not (Path.home() / ".agents" / "skills" / "runfleet").is_dir():
+        return False                             # the user removed it: `skill update` / `status` say so
+    installed = str(data.get("version") or "")
+    if installed != __version__:
+        running, recorded = skill_version_key(__version__), skill_version_key(installed)
+        if running is None or recorded is None or running < recorded:
+            return False                         # older, or unsure: never downgrade (no import either)
+        if running > recorded:
+            return True
+    if data.get("writer") in (None, skill_install_identity()) and data.get("bundle_sha256") != skill_bundle_sha256():
+        return True
+    return data.get("config_mtime") != config_mtime
+
+
+def skill_auto_refresh(args: argparse.Namespace, clock: Clock) -> None:
+    """D-auto-refresh (§8.7): before any command but `skill …` and --demo (--version and -h never get here), bring an
+    installed skill up to this version, its packaged text and the config's host names. Nothing installed: one failed
+    open. Installed and current (same version, config mtime and bundle hash as recorded): one small JSON read, a stat
+    and the bundle hash (once per process), without importing runfleet.agent.skill. Otherwise skill.auto_refresh
+    decides (it never downgrades, loads the config only when its mtime changed, skips when another skill command
+    holds the lock, and logs one line). Never prints (stdout may carry MCP or JSON), never raises."""
+    if args.command == "skill" or getattr(args, "demo", False):
+        return
+    try:
+        state = paths.state_dir()
+        try:
+            data = json.loads((state / SKILL_MANIFEST).read_bytes())
+        except (OSError, ValueError):            # none, unreadable or damaged: `skill status` / `update` report it
+            return
+        if not isinstance(data, dict) or data.get("auto_update") is not True:
+            return
+        recorded = data.get("config_path") if isinstance(data.get("config_path"), str) else None
+        config = Path(recorded) if recorded else None
+        mtime = file_mtime(config or paths.config_file())
+        if not skill_refresh_due(data, config_mtime=mtime, now=clock.now().timestamp()):
+            return
+        from runfleet.agent import skill
+
+        def host_names() -> list[str]:                # its warning goes into the refresh's one log line
+            names = config_host_names(config, warn=lambda m: skill.diagnostic(logging.WARNING, m))
+            return [str(h) for h in data.get("hosts") or []] if names is None else names
+
+        skill.auto_refresh(skill.Env.current(), state_dir=state, config_mtime=mtime, config_path=recorded,
+                           load_host_names=host_names, now=clock.now())
+    except Exception as exc:                     # a skill refresh never stands between the user and the command
+        log.warning("skill: auto-refresh failed: %s", exc)
+
+
 # ====================================================================================================== update
+def cmd_mcp(args: argparse.Namespace, clock: Clock, out: Callable[[str], None]) -> int:
+    """`runfleet mcp` (runfleet.agent.mcp): stdout carries the protocol only, so stray prints go to the log."""
+    from runfleet.agent import mcp
+
+    if args.no_cache and not args.demo:
+        raise UsageError("mcp reads the cache; drop --no-cache")
+    if args.config is not None and not args.config.exists():
+        raise UsageError(f"no such config file: {args.config}")
+    runner = mcp.command_runner(config_path=args.config, demo=args.demo, demo_seed=args.demo_seed, clock=clock)
+    stdin, stdout, stray = sys.stdin.buffer, sys.stdout.buffer, mcp.LogWriter()
+    try:
+        with contextlib.redirect_stdout(stray):
+            return mcp.serve(stdin, stdout, runner)
+    finally:
+        stray.flush()
+
+
 def windows_update_steps(install: update.Install) -> list[str]:
     """Windows (P1): the running runfleet.exe cannot be replaced while it runs (uv: os error 32), so RunFleet never
     updates itself there; these lines say how to do it by hand."""
@@ -1017,6 +1444,9 @@ def run_update(install: update.Install, out: Callable[[str], None]) -> int:
         out(f"Done: still {new} (no newer code).")
     else:
         out(f"Updated: {__version__} → {new}.")
+    refreshed = refresh_skill()                  # the new code's skill, not this process's (§8.7)
+    if refreshed:
+        out(refreshed)
     return EXIT_OK
 
 
@@ -1070,7 +1500,7 @@ def update_and_restart(args: argparse.Namespace, out: Callable[[str], None]) -> 
 
 COMMANDS: dict[str, Callable[[argparse.Namespace, Clock, Callable[[str], None]], int]] = {
     "connect": cmd_connect, "doctor": cmd_doctor, "snapshot": cmd_snapshot, "wait": cmd_wait, "status": cmd_status,
-    "update": cmd_update,
+    "update": cmd_update, "agent": cmd_agent, "skill": cmd_skill, "mcp": cmd_mcp,
 }
 
 
@@ -1081,6 +1511,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.argv = argv                                 # an update started in the TUI restarts with the same arguments
     setup_logging(args.debug, demo=bool(getattr(args, "demo", False)))
     clock: Clock = RealClock()
+    skill_auto_refresh(args, clock)
 
     def out(text: str) -> None:
         print(text, flush=True)
@@ -1088,7 +1519,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     def err(text: str) -> None:
         print(text, file=sys.stderr, flush=True)
 
-    if args.debug and args.command is not None:      # the TUI shows it in the log instead of on the terminal
+    if args.debug and args.command not in (None, "mcp"):   # TUI: in its log instead; mcp: stderr is not ours
         err(f"runfleet: --debug: raw probe dumps in {paths.debug_dir()}")
     try:
         if args.command is None:
@@ -1098,7 +1529,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return handler(args, clock, out)
         return COMMANDS[args.command](args, clock, out)
     except ConfigError as exc:
-        err(f"{display_path(default_config_path(args))}: {exc}")
+        if args.command in AGENT_COMMANDS:     # its text may quote config values (ssh targets): the key path only
+            err(agent_config_error(args, exc))
+        else:
+            err(f"{display_path(default_config_path(args))}: {exc}")
         return EXIT_USAGE
     except UsageError as exc:
         err(f"runfleet: {exc}")

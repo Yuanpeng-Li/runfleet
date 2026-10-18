@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from runfleet.agent.data import dest_hash
 from runfleet.backends.base import (Cadence, Collector, CollectorOutput, HostContext, MonitorView, Role,
                                     SchedulerCollector)
 from runfleet.config import GeneralSettings, HostConfig
@@ -749,6 +750,10 @@ class HostPoller:
             snap = self.store.hosts[self.name].snapshot
             if snap is not None:
                 self.cache.put_snapshot(self.name, snap)
+            # sections as _update_sections just published them; identity, so a row of another machine under the
+            # same display name (a second config) is not taken for this host's (`runfleet agent`)
+            self.cache.put_health(self.name, self.status, dest_hash=dest_hash(self.cfg.ssh),
+                                  remote_user=self.caps.remote_user if self.caps is not None else None, at=ctx.now)
 
     def _maybe_redetect(self, results: Mapping[str, SectionResult]) -> None:
         """§9 row 9: the scheduler's own command went missing -> re-detect once (maybe a different profile)."""

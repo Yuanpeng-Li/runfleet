@@ -8,7 +8,8 @@ Nothing else is sent: a plain GET with a ``runfleet/<version>`` User-Agent. The 
 
 The install method is read from the files the installers leave next to the interpreter: ``uv-receipt.toml``
 (``uv tool install``), ``pipx_metadata.json`` (pipx); a package directory inside a git checkout is a source checkout.
-Everything here is synchronous and quick (5 s timeouts); the TUI runs :func:`check` in a worker thread.
+Everything here is synchronous and quick (5 s timeouts); the TUI runs :func:`check` in a worker thread. After an
+update :func:`refresh_skill` has the NEW executable refresh the installed agent skill (§8.7, best effort).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tomllib
 import urllib.request
@@ -281,3 +283,34 @@ def relaunch_argv(argv: Sequence[str], *, argv0: str | None = None, executable: 
         if found:
             return [found, *argv]
     return [executable, "-m", "runfleet", *argv]
+
+
+# ====================================================================================================== skill refresh
+SKILL_REFRESH_ARGS = ("skill", "update", "--if-installed", "--quiet")
+SKILL_REFRESH_TIMEOUT = 30.0
+
+
+def refresh_skill(*, argv0: str | None = None, executable: str | None = None,
+                  which: Callable[[str], str | None] = shutil.which,
+                  timeout: float = SKILL_REFRESH_TIMEOUT) -> str | None:
+    """After an update: the NEW runfleet (found as :func:`relaunch_argv` finds it) refreshes the installed agent
+    skill, `skill update --if-installed --quiet` (nothing installed: silent). Best effort, never raises: returns the
+    line to show (its last output line, or why it failed), None when it had nothing to say."""
+    argv = relaunch_argv(list(SKILL_REFRESH_ARGS), argv0=argv0, executable=executable, which=which)
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False,
+                              stdin=subprocess.DEVNULL, encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        log.warning("skill refresh: %s timed out after %.0fs", argv[0], timeout)
+        return "Agent skill not refreshed (timed out); run `runfleet skill update`."
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("skill refresh: cannot run %s: %s", argv[0], exc)
+        return None
+    lines = [ln.strip() for ln in (done.stdout or "").splitlines() if ln.strip()]
+    if done.returncode != 0:
+        why = [ln.strip() for ln in (done.stderr or "").splitlines() if ln.strip()]
+        log.warning("skill refresh: exit %d: %s", done.returncode, (why or lines or ["-"])[-1])
+        if done.returncode == 2 and any("invalid choice" in ln or "usage:" in ln for ln in why):
+            return None                          # a version without `skill update`: nothing to refresh
+        return f"Agent skill not refreshed (exit {done.returncode}); run `runfleet skill update`."
+    return lines[-1] if lines else None

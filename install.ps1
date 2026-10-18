@@ -7,11 +7,17 @@
 # runfleet.exe cannot be replaced), so RunFleet must not be open: the script checks first.
 # Otherwise: uv first when missing (Astral's PowerShell installer, which also puts %USERPROFILE%\.local\bin on the
 # user PATH), then `uv tool install git+https://github.com/Yuanpeng-Li/runfleet`. uv fetches git URLs with the git
-# CLI, so Git for Windows is a prerequisite. Nothing is installed on your clusters or workstations.
+# CLI, so Git for Windows is a prerequisite. Nothing is installed on your clusters or workstations. Either way an
+# agent skill installed with `runfleet skill install` is refreshed to the new version.
+#
+# Remove RunFleet (its agent skill first, then the tool; your config and state are kept and their paths printed):
+#
+#   powershell -ExecutionPolicy ByPass -c "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.ps1))) -Uninstall"
 #
 # Everything runs inside one script block: under `irm | iex` a top-level `exit` would close the user's window and
 # variables would leak into their session, so errors `throw` and the normal end is `return`. ASCII only: Windows
 # PowerShell 5.1 reads a script file without a BOM in the ANSI code page.
+param([switch]$Uninstall)
 & {
     # Local to this block: a session that set 'Stop' would make Windows PowerShell 5.1 throw on the first line a
     # native program writes to a redirected stderr (2>$null). Failures are found by $LASTEXITCODE and end in Fail.
@@ -45,6 +51,49 @@
         }
     }
 
+    # Refresh an installed agent skill. The capability check: a version without `skill update` prints the main help
+    # or a usage error here, never --if-installed.
+    function Update-Skill([string]$Rf) {
+        if (-not $Rf) { return }
+        if ((& $Rf skill update --help 2>$null | Out-String) -match '--if-installed') {
+            & $Rf skill update --if-installed
+            if ($LASTEXITCODE -ne 0) { Say "note: runfleet skill update exited with $LASTEXITCODE" }
+        }
+    }
+
+    if ($Uninstall) {
+        $rf = Find-Bin 'runfleet'
+        if ($rf -and (Get-Process -Name runfleet -ErrorAction SilentlyContinue)) {
+            Fail 'RunFleet is running; quit it (q) everywhere, then run this again (a running runfleet.exe cannot be removed)'
+        }
+        if ($rf -and ((& $rf skill uninstall --help 2>$null | Out-String) -match '--dry-run')) {
+            & $rf skill uninstall
+            if ($LASTEXITCODE -ne 0) { Say 'warning: runfleet skill uninstall failed (see above); RunFleet is removed anyway' }
+        }
+        $uv = Find-Bin 'uv'
+        if ($uv -and ((& $uv tool list 2>$null | Out-String) -match '(?m)^runfleet ')) {
+            Say 'removing RunFleet (uv tool uninstall runfleet) ...'
+            Invoke-Native $uv '' tool uninstall runfleet
+        } elseif ((Get-Command pipx -ErrorAction SilentlyContinue) -and ((& pipx list --short 2>$null | Out-String) -match '(?m)^runfleet ')) {
+            Say 'removing RunFleet (pipx uninstall runfleet) ...'
+            Invoke-Native (Get-Command pipx).Source '' uninstall runfleet
+        } elseif ($rf) {
+            Fail "$rf was not installed by uv or pipx; remove it the way you installed it"
+        } else {
+            Say 'RunFleet is not installed (no runfleet found)'
+        }
+        # config in %APPDATA%\runfleet, state and cache in %LOCALAPPDATA%\runfleet (runfleet.paths)
+        $kept = @(@($env:APPDATA, $env:LOCALAPPDATA) | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'runfleet' } |
+                  Where-Object { Test-Path -LiteralPath $_ -PathType Container })
+        if ($kept.Count -gt 0) {
+            $quoted = ($kept | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ', '
+            Say "kept your config and RunFleet's state (hosts, cache, log): $quoted"
+            Say "to delete them too: Remove-Item -Recurse -Force -LiteralPath $quoted"
+        }
+        Say 'done. Your clusters and workstations were never changed.'
+        return
+    }
+
     if (-not (Get-Command ssh -CommandType Application -ErrorAction SilentlyContinue)) {
         Say 'note: no ssh client on PATH; RunFleet needs OpenSSH to reach your hosts (runfleet --demo works without).'
         Say '      Settings > System > Optional features > OpenSSH Client, or (admin): Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0'
@@ -65,6 +114,7 @@
         } else {
             Fail "$rf was not installed by uv or pipx; update it the way you installed it"
         }
+        Update-Skill $rf
         Say "done: $((& $rf --version 2>$null | Out-String).Trim()). Start it with: runfleet"
         return
     }
@@ -91,10 +141,12 @@
     $binDir = (& $uv tool dir --bin 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or -not $binDir) { $binDir = Join-Path $HOME '.local\bin' }
     if (Get-Command runfleet -CommandType Application -ErrorAction SilentlyContinue) {
+        Update-Skill (Get-Command runfleet -CommandType Application | Select-Object -First 1).Source
         Say "done: $((& runfleet --version | Out-String).Trim()). Start it with: runfleet   (or try: runfleet --demo)"
     } else {
         & $uv tool update-shell *> $null      # adds the bin dir to the user PATH (registry); new terminals see it
         $env:Path = "$binDir;$env:Path"       # ... and this session too
+        Update-Skill (Join-Path $binDir 'runfleet.exe')
         Say "done: $((& (Join-Path $binDir 'runfleet.exe') --version | Out-String).Trim())."
         Say 'Start it with: runfleet   (or try: runfleet --demo). Other open terminals need restarting to find it.'
     }

@@ -31,7 +31,7 @@ PKG_DIR = Path(runfleet.__file__).resolve().parent
 # Every module of §3.2 (dotted, relative to `runfleet`).
 EXPECTED_MODULES = """
 __main__ cli export models errors config configedit sshconfig paths debugdump wait update status
-util util.shell util.slurmfmt util.humanize util.logscan util.efficiency util.platform
+util util.shell util.slurmfmt util.humanize util.logscan util.efficiency util.platform util.redact util.gpufree
 probe probe.section probe.framing
 transport transport.base transport.openssh transport.mux transport.spawn transport.classify transport.local
 transport.fake transport.agent transport.session
@@ -55,6 +55,7 @@ ui.widgets.jobs_view ui.widgets.job_table ui.widgets.job_preview ui.widgets.gpus
 ui.widgets.proc_table ui.widgets.node_table ui.widgets.log_view ui.widgets.filter_bar ui.widgets.attach_panel
 ui.widgets.fleet_panel
 demo demo.world demo.render demo.transport
+agent agent.data agent.view agent.events agent.source agent.skill agent.commands agent.mcp
 """.split()
 
 CONTRACT_MODULES: tuple[ModuleType, ...] = (models, section, tbase, bbase, config, cclock, store, service)
@@ -125,6 +126,69 @@ def test_textual_only_in_ui_and_cli() -> None:
         if "textual" in _imported_top_names(path):
             offenders.append(str(rel))
     assert not offenders, f"textual imported outside ui/ and cli.py: {offenders}"
+
+
+# docs/AGENT_INTERFACE.md §5.1: `runfleet agent` is read-only by construction. A maintenance guard, not the security
+# boundary (that is: no mutating code path at all): agent/ imports no action, attach or UI code and calls none of the
+# mutating or interactive FleetAPI entry points.
+AGENT_BANNED_IMPORTS = ("runfleet.core.actions", "runfleet.core.attach", "runfleet.ui", "textual", "rich")
+AGENT_BANNED_CALLS = frozenset({"plan", "execute", "attach_now", "attach_start", "forward_port", "write_config",
+                                "add_host", "remove_host", "set_general", "connect_login", "doctor"})
+
+
+def _dotted_imports(path: Path) -> set[str]:
+    """Every module a file imports, dotted (``from a.b import c`` gives ``a.b`` and ``a.b.c``), incl. local ones."""
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+        if isinstance(node, ast.Import):
+            found.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            found.add(node.module)
+            found.update(f"{node.module}.{a.name}" for a in node.names)
+    return found
+
+
+def _agent_import_offences(path: Path) -> list[str]:
+    bad = []
+    for mod in sorted(_dotted_imports(path)):
+        parts = mod.split(".")
+        if any(mod == b or mod.startswith(b + ".") for b in AGENT_BANNED_IMPORTS):
+            bad.append(mod)
+        elif parts[:2] == ["runfleet", "backends"] and "actions" in parts:
+            bad.append(mod)
+    return bad
+
+
+def _agent_call_offences(path: Path) -> list[str]:
+    bad = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+        if isinstance(node, ast.Call):
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            sql = (name == "execute" and isinstance(node.func, ast.Attribute)
+                   and isinstance(node.func.value, ast.Name) and node.func.value.id == "db")
+            if name in AGENT_BANNED_CALLS and not sql:          # db.execute: the read-only sqlite connection
+                bad.append(f"{name}( (line {node.lineno})")
+    return bad
+
+
+def test_agent_is_read_only_by_construction() -> None:
+    offenders = []
+    for path in sorted((PKG_DIR / "agent").rglob("*.py")):
+        bad = _agent_import_offences(path) + _agent_call_offences(path)
+        if bad:
+            offenders.append(f"{path.relative_to(PKG_DIR)}: {bad}")
+    assert not offenders, f"agent/ must stay read-only (AGENT_INTERFACE.md §5.1): {offenders}"
+
+
+def test_agent_checker_detects_violations(tmp_path: Path) -> None:
+    probe = tmp_path / "x.py"
+    probe.write_text("from runfleet.core import actions\nimport rich.cells\n"
+                     "def f(svc):\n    from runfleet.backends.slurm.actions import cancel\n"
+                     "    svc.actions.plan('x')\n    svc.doctor('k2')\n    svc.logs.read('k2')\n    db.execute('SELECT 1')\n"
+                     "    svc.actions.execute(p)\n", encoding="utf-8")
+    assert _agent_import_offences(probe) == ["rich.cells", "runfleet.backends.slurm.actions",
+                                             "runfleet.backends.slurm.actions.cancel", "runfleet.core.actions"]
+    assert _agent_call_offences(probe) == ["plan( (line 5)", "doctor( (line 6)", "execute( (line 9)"]
 
 
 def test_backends_are_sans_io() -> None:

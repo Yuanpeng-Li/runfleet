@@ -66,7 +66,8 @@ def test_one_block_never_exits_the_users_shell() -> None:
     text = SCRIPT.read_text(encoding="ascii")
     code = _code(text)
     body = [line for line in code.splitlines() if line.strip()]
-    assert body[0].strip() == "& {" and body[-1].strip() == "}"       # variables and functions stay local
+    assert body[0].strip() == "param([switch]$Uninstall)"            # `[scriptblock]::Create((irm …)) -Uninstall`
+    assert body[1].strip() == "& {" and body[-1].strip() == "}"       # variables and functions stay local
     assert not re.search(r"\bexit\b", code, re.I)                    # `irm | iex`: exit would close the window
     assert code.count("{") == code.count("}") and code.count("(") == code.count(")")
 
@@ -74,7 +75,7 @@ def test_one_block_never_exits_the_users_shell() -> None:
 def test_callers_error_preference_cannot_change_the_flow() -> None:
     code = _code(SCRIPT.read_text(encoding="ascii"))
     lines = [line.strip() for line in code.splitlines() if line.strip()]
-    assert lines[:2] == ["& {", "$ErrorActionPreference = ''"]       # first thing in the block ('Continue')
+    assert lines[1:3] == ["& {", "$ErrorActionPreference = ''"]      # first thing in the block ('Continue')
     assert "$ErrorActionPreference = 'Continue'" in SCRIPT.read_text(encoding="ascii")
 
 
@@ -101,10 +102,55 @@ def test_installed_copy_is_upgraded_here_and_fresh_installs_from_github() -> Non
 
 
 def test_readme_one_liner_matches_the_script_header() -> None:
-    line = ('powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/'
-            'install.ps1 | iex"')
-    assert line in (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert line in SCRIPT.read_text(encoding="ascii")
+    url = "https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.ps1"
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    for line in (f'powershell -ExecutionPolicy ByPass -c "irm {url} | iex"',
+                 f'powershell -ExecutionPolicy ByPass -c "& ([scriptblock]::Create((irm {url}))) -Uninstall"'):
+        assert line in readme and line in SCRIPT.read_text(encoding="ascii"), line
+
+
+def _blocks(code: str) -> dict[str, str]:
+    """The body of each `if (...) {` / `function Name(...) {` block whose header contains a key, by brace matching."""
+    out: dict[str, str] = {}
+    for key in ("function Update-Skill", "if ($Uninstall)", "$rf = Find-Bin 'runfleet'\n    if ($rf)"):
+        start = code.index("{", code.index(key))
+        depth, i = 0, start
+        while True:
+            depth += {"{": 1, "}": -1}.get(code[i], 0)
+            if depth == 0:
+                break
+            i += 1
+        out[key] = code[start:i + 1]
+    return out
+
+
+def test_skill_is_refreshed_after_every_install_and_upgrade() -> None:
+    """§8.7: after `uv tool upgrade` / `pipx reinstall` and after a fresh install, `skill update --if-installed` runs,
+    behind a capability check (`skill update --help` mentions --if-installed); its failure only says so."""
+    ps1 = SCRIPT.read_text(encoding="ascii")
+    blocks = _blocks(ps1[ps1.index("& {"):])
+    refresh = blocks["function Update-Skill"]
+    assert refresh.index("skill update --help") < refresh.index("skill update --if-installed")
+    assert "-match '--if-installed'" in refresh and "Fail" not in refresh
+    upgrade = blocks["$rf = Find-Bin 'runfleet'\n    if ($rf)"]
+    assert upgrade.index("tool upgrade runfleet") < upgrade.index("Update-Skill $rf") < upgrade.index("return")
+    fresh = ps1[ps1.index('tool install "git+$Repo"'):]
+    assert fresh.count("Update-Skill") == 2                           # on PATH already, or in the bin dir
+
+
+def test_uninstall_removes_the_skill_then_the_tool_and_keeps_user_dirs() -> None:
+    ps1 = SCRIPT.read_text(encoding="ascii")
+    body = _blocks(ps1[ps1.index("& {"):])["if ($Uninstall)"]
+    # never while RunFleet runs; the skill (when this version has `skill uninstall`) before the tool
+    assert body.index("Get-Process -Name runfleet") < body.index("skill uninstall --help") \
+        < body.index("& $rf skill uninstall\n") < body.index("tool uninstall runfleet") < body.index("return")
+    assert "-match '--dry-run'" in body and "pipx).Source '' uninstall runfleet" in body
+    # config and state are kept: their paths and how to delete them are printed, never deleted here
+    assert "$env:APPDATA" in body and "$env:LOCALAPPDATA" in body and "Remove-Item -Recurse -Force -LiteralPath $quoted" in body
+    assert "-replace \"'\", \"''\"" in body                         # O'Brien's home: quotes doubled
+    assert "Remove-Item" not in _code(body)
+    # the uninstall branch comes before anything that installs
+    assert ps1.index("if ($Uninstall)") < ps1.index("installing uv")
 
 
 def test_lexer_blanks_strings_and_comments() -> None:

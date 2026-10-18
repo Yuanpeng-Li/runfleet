@@ -5,6 +5,83 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-18
+
+### Added
+- **`runfleet agent`: RunFleet for AI agents** (Claude Code, Codex). A read-only command family — `brief`, `jobs`,
+  `job`, `log`, `gpus`, `host`, `events`, `help` — with compact text or versioned JSON (`runfleet.agent.<verb>/1`),
+  answered from the cache without ssh (only `log` reads one bounded log tail). Every answer says how old each kind of
+  data is (job list, nodes, accounting) and where it came from; problems are stable codes with fixed messages and the
+  next step (`runfleet connect HOST` or "press c in the TUI" for an expired login), never raw ssh errors; outputs stay
+  within byte budgets (`brief` ≤ 2 KB) and end in the exact command for the rest, runnable as printed. Unknown values
+  print as `unknown` (a host without current job data is never counted as 0 jobs; a host whose accounting fails makes
+  the finished/failed counts lower bounds, `≥`), and data older than 5 minutes is marked `as of <age> ago`. A cut
+  answer's `next` (JSON `truncated.next`) is one command, runnable as printed with the call's `-c PATH` / `--demo
+  --demo-seed N`, narrowed to one host when one call cannot hold the rest; the prose goes to `truncated.advice`.
+  `--state finished` selects every job that ended (done, failed, cancelled, ended). Events carry stable ids
+  (`k2:2331977:ended_bad`; a workstation task's id has its full key, so a reused pid never collides) for
+  overlapping-window dedupe. Log lines are printed after `| ` (the log line a failure cause quotes too: `cause (from
+  log): | …`), so log content never passes for RunFleet's own lines. `--refresh` polls once first, skipping hosts
+  another RunFleet is polling and hosts anyone tried to refresh in the last minute or is refreshing now
+  (`rate_limited`); a probe that fails during the refresh keeps the last good data, cached finished jobs included.
+  Only your own jobs by default; other users' rows show user, id, state, GPUs and partition only, and their logs are
+  never read. Secrets are scrubbed from every string (API keys and tokens, AWS keys, PEM private keys even when cut
+  off, `Bearer`/`Basic` credentials, `user:password@` in URLs, `…PASSWORD=` / `…TOKEN=` style values). Exit `0` ok,
+  `4` partial, `1` no data, `2` usage. Works with `--demo`.
+- **`runfleet skill install`**: installs the bundled `runfleet` skill for most coding agents at once: one copy in
+  `~/.agents/skills/runfleet`, which Codex, GitHub Copilot CLI, Gemini CLI, OpenCode, Cursor, Amp, Goose, Factory
+  Droid, Windsurf, Pi, Cline and Warp read, plus a link for Claude Code (`${CLAUDE_CONFIG_DIR:-~/.claude}/skills`; a
+  junction on Windows), for Copilot when `COPILOT_HOME` is set, and for Antigravity CLI on request (`--agent
+  auto|all|claude,…`). Your host names become trigger words; `--print` previews; it never edits agent settings and
+  prints the permission rule `Bash(runfleet agent *)`. The SKILL.md is portable (any agent that can run commands).
+- **The skill stays up to date**: `runfleet update`, the TUI's update, `install.sh` and `install.ps1` refresh it with
+  the new version, and any `runfleet` command refreshes it after an upgrade done another way (`uv tool upgrade`) or a
+  change of the config's hosts (one stat when nothing is due; `--no-auto-update` turns all of that off, the
+  post-upgrade and installer refresh included). A refresh that keeps failing is retried at most once an hour; a
+  skill written by a newer RunFleet is only downgraded by an explicit `runfleet skill update`, which says so; a
+  development checkout and the installed tool at the same version do not overwrite each other's skill text.
+  `runfleet skill update` does it by hand and also links agents installed since an `--agent auto` install (the
+  automatic refresh never does); `runfleet skill status [--json]` shows which agents see it (an agent without its
+  link: the command that adds it), its version, edited files, where the last update saved them, the last failed
+  refresh, broken or stale links and stray copies.
+- **Easy removal**: `runfleet skill uninstall [--dry-run]` removes only what RunFleet wrote (files you edited or added
+  are backed up under the state dir first; a link inside is recorded, never followed), never a link to a
+  `~/.agents/skills/runfleet` that is not RunFleet's, plus its lock file and the skills folders it created while
+  empty, and prints the manual steps for an MCP registration or permission rule (with `$CODEX_HOME` /
+  `$CLAUDE_CONFIG_DIR` paths when set). When `runfleet` is not found, the skill first checks whether it is only off
+  the agent's PATH before suggesting removal (POSIX and Windows commands).
+  `install.sh --uninstall` (`curl … | sh -s -- --uninstall`) and `install.ps1 -Uninstall` remove the skill, then
+  RunFleet, and print where your config and state are kept.
+- **`runfleet mcp`**: the same read-only verbs as MCP tools over stdio (`fleet_brief`, `list_jobs`, `job_detail`,
+  `read_log`, `gpu_availability`, `host_health`, `fleet_events`, `runfleet_help`), with no extra dependency, for
+  clients without a shell. Register with `claude mcp add --scope user runfleet -- runfleet mcp`, or
+  `[mcp_servers.runfleet]` with `command = "runfleet"`, `args = ["mcp"]` in `~/.codex/config.toml`.
+
+### Changed
+- `runfleet snapshot` takes the instance locks of the hosts it polls that no other RunFleet holds, so a TUI started
+  meanwhile knows the host is being polled (held hosts are polled as before).
+- `runfleet snapshot` no longer replaces a host's cached jobs when its job listing or accounting failed during the
+  poll, nor its cached partitions and nodes when `sinfo` failed (even while a login node's `nvidia-smi` answered),
+  its GPUs when `nvidia-smi` failed, its host metrics when `/proc` failed or its process table when `ps` failed: the
+  cache keeps them (merged with what the poll saw, still dated by their last success); the output still shows this
+  poll.
+- A full workstation task key (`labstation:p642229-1788696459`) given to `runfleet wait` or `runfleet agent` also
+  finds the task when its start differs by up to 5 s (each call recomputes it from the process's elapsed time), and
+  the demo's task keys stay the same between `--demo` calls within the hour.
+- Error texts that quote what an agent or MCP client sent (unknown host, bad time, unknown tool or argument) are
+  scrubbed of secrets, have control characters made visible and are capped at 300 bytes, in the reply and in
+  runfleet.log.
+- `runfleet snapshot` and `agent --refresh` ignore cached data (snapshot, capabilities, log paths, ended tasks) that
+  another ssh destination wrote under the same host name (a second config reusing it): the host is detected afresh,
+  and the old destination's capabilities, log paths and ended tasks are dropped from the cache once the new one's
+  health is stored (also when the stored health row is unreadable: another version or a damaged field).
+- The cache gains a `host_health` table: per host, the last success of each probe, latency and failure counts, and
+  which ssh destination wrote it (never error texts). A failed probe keeps the last success already stored. Older
+  RunFleet versions ignore it.
+- The TUI retries every ~30 s to take the instance locks it could not get at start (another RunFleet, such as an
+  agent `--refresh`, held them), so it ends up holding its hosts; the "another RunFleet is polling" notice is shown
+  once.
+
 ## [0.7.2] - 2026-10-17
 
 ### Changed
@@ -405,7 +482,8 @@ First public release.
   opt-in with `--yes`); `scripts/gen_docs.py`; `scripts/screenshots.py`.
 - CI: lint, types and tests on Python 3.11 and 3.13, plus a packaging job that runs the demo from the built wheel.
 
-[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.6.0...v0.7.0

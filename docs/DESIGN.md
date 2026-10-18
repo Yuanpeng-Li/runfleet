@@ -288,6 +288,9 @@ src/runfleet/
     platform.py          the only home of OS differences: IS_WINDOWS, spawn keywords (background, session login),
                          kill_tree, the Windows Job Object, file locks, command splitting/display, Windows-reserved
                          names, Linux signal names (§1.2, §4.2, §4.8, §8.1)  [WP1]
+    redact.py            secrets scrubbed (support bundle, `runfleet agent`), ANSI stripped, control characters made
+                         visible in untrusted remote strings (pure)  [WP4]
+    gpufree.py           which GPUs count as free: the GPU views' in-use rule, the workstation pick (pure)  [WP4]
   probe/
     section.py           FROZEN Section, SectionResult, SectionOutcome, ProbeScript, StreamSpec  [WP1]
     framing.py           render ProbeScript → POSIX sh; parse framed stdout → SectionResults  [WP1]
@@ -333,7 +336,7 @@ src/runfleet/
     clock.py             FROZEN Clock protocol, RealClock, ManualClock                  [WP1]
     poller.py            HostPoller: ticks, cadence modes, backoff, lanes, MonitorView  [WP1]
     actions.py           ActionService: eligibility, plan, execute, action log          [WP1]
-    logs.py              LogService: follow streams, line assembly, peek, fetch, search, pager argv  [WP1]
+    logs.py              LogService: follow streams, line assembly, peek, read (agent), fetch, search, pager argv  [WP1]
     logsearch.py         cross-job log search (§4.7.1): scope, the `log.search` command, its parser, excerpts (pure)  [WP1]
     cache.py             SQLite cache (§5.5)                                            [WP1]
     doctor.py            per-host diagnostics → DoctorReport                            [WP1]
@@ -365,13 +368,29 @@ src/runfleet/
               gpus_view.py gpu_panel.py proc_table.py node_table.py log_view.py filter_bar.py
               attach_panel.py (Attach status line + live GPU rows, §7.16)
               fleet_panel.py (roomy Fleet view: free GPUs by type + what changed, §7.4)  [WP3]
+  agent/
+    __init__.py          `runfleet agent …`: read-only, cache-first view of the fleet for AI agents (§8.7)  [WP4]
+    data.py              shapes shared by the agent's IO and pure parts: HostView, HostHealth, FleetView, problem codes, Document  [WP4]
+    view.py              the documents (pure): JSON projections with fixed keys, compact text, problem messages and
+                         hints, byte budgets with "next command" footers, help; schemas `runfleet.agent.<verb>/1`  [WP4]
+    events.py            `agent events`: events rebuilt statelessly from cached timestamps, per-host coverage (pure)  [WP4]
+    source.py            IO: the read-only cache read, identity check, data source, `--refresh` under the instance
+                         locks, the `--demo` fleet in memory, the one-probe log read  [WP4]
+    commands.py          the one dispatcher `run(verb, params)` → Document (CLI and MCP): validation, config,
+                         cache vs demo, refresh, log read, one end-to-end deadline  [WP4]
+    skill.py             `runfleet skill install|update|uninstall|status` and the auto-refresh: render the packaged
+                         skill (agent/skill/) with the host names, one copy in ~/.agents/skills/runfleet, links for
+                         the agents that need one (Claude Code), a manifest in the state dir  [WP4]
+    mcp.py               `runfleet mcp`: zero-dependency MCP server on stdio (synchronous JSON-RPC lines), one
+                         read-only tool per verb over commands.run  [WP4]
   demo/
     world.py             simulated fleet ("default" scenario) + fault-injection hooks for tests  [WP4]
     render.py            world → byte-exact command outputs                             [WP4]
     transport.py         DemoTransport                                                  [WP4]
 tests/
   __init__.py            every test directory is a package (unique module names; `from tests.conftest import …`)
-  conftest.py            sample()/meta()/frame() helpers, ManualClock fixture, no-ssh guard, `real` opt-in  [WP2]
+  conftest.py            sample()/meta()/frame() helpers, ManualClock fixture, no-ssh guard, `real` opt-in,
+                         isolated HOME / XDG / platformdirs dirs per test (never the developer's state)  [WP2]
   unit/ [WP1]   backends/ integration/ mockbin/ [WP2]   ui/ (incl. ui/fakes.py FakeService) [WP3]   demo/ cli/ [WP4]
 scripts/smoke_real.sh    read-only smoke test against real hosts (manual, opt-in)       [WP4]
 .github/workflows/ci.yml                                                                [WP4]
@@ -1586,7 +1605,25 @@ class FleetAPI(Protocol):
     async def start(self) -> None: ...           # load cache -> store; start one HostPoller per enabled host
     async def stop(self) -> None: ...
     async def collect_once(self, hosts: Iterable[str] | None = None, *, timeout: float = 60) -> None: ...
-        # `snapshot`: prepare + detect + one full poll per host, no pollers left running
+        # `snapshot`: prepare + detect + one full poll per host, no pollers left running. FleetService's
+        # implementation also takes `keep_cached: bool = False` (not in the protocol; `agent --refresh`): the polled
+        # hosts' cached snapshots are loaded first, as start() does, so a failing section keeps its last good data
+        # (store.apply keeps None fields — a failing sinfo / nvidia-smi / procfs answers None, not (); a failing
+        # job listing keeps every cached job, failing accounting — SECTION_GROUPS["history"] — the cached finished
+        # ones; fresh rows win per id). Without keep_cached (`snapshot`), a host whose sections failed prints its
+        # partial poll, but the row it writes is that poll merged the same way with the host's own cached row:
+        # the jobs as above, and each field whose own source section failed and that the poll left empty comes
+        # back (per section, not per group: partitions / nodes with slurm.sinfo — a login node's working
+        # nvidia-smi does not stand in for it —, GPUs with nvidia.gpu unless it said "No devices were found" (rc 6:
+        # an answer), metrics with procfs.host, the process table
+        # with process.ps; a field the poll filled, even from a failing section's partial output, stays the
+        # poll's). host_health
+        # keeps each failed group's last success, so the carried data keeps its age. Either way only the host's
+        # own cache is used: a host whose cached host_health names another ssh destination (a second config
+        # reusing the display name) gets no snapshot, caps (it is detected afresh), jobmeta or ended tasks, and
+        # the cache drops those rows once a health row of the new destination is written (same transaction,
+        # before that batch's rows); collect_once also gives none to a host whose host_health row is damaged or
+        # another version, and none to any host when the table cannot be read
     # scheduling hints from the UI
     def set_visibility(self, levels: Mapping[str, Visibility]) -> None: ...
     def note_user_activity(self) -> None: ...    # every key/mouse event: idle throttle reset, idle pause resume
@@ -2880,7 +2917,18 @@ no input for `idle_pause_after` (2 h) → **all polling paused** (`store.idle_pa
 key resumes"); any input → ×1, resume, immediate refresh of visible hosts. **Second instance**: `fcntl.flock` on
 one lock per enabled host's ssh destination, `<mux_dir>/instance.lock.<alias>-<sha1 8>` (pid inside); for the hosts whose
 lock is held, toast once "another RunFleet (pid N) is polling k2, lyra — remote load doubles there" (two instances with
-disjoint host sets do not warn).
+disjoint host sets do not warn); every `LOCK_RETRY_EVERY` (30 s, from the flush loop) the TUI tries those locks again
+and keeps the ones that came free — a TUI started during an `agent --refresh` ends up holding its locks — without a
+second notice. The helpers are module functions of `core/service.py`, outside the FROZEN
+FleetAPI: `default_lock_base()`, `instance_lock_file(base, ssh)`, `try_instance_lock(path)` → `(fd, None)` /
+`(None, holder pid)`, `try_instance_lock_at(path, *, write_pid=True)` (the same plus the file's mtime from before
+this acquisition: the previous attempt; `write_pid=False` leaves the file untouched until `claim_instance_lock(fd)`
+writes the pid; a pid that cannot be written lets the lock go again: `(None, None, None)`, carry on unlocked),
+`release_instance_lock(fd)`, `lock_holder(path)` (who holds it, without keeping it) and `lock_attempt_at(path)` (the
+file's mtime: every acquisition rewrites the pid, so it dates the last poll attempt; an empty file — no pid ever
+written — dates none).
+`runfleet snapshot` takes the free locks of the hosts it polls for the duration of the poll and polls hosts whose
+lock is held anyway, as before (never `--demo`); `runfleet agent --refresh` uses the same helpers.
 
 Default load per host (steady state, visible):
 
@@ -2917,12 +2965,29 @@ CREATE TABLE ended_tasks (host TEXT, job_id TEXT, ended_at REAL, json TEXT,     
                           PRIMARY KEY (host, job_id));
 CREATE TABLE host_status (host TEXT PRIMARY KEY, at REAL, state TEXT,                -- for `runfleet status` only
                           error_kind TEXT, error TEXT);
+CREATE TABLE host_health (host TEXT PRIMARY KEY, at REAL, json TEXT);                -- for `runfleet agent` only
 ```
 `host_status` holds each host's `ConnState` since `at` (with the error's kind and one-liner): FleetService subscribes
 to the store and queues a row when (state, error kind, error summary) changes — never NEW / CONNECTING, which are no
 observation — so the 10 s batch carries at most one row per host; nothing reads it back into the TUI. Caches of
 RunFleet ≤ 0.5.0 lack the table (`CREATE TABLE IF NOT EXISTS` adds it at the next start).
-Retention: jobmeta 30 days, ended_tasks 7 days, pruned at startup. Serialization via `models.to_json`/`from_json`.
+`host_health` is rewritten by the poller with every snapshot (`put_health`, same batch): `{"v":1, state, dest_hash
+(sha1[:12] of the ssh destination: a row of another machine under the same name is not this host's), remote_user,
+mux, last_ok, latency_s, consecutive_failures, controller_slowdown, tick_interval, sections: {name: {ok, outcome,
+last_ok, error_kind}}}`, timestamps ISO as `to_json`. Error summaries, details and the ssh log are never stored (they
+can name a jump host); pruned after 7 days, but only once the host has no snapshot, caps, jobmeta or ended-task
+row left (it is their identity). Writing a row whose `dest_hash` differs from the stored one (or over a damaged one)
+drops the host's caps, jobmeta and ended tasks first, in the same transaction. Existing tables are never ALTERed (older versions insert positional
+VALUES). `flush()` / `flush_sync()` return True when nothing was pending or the batch committed, False when it was
+kept for retry (`agent --refresh` reports such a refresh as not done). `flush()` is also a barrier: a flush still
+writing on another thread (the one a cancelled flush loop leaves behind) has committed when it returns, so `stop()`
+never releases the instance locks mid-write. A `host_health` write merges with the stored
+row of the same `dest_hash` inside the write transaction: a section (and the top-level `last_ok`) whose new `last_ok`
+is null keeps the stored one — a process that has not seen a success yet (a refresh, a TUI just started) never
+erases when the data was last good. `close_sync()` flushes and closes on the calling thread (`agent --refresh` runs it
+in a worker thread and releases its instance locks only after it returned; each write waits at most the 2 s busy
+timeout).
+Retention: jobmeta 30 days, ended_tasks 7 days, host_health 7 days once nothing else of the host is cached, pruned at startup. Serialization via `models.to_json`/`from_json`.
 A failed batch write (`sqlite3.Error`: disk full, read-only filesystem) keeps the batch pending for the next flush,
 newer entries winning: ended tasks and jobmeta are queued only on change and would otherwise be lost for good.
 
@@ -4404,6 +4469,9 @@ runfleet snapshot [HOST ...] [--json] [--timeout SEC]
 runfleet wait HOST:JOBID ... [--timeout SEC] [--json]
 runfleet status [HOST ...] [--short | --json] summary from the cache for prompts / tmux; no ssh, no writes
 runfleet update [--check] [--force]           update this install to the newest version on GitHub (§8.6)
+runfleet agent VERB …                         read-only fleet view for AI agents, cache first (§8.7)
+runfleet skill install|update|uninstall|status   the `runfleet` agent skill: install, refresh, remove, check (§8.7)
+runfleet mcp                                  MCP server on stdio: the agent verbs as read-only tools (§8.7)
 ```
 `status` (`status.py`) never runs ssh, never builds a FleetService and never constructs `Cache` (whose constructor
 creates, migrates and repairs the file): it opens `paths.cache_file()` with sqlite's read-only URI
@@ -4487,7 +4555,12 @@ time; without them `install --force` would put the script in the default bin dir
 stops there (exit 1 only when GitHub could not be asked). Without a newer version it stops (exit 0), or exit 1 when
 the check failed, unless `--force`. Then each step runs in the terminal (`cli.run_step`, output visible); a failure
 prints the manual command (exit 1). Then `installed_version()` (`<relaunch argv> --version` in a subprocess: this
-process is still the old code) and "Updated: a → b".
+process is still the old code) and "Updated: a → b". Then **the skill hook**: `cli.refresh_skill` →
+`update.refresh_skill()` runs the NEW executable (found as `relaunch_argv` finds it) with `skill update
+--if-installed --quiet` (30 s timeout, stdin closed, best effort: a failure is one line "Agent skill not refreshed
+… run `runfleet skill update`", a version without the subcommand is silent) and prints its one line; nothing
+installed prints nothing. `run_update` does this, so `runfleet update` and the TUI's update-and-restart both refresh
+(§8.7). Windows runs no update step, hence no hook: `install.ps1` or the next command's auto-refresh catches up.
 
 **In the TUI**: `RunFleetApp(check_updates=)` — `cli.run_tui` passes `not demo and general.update_check`. On mount a
 worker thread runs `update.check(now)`: the answer in `<state>/update.json` while younger than 24 h, else a fetch (a
@@ -4501,10 +4574,16 @@ first-run prompt chose it. A failed update returns 1 with its output on screen. 
 while the TUI runs: lazily imported modules of the new version would mix with the old.
 
 **`install.sh`** (repo root, `curl -LsSf …/main/install.sh | sh`, POSIX sh): a `runfleet` on PATH or in the usual
-bin dirs with `update` → `exec runfleet update`; an older one → `uv tool upgrade runfleet` or `pipx reinstall
-runfleet`, whichever lists it. Otherwise uv is installed when missing (Astral's installer via curl or wget), then
-`uv tool install git+URL`; when `runfleet` is not on PATH afterwards, `uv tool update-shell` and "open a new
-terminal". Warns (does not fail) without `ssh`. Tested with stub programs (`tests/cli/test_install_sh.py`).
+bin dirs with `update` → `runfleet update` (its exit code is the script's); an older one → `uv tool upgrade runfleet`
+or `pipx reinstall runfleet`, whichever lists it. Otherwise uv is installed when missing (Astral's installer via curl
+or wget), then `uv tool install git+URL`; when `runfleet` is not on PATH afterwards, `uv tool update-shell` and "open
+a new terminal". After each of the three: `runfleet skill update --if-installed || true`, only when `runfleet skill
+update --help` mentions `--if-installed` (older versions print the main help or a usage error there). Warns (does not
+fail) without `ssh`. **`--uninstall`** (`… | sh -s -- --uninstall`): `runfleet skill uninstall` when that version has
+it (its failure is a warning), then `uv tool uninstall runfleet` or `pipx uninstall runfleet` (whichever lists it;
+neither: exit 1 "remove it the way you installed it"; no runfleet at all: "not installed", exit 0), then the config,
+state and cache dirs that exist (XDG, or `~/Library/…` on macOS) are printed as kept, with the `rm -rf` that deletes
+them; it never deletes them. Any other argument: exit 1. Tested with stub programs (`tests/cli/test_install_sh.py`).
 
 **Windows (P1: by hand).** Windows refuses to overwrite or delete a running `.exe` (uv: "os error 32"), and the
 `runfleet.exe` launcher that runs `runfleet update` is the file uv would replace. So on Windows `run_update` runs no
@@ -4524,7 +4603,218 @@ window): an installed `runfleet` is upgraded right there with `uv tool upgrade r
 whichever lists it — after refusing while a `runfleet` process runs (its .exe cannot be replaced); unlike install.sh it
 does not hand over to `runfleet update`, which on Windows only prints those steps (P1); otherwise Git for Windows is required (uv fetches git URLs
 with it), uv is installed when missing (Astral's PowerShell installer in a child shell), then `uv tool install
-git+URL` and `uv tool update-shell`. CI parses it with PowerShell 5.1 and 7 on Windows and with pwsh on Linux.
+git+URL` and `uv tool update-shell`; after an upgrade or install, `Update-Skill` runs `runfleet skill update
+--if-installed` behind the same capability check as install.sh (a failure only says so). `param([switch]$Uninstall)`
+before the block (`& ([scriptblock]::Create((irm …/install.ps1))) -Uninstall`; under `irm | iex` it is off): refuses
+while `runfleet` runs, `runfleet skill uninstall` when available, `uv tool uninstall runfleet` / `pipx uninstall
+runfleet`, then prints `%APPDATA%\runfleet` and `%LOCALAPPDATA%\runfleet` as kept with the `Remove-Item` that deletes
+them. CI parses it with PowerShell 5.1 and 7 on Windows and with pwsh on Linux; `tests/cli/test_install_ps1.py` pins
+the order of these steps statically.
+
+### 8.7 Agent interface (`runfleet agent`, skill, mcp)
+Design and rationale: docs/AGENT_INTERFACE.md. A read-only command family for AI agents (Claude Code, Codex, any agent
+with a shell) under
+one prefix, so one permission rule `Bash(runfleet agent *)` allows all of it; nothing in it changes a remote host,
+starts the TUI, prompts, or logs in.
+
+**Verbs** (`agent/commands.py` dispatches, `agent/view.py` renders, `agent/source.py` reads):
+```
+runfleet agent brief  [HOST…]                 hosts, my R/PD/failed counts, ≤ 8 attention items, free GPUs
+runfleet agent jobs   [HOST…] [--state S] [--name GLOB] [--workdir PREFIX] [--partition P] [--since DUR|ISO]
+                      [--attention] [--all-users]
+runfleet agent job    HOST:ID…                (≤ 10) times, placement, pending reason + advice, exit cause, log paths
+runfleet agent log    HOST:ID [--stream out|err] [--lines N≤400] [--bytes N≤256K] [--head] [--grep 'A|B'] [--path-only]
+runfleet agent gpus   [HOST…] [--type T] [--min N]
+runfleet agent host   HOST
+runfleet agent events --since DUR|ISO [HOST…]
+runfleet agent help   [VERB]
+common: --json  --refresh  --timeout SEC (whole call, default 30)  --limit N; global -c, --demo, --demo-seed, --debug
+```
+IDs as `wait` (`k2:2332861`, `k2:31270818_7`, `k2:31270818` = the array, `labstation:p642229`; HOST may be the ssh
+alias). A full task key `labstation:p642229-<start>` with no exact hit names the task with that root pid and a start
+within `START_TOLERANCE_S` (5 s): the start is `date - etimes`, recomputed by every collector, so the key one call
+printed may be a second off in the next (`backends/process/tasks.nearest_task`, used by `wait.Target.matches` and
+`agent.source.find_job`; exact hits in the snapshot or the ended tasks come first). The demo world dates its scenario
+processes from the last whole hour before it was built (`demo.world.TASK_EPOCH_GRID_S`), not from its own now, so task
+keys printed by one `--demo` call still name the task in the next. `--state` takes groups (queued active done failed cancelled ended unknown all) or codes (R PD OOM TO …;
+default active,queued,failed); `--grep` is literal, case-insensitive substrings split on `|` (never a regex, ≤ 20
+alternatives and 400 characters, ≤ 50 hits). Default scope is **my** jobs; `--all-users` adds other users' rows as user, id, state, GPUs and partition only
+(their names come from command lines). Output: compact text (default) or `--json`, schema `runfleet.agent.<verb>/1`
+(fields only ever added within /1): envelope `{schema, runfleet, generated_at, hosts[], truncated, errors[]}` + verb
+data; `hosts[]` carries per-host `state`, `source` (`tui` another RunFleet holds the lock and the job data advances,
+`cache`, `live` refreshed by this call, `demo`), `data{jobs_at, nodes_at, history_at}` (section `last_ok`s, null =
+unknown; `nodes_at` is the partition data's (`slurm.sinfo`) on a Slurm host, the GPU sample's (`nvidia.gpu`) on a
+workstation — each free-GPU row is dated by its own probe), `age_s` of the job list, `stale`, `problem`. A live
+workstation task holding no GPU while the GPU sample fails or is old has `gpus` null ("unknown"), never 0. Times
+ISO-8601 UTC, nulls kept.
+
+**Freshness (P1: cache first, explicit refresh).** Without `--refresh` every verb but `log` reads the cache only:
+`mode=ro` in one read transaction like `status`, never `Cache()`, no process, no write (sqlite may add `-wal`/`-shm`;
+the mux dir is not created — no dir, no lock held). `--refresh`, per selected host: skip when disabled, the cache rows
+belong to another ssh destination (`dest_hash` mismatch: `config_mismatch`), job data < 60 s old, or anyone attempted
+it < 60 s ago (the lock file's mtime, rewritten on every acquisition by a refresh, `snapshot` or a TUI), or another
+RunFleet holds its instance lock (§5.4). The attempt time is checked first: held and taken < 60 s ago is another
+refresh at work (`skipped:in_progress`, rendered `stale(rate_limited)`: nobody needs to press a key), held longer is
+a TUI (`skipped:busy`; old data there reads `stale(tui_idle)`), free but attempted `skipped:rate_limited` →
+`stale(rate_limited)`. Cached
+`needs_auth` / `hostkey` refresh only over a live master, decided locally (`ssh -G` + `-O check`, zero network);
+otherwise take the lock without writing the pid yet (`try_instance_lock_at(write_pid=False)` returns the mtime of
+the last attempt: another refresh that came and went since the check → let go with the file untouched, so a skip
+dates no attempt, `skipped:rate_limited`), write the pid (`claim_instance_lock`), decide again, run one read-only `collect_once(keep_cached=True)` into a real `Cache` (a failing section keeps
+its cached rows and, in `host_health`, its last success), confirm the flush (`flush()` False →
+`stale(refresh_skipped)`), close the cache, then release the locks (from the closing thread, also when the deadline
+cancelled the refresh: a lock is never free while its rows are half written). No ssh client: no refresh,
+`no_ssh`. `log` is the one verb that always probes: one `LogService.read` (stat + `tail -c` or the head, in memory,
+never a temp file) of the ref the document shows; none for an unknown / ambiguous / other user's job, `no_log_path`
+or `--path-only`. One end-to-end deadline (`--timeout`) covers refresh, cache read (a daemon thread, abandoned past
+it) and the probe; past it plus 5 s the answer is a no-data document. `--demo` polls the simulated fleet in memory
+(instant probes, no lock, no cache).
+
+**`host_health`** (§5.5) is what makes per-data ages honest: the poller rewrites one row per host with each snapshot
+(state, section `ok`/`last_ok`/`error_kind`, latency, failures, controller slowdown, tick, `dest_hash`,
+`remote_user`; never summaries). Caches without it fall back to the snapshot's `taken_at` for jobs and unknown for the
+rest, with `stale(age_unknown)` (the age is approximate: a failing listing does not hold `taken_at` back); a health
+row more than 120 s older than its snapshot row (an older RunFleet wrote the snapshot since) is ignored the same way —
+its identity and ages are not this snapshot's. The cache read selects only the requested hosts' rows and ended tasks
+of the last 7 days (the retention), in SQL.
+
+**Exit and problem codes.** 0 every selected host fine and job data < 10 min; 4 partial (a host stale, failing or
+needing a login: the document is complete otherwise); 1 no data (no cache, no hosts, busy or unreadable cache, past
+the deadline), nothing found, or a runtime error; 2 usage (unknown verb / host / state, malformed id or time,
+> 10 ids; on stderr). Problems are a stable enum with fixed English messages, an action and a hint
+(`agent help` lists them): `auth_required` (OpenSSH: "ask the user to run: runfleet connect HOST"; session
+transport: "press c in the TUI"), `hostkey` (never folded into auth), `dns` `unreachable` `timeout` `jump`, `stale`
+(reason `tui_idle` `no_poller` `refresh_skipped` `refresh_failed` …), `disabled`, `no_data`, `not_found` (only when
+the job list is current and the id is inside what the data covers), `outside_coverage`, `listing_failed`,
+`no_log_path`, `partial`, `cache_busy`, `config_mismatch`, `no_ssh`, `error`, `internal`.
+
+**Budgets** (serialized bytes; text / JSON): brief 2 / 6 KB, jobs 8 / 40 KB (40 rows), job 3 / 6 KB each, log 24 /
+32 KB, host and gpus 4 / 12 KB, events 6 / 24 KB (≤ 100), help 6 / 8 KB. A cut keeps problems, then attention, then
+rows, and ends in `# +N more → <exact command>` / `truncated{shown,total,next}`. Per field: names 160, paths 240,
+hints 120, log lines 400 characters, marked `…[+N]`.
+
+**Privacy and safety.** Every outward string is untrusted remote data: secrets scrubbed (`util/redact.scrub`), ANSI
+stripped, control characters made visible, capped. Never printed: `HostError.summary` / `detail`, the ssh log, ssh
+destinations, ProxyJump / login hosts, raw fields, the environment, other users' job names or commands. `agent/*`
+builds every FleetService `readonly=True`; a contract test forbids `agent/` to import `core.actions`, `core.attach`,
+`backends.*.actions`, `ui`, `textual`, `rich`, and to call `.plan(`, `.execute(` (sqlite `db.execute` aside),
+`attach_now`, `attach_start`, `forward_port`, `write_config`, `add_host`, `remove_host`, `set_general`,
+`connect_login`, `doctor(` — a maintenance guard; the boundary is that no mutating path exists.
+
+**Skill.** `src/runfleet/agent/skill/` ships with the package (SKILL.md ≤ 80 lines, `references/reading-output.md`,
+`references/with-run-skills.md`, `agents/openai.yaml` for the Codex UI). SKILL.md is portable Agent Skills: `name:
+runfleet`, a description ≤ 1024 characters with no `<` `>` (host names prefixed as trigger words, the prefix capped
+near 200 characters), `allowed-tools` as a YAML list (Claude Code and Copilot pre-approve; others ignore it),
+`compatibility`, `license: MIT`, string-only `metadata`. Its body is agent-neutral (background `runfleet wait` where
+the agent can, else `--timeout 540` repeated or `agent events --since`; `runfleet connect` is the user's to run in
+their own terminal; never `skill install|update|uninstall`) and says what to do when `runfleet` is not on PATH: first
+that it may only be missing from the agent's PATH (`~/.local/bin/runfleet`, ask the user, `uv tool dir --bin`), and
+only if RunFleet is really gone, how the user removes the skill (`rm -r` of its two paths; Windows `Remove-Item
+-Recurse`).
+
+**Skill lifecycle** (`agent/skill.py`, docs/AGENT_INTERFACE.md §6). Top level, not under `agent`, because it writes
+files; everything takes an injected `Env` (real home, environ, PATH) and clock, so tests never see the real one.
+- *Layout.* One real copy, `<home>/.agents/skills/runfleet` (the real home, never `$CODEX_HOME`), read directly by
+  Codex, Pi, Copilot CLI, OpenCode, Gemini CLI, Cursor, Amp, Goose, Factory Droid, Windsurf, Cline and Warp. Links
+  only where needed: Claude Code `${CLAUDE_CONFIG_DIR:-~/.claude}/skills/runfleet`; Copilot `$COPILOT_HOME/skills/
+  runfleet` only when `COPILOT_HOME` is set (it then reads nothing else); Antigravity CLI
+  `~/.gemini/antigravity-cli/skills/runfleet` only with `--agent antigravity`. Never a copy in `~/.gemini/skills` or
+  `$PI_CODING_AGENT_DIR/skills` (conflict warnings, duplicates). Links: a relative symlink on POSIX; a junction on
+  Windows (no admin rights), else a symlink, else a copy, tracked and refreshed like the canonical one. `--agent auto`
+  (default) links the detected agents (config dir or env var first, else the program on PATH; Pi only by `~/.pi`,
+  `$PI_CODING_AGENT_DIR` or a `pi` that resolves into `pi-coding-agent`, as a bare `pi` can be any program), `all`
+  every linking agent, or a comma list of `AGENT_IDS` (`cli.skill_agents` validates; usage error, exit 2).
+- *Manifest* `<state>/skill.json` (private, temp + `os.replace`): schema, install id, version, bundle sha256,
+  `writer` (`install_identity()`: the resolved package dir of the RunFleet that wrote it), host names and their hash,
+  `config_path` (only when installed with `-c`; `cli.skill_config` resolves it) and its mtime, `auto_update`, agents
+  and `agents_mode` (`auto` / `all` / `list`, the widest any install used), targets (agent, path, kind, link
+  target, per-file hashes of copies; `pending` for a pre-manifest copy adoption could not rewrite yet: still ours,
+  retried, removed by uninstall), `linked_paths` (every agent link path ever recorded), `created_dirs` (real paths of
+  the skills dirs and parents an install created; uninstall removes one only while empty and reached without a
+  link on the way), `last_backup`, and
+  after a failed refresh `last_failure_at` (epoch seconds) and `last_error`. Each copy holds `.runfleet-skill.json`
+  (version, bundle hash, install id; a dot file, which scanners skip); a directory is ours only when its stamp
+  matches the manifest (no manifest: any stamp, or a pre-release `.runfleet-version`, adopted).
+- *Safety.* Never deletes user content: before a copy is replaced or removed, a file the user edited or added is moved
+  to `<state>/skill-backup/<UTC time>/<agent>/<path>` and reported; `--force` moves a foreign directory or link there
+  too; a link is removed only when it resolves (realpath, both sides) to our copy, and only while the shared copy is
+  ours (or gone): a user's own links at `~/.agents/skills/runfleet` and an agent's path to the same dir of theirs
+  are never ours. Walks of a copy (hashes, backups) prune symlinked dirs and junctions; a link inside a copy is
+  backed up as `<name>.link.txt` (its target), never copied through; backup names never collide (case-insensitive,
+  `-2`, `-3` …). Pre-manifest copies (no per-file hashes): files
+  identical to this version's are not backed up, the rest are reported as files "from an older install", not as
+  the user's edits. Staging in dot-prefixed siblings
+  then a rename swap; a new link is created under a temp name and `os.replace`d (Windows: the old one renamed aside,
+  rolled back on failure); `.runfleet-staging-*` / `.runfleet.old-*` / `.runfleet.tmp-*` leftovers are swept each
+  time. `<state>/skill.lock` (`platform.try_lock`) serialises install/update/uninstall (a lock taken on a lock file
+  that uninstall deleted meanwhile is dropped and taken again on the new file); per-target results.
+- *Commands* (`cli.cmd_skill`; output = `result.lines()`, `status --json` = `result.to_json()`, exit =
+  `result.exit_code`; a SkillInstallError exits 1 with its message). `install [--agent A] [--print] [--force]
+  [--no-auto-update]`; `update [--if-installed] [--quiet]`: exactly the manifest's targets with this bundle and the
+  host names of the recorded config (else `-c`, else the default config; the recorded path is read under the lock,
+  `skill.update(config=…)`); a canonical copy the user deleted is not recreated (it says to run install); a newer
+  manifest version is downgraded only by an explicit update, which says "downgrading skill A → B". Explicit `update`
+  (not `--if-installed`) of an `--agent auto|all` install also links the agents chosen that way now at a path never
+  in `linked_paths` (installed since, or moved by `$CLAUDE_CONFIG_DIR` / `$COPILOT_HOME`; a link the user removed is
+  not re-created; something foreign in the way is reported and left). `--if-installed` (installers,
+  `runfleet update`): no manifest → silent, exit 0; `auto_update` off → only "automatic refresh is off; run
+  `runfleet skill update`"; a newer manifest version → left with a note; never links new agents. `--quiet`: one line
+  at most. `uninstall [--dry-run]`: our links, our copies (edited files backed up), stamped strays in other agents'
+  skill dirs, leftovers, the manifest, the lock file and the `created_dirs` that are empty; prints the manual
+  follow-ups it never performs (`claude mcp remove runfleet -s user`, Codex's `[mcp_servers.runfleet]` block in
+  `$CODEX_HOME/config.toml`, the `Bash(runfleet agent *)` rule in `$CLAUDE_CONFIG_DIR/settings.json`, defaults
+  `~/.codex` / `~/.claude`); nothing installed: exit 0. `status [--json]`: per agent detected / covered by (shared,
+  link, none) / state / version / up to date / edited files / broken links / strays (a link to ours in a dir the
+  agent no longer reads since `$CLAUDE_CONFIG_DIR` / `$CODEX_HOME` moved it: `stale_link`, with the `rm` that
+  removes it), `auto_update`, `last_backup`, `last_failure`; a detected agent without its link: "not covered;
+  `runfleet skill install --agent ID` adds it". `--demo`: only `install --print` and `status`.
+- *Auto-refresh* (`cli.skill_auto_refresh`, in `main` right after `parse_args` and logging): every command except
+  `skill …` and `--demo` (`--version` and `-h` exit inside argparse), the TUI and `mcp` included (before serving).
+  No `<state>/skill.json` → return after one failed open. A fast path without importing `agent/skill.py` (its import
+  alone costs ~5 ms), `cli.skill_refresh_due`, returns when the schema is unknown, `auto_update` is off, a refresh
+  failed less than an hour
+  ago (`last_failure_at`, `SKILL_BACKOFF` = `skill.BACKOFF_SECONDS`), a newer or unparsable version wrote the
+  manifest (`cli.skill_version_key` = `skill._version_key`), the
+  canonical copy is gone, or version, config mtime and bundle hash all match, or only the bundle differs and another
+  install wrote it (`writer` ≠ `cli.skill_install_identity()`) (`cli.skill_bundle_sha256`: the same hash read
+  straight from the package dir, once per process; tests pin hash, identity and the whole decision to
+  `skill.refresh_reason` over a matrix of manifests). Otherwise `skill.auto_refresh(env, state_dir, config_mtime,
+  config_path, load_host_names, now)` refreshes only when `auto_update` is on, no refresh failed in the last hour,
+  the canonical copy still exists, and the manifest's version differs from this one and this one is not older (no
+  downgrade when unsure), or the bundle hash differs at the same version and this install is the recorded `writer`
+  (a dev checkout via `uv run` and the installed tool at one version never overwrite each other; explicit
+  `install` / `update` always write and take over `writer`), or the recorded config's mtime changed and its enabled
+  host names changed (`config_path` is compared exactly, None = the default config; `load_host_names` loads the
+  config only then; a recorded config that is gone or does not load keeps the recorded names, as `skill update`
+  does). It never links agents found since. A failed refresh (a target failed, or it raised) records
+  `last_failure_at`, so a permanently failing one (a read-only `~/.agents/skills`) is retried at most once an hour.
+  The failure is recorded while the refresh still holds the lock. A busy lock skips; it logs exactly one line
+  ("refreshed (…)" or "refresh failed (…)", the file work's own diagnostics folded in), never writes to stdout (MCP
+  and JSON channels), and swallows every error. Cost when nothing is due: a stat and a small JSON read
+  (test: < 5 ms over `status --short`, generous bound). Together with `runfleet update`'s hook (§8.6), the
+  installers' `skill update --if-installed` and this check, every upgrade path (update command, TUI, install lines,
+  a bare `uv tool upgrade` / `pipx reinstall`, `git pull` of a checkout) ends with the skill current by the next
+  command. Removal: `runfleet skill uninstall`, which `install.sh --uninstall` / `install.ps1 -Uninstall` run first.
+
+**MCP (P1.5, `agent/mcp.py`).** `runfleet [-c PATH] [--demo] mcp` serves the verbs to clients without a shell, with no
+dependency: newline-delimited JSON-RPC 2.0 on stdin/stdout (one UTF-8 object per line), a synchronous loop (no asyncio
+at the top, so the same code runs on Windows), stdout carrying protocol only (logs and stray prints go to
+runfleet.log; stderr only for startup errors). Methods `initialize` (protocol 2025-06-18, 2025-03-26 or 2024-11-05:
+the client's if supported, else the newest; `instructions` point to `fleet_brief` and `runfleet wait`),
+`notifications/*` (no reply), `ping`, `tools/list`, `tools/call`; a JSON array is a batch under 2025-03-26 only;
+anything else -32601, malformed JSON -32700, a malformed envelope -32600. Tools, all
+`readOnlyHint`/`idempotentHint`/`openWorldHint`: `fleet_brief` `list_jobs` `job_detail` `read_log` `gpu_availability`
+`host_health` `fleet_events` `runfleet_help`; their `inputSchema`s (`additionalProperties: false`) mirror the verb's
+CLI flags in snake_case (`timeout` ≤ 120 s; `--limit` only where it limits rows; a test checks the mirror; a null
+argument counts as omitted). Arguments outside the schema are -32602; each call is `commands.run` with the server's
+`-c` / `--demo` (config re-read per call) in a daemon thread capped at timeout + 15 s, so the loop keeps answering
+(while a thread of the last call still runs — its worker past the cap, or a cache read its deadline abandoned — the
+next tool call is refused). Result: `content[0]` = the verb's text, `structuredContent` = its JSON document
+(2025-06-18 only), `isError` for exit 1 and 2 (4, partial, is an answer); a UsageError is a tool error the model can
+correct; a ConfigError names only its key path and any other exception is a short message (details only in
+runfleet.log). Error texts that may echo the caller's input (a UsageError, JSON-RPC error messages, their
+runfleet.log lines, and `runfleet agent`'s usage errors on stderr) go through `commands.safe_text`: scrubbed,
+control characters made visible (one log line), at most 300 bytes. No background polling, no wait tool, no resources or prompts.
 
 ---
 
@@ -4854,7 +5144,7 @@ it); its signatures are unchanged:
 | `src/runfleet/ui/app.py` | `class RunFleetApp(App[None])` with the §3.7 constructor | WP3 |
 | every other `.py` path in §3.2 | a one-line module docstring stating its purpose | owner per §11.2 |
 | `src/runfleet/ui/runfleet.tcss` | empty | WP3 |
-| `tests/conftest.py` | `sample()`, `meta()` (last entry wins), `frame()`, ManualClock fixture, no-ssh guard | WP2 |
+| `tests/conftest.py` | `sample()`, `meta()` (last entry wins), `frame()`, ManualClock fixture, no-ssh guard, autouse `isolated_user_dirs` (HOME, USERPROFILE, every XDG dir and platformdirs' Windows overrides under tmp; a short private `XDG_RUNTIME_DIR` so the mux dir never falls back to the shared `/tmp/runfleet-<uid>`) | WP2 |
 | `tests/unit/test_contracts.py` | imports every module of §3.2 (and fails on modules not listed there); constructs one instance of each contract dataclass with defaults; asserts the §11.5 import rules (no `textual` outside `ui/` and `cli.py`; no `asyncio`/`subprocess`/`textual` in `backends/`; no `backends` import in `ui/` but `backends.base`) | WP1 |
 | `pyproject.toml`, `uv.lock`, `LICENSE`, `README.md` (stub), `CHANGELOG.md` (stub), `.github/workflows/ci.yml` | §2.2, §10.8 | WP4 |
 

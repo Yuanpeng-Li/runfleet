@@ -24,7 +24,7 @@ def _fake_bin(tmp_path: Path, net_calls: int, doctor_extra: tuple[str, ...] = ()
                       + ["ssh -T \"$h\" 'exec sh -s' </dev/null"] * net_calls)
     (bin_dir / "runfleet").write_text(
         "#!/bin/sh\n"
-        'if [ "$1" = --version ]; then echo "runfleet 0.7.2"; exit 0; fi\n'
+        'if [ "$1" = --version ]; then echo "runfleet 0.8.0"; exit 0; fi\n'
         'for h; do :; done\n'                        # last argument = host
         f'if [ "$1" = doctor ]; then :; {"; ".join(doctor_extra)}\nfi\n'
         f"{calls}\n"

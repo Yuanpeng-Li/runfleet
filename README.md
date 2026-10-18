@@ -155,7 +155,24 @@ For `uvx`, add `--refresh` once to bypass its cache:
 `uvx --refresh --from git+https://github.com/Yuanpeng-Li/runfleet runfleet`.
 From a clone: `git pull && uv tool install --force .`
 
-To remove it: `uv tool uninstall runfleet` or `pipx uninstall runfleet`.
+An agent skill installed with `runfleet skill install` follows along: `runfleet update`, the install lines and even a
+plain `uv tool upgrade runfleet` (at the next `runfleet` command) refresh it to the new version.
+
+### Remove
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.sh | sh -s -- --uninstall
+```
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.ps1))) -Uninstall"
+```
+
+Both remove the agent skill (`runfleet skill uninstall`), then RunFleet itself (`uv tool uninstall runfleet` or
+`pipx uninstall runfleet`). Your config and RunFleet's state (cache, log) are kept; the script prints where they are
+and the one command that deletes them. By hand: `runfleet skill uninstall`, then `uv tool uninstall runfleet` (or
+`pipx uninstall runfleet`). If you registered RunFleet's MCP server or added a permission rule for it, `runfleet skill
+uninstall` prints how to remove those too (RunFleet never edits an agent's settings).
 
 ## Getting started
 
@@ -167,6 +184,7 @@ runfleet doctor gpu-a       # why does a host not work? ssh, multiplexing, detec
 runfleet snapshot --json    # poll once and print the whole fleet as JSON
 runfleet wait gpu-a:123456 && ./eval.sh    # block until a job ends (exit 0 = completed)
 runfleet status --short     # R4 PD2 F1 · gpu-a:auth · 3m — for your prompt or tmux (cache only, no ssh)
+runfleet skill install      # let your coding agent read the fleet (`runfleet agent …`): read-only, cache first
 ```
 
 Host names are your own `~/.ssh/config` aliases; RunFleet works out by itself whether each one is a Slurm cluster or
@@ -194,6 +212,10 @@ protected_qos = ["pi-queue"]   # never offer actions on jobs in this QOS
 [[host]]
 name = "mylab"
 ```
+
+`runfleet skill install` works for Claude Code, Codex, GitHub Copilot CLI, Gemini CLI, OpenCode, Cursor, Amp, Goose,
+Factory Droid, Windsurf, Pi and other agents that read Agent Skills: one copy in `~/.agents/skills/runfleet`, plus a
+link for Claude Code. `runfleet skill status` shows which agents see it; it stays up to date by itself.
 
 More in the [user guide](docs/USER_GUIDE.md) and the [configuration reference](docs/CONFIG.md).
 

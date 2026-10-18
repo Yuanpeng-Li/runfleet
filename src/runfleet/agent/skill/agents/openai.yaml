@@ -1,0 +1,4 @@
+interface:
+  display_name: "RunFleet"
+  short_description: "Read-only status of jobs and GPUs across all hosts"
+  default_prompt: "Use $runfleet to check what is running, pending or failed across all of my clusters and workstations."

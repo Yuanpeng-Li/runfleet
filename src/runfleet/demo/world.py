@@ -31,6 +31,10 @@ log = logging.getLogger("runfleet.demo.world")
 DEFAULT_SEED = 7
 STEP_S = 5.0                     # simulation grid
 COARSE_STEP_S = 60.0             # used for gaps longer than an hour (laptop slept), keeps catch-up cheap
+# Scenario processes start this grid's last boundary before t0 minus their age, not t0 minus their age: a task's id
+# (`p<pid>-<start>`) must not change between two `runfleet … --demo` calls (each builds a fresh world at its own
+# now), or a command one call prints would name no task in the next. Ages grow by up to this much instead.
+TASK_EPOCH_GRID_S = 3600
 FAULTS: tuple[str, ...] = ("unreachable", "auth", "nvidia_hang", "garbage", "slurmdbd_down")
 Fault = Literal["unreachable", "auth", "nvidia_hang", "garbage", "slurmdbd_down"]
 
@@ -1635,11 +1639,17 @@ def _build_lyra(world: DemoWorld) -> None:
     _add_config(world, HostConfig(name="lyra", ssh="lyra", group="clusters"))
 
 
+def task_epoch(t0: float) -> int:
+    """The origin of scenario process starts: t0 rounded down to TASK_EPOCH_GRID_S (epoch-aligned, not now)."""
+    return int(t0) - int(t0) % TASK_EPOCH_GRID_S
+
+
 def _proc(ws: SimWorkstation, t0: float, pid: int, ppid: int, args: str, *, ago: float, user: str | None = None,
           pgid: int | None = None, **kw: Any) -> SimProc:
-    """A scenario process that has been running for `ago` seconds at t0."""
+    """A scenario process that has been running for `ago` seconds at the last TASK_EPOCH_GRID_S boundary before t0
+    (so its start, and the task id derived from it, is the same for every world built within that hour)."""
     p = SimProc(pid=pid, ppid=ppid, pgid=pgid if pgid is not None else pid, user=user or ws.user,
-                start=int(t0 - ago), args=args, **kw)
+                start=task_epoch(t0) - int(ago), args=args, **kw)
     ws.procs[pid] = p
     return p
 

@@ -18,6 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from runfleet.backends.process.tasks import nearest_task
 from runfleet.config import HostConfig, host_name_for
 from runfleet.core.clock import Clock
 from runfleet.core.service import FleetAPI
@@ -42,10 +43,14 @@ class Target:
     job: str                     # as given: "2332861", "31270818" (array), "p642229", "642229"
     text: str                    # the argument, for messages
 
-    def matches(self, jobs: Mapping[str, Job]) -> list[Job]:
-        """Jobs of the host snapshot this target names, in id order."""
+    def matches(self, jobs: Mapping[str, Job], *, near: bool = True) -> list[Job]:
+        """Jobs of the host snapshot this target names, in id order. A full task id with no exact hit names the
+        task with the same root pid and a start within START_TOLERANCE_S (`nearest_task`: another collector's
+        clock reading); `near=False` skips that (exact matches across several job sets first)."""
         if self.job in jobs:
             return [jobs[self.job]]
+        if near and (task := nearest_task(self.job, jobs)) is not None:
+            return [task]
         array = [j for j in jobs.values() if j.array_job_id == self.job]
         if array:
             return sorted(array, key=lambda j: j.key.id)

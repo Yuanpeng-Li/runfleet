@@ -7,8 +7,8 @@ from collections.abc import Callable
 import pytest
 
 from runfleet.demo import render
-from runfleet.demo.world import (FAULTS, DemoWorld, SimLog, Trainer, compress_ranges, expand_pattern, expand_ranges,
-                                 tqdm_bar)
+from runfleet.demo.world import (FAULTS, TASK_EPOCH_GRID_S, DemoWorld, SimLog, Trainer, compress_ranges,
+                                 expand_pattern, expand_ranges, task_epoch, tqdm_bar)
 from tests.demo.conftest import StepClock
 
 
@@ -29,6 +29,21 @@ def test_default_fleet_mirrors_the_real_one(world: DemoWorld) -> None:
     assert (world.cluster("k2").gpu_tres, world.cluster("lyra").gpu_tres) == (True, False)
     assert world.cluster("lyra").preempt_mode == "CANCEL" and world.cluster("k2").preempt_mode == "REQUEUE"
     assert len(world.workstation("labstation").gpus) == 4 and len(world.workstation("lynx").gpus) == 2
+
+
+def test_scenario_process_starts_do_not_depend_on_the_moment_the_world_is_built() -> None:
+    """Task ids are p<pid>-<start>: two `--demo` calls minutes apart build two worlds; their tasks must agree."""
+    first = StepClock()
+    later = StepClock()
+    later.advance(TASK_EPOCH_GRID_S - 1 - first.t.timestamp() % TASK_EPOCH_GRID_S)    # same grid hour, its end
+    a = DemoWorld(seed=7, now=first, latency_scale=0.0)
+    b = DemoWorld(seed=7, now=later, latency_scale=0.0)
+    assert b.t0 > a.t0
+    for host in ("labstation", "lynx"):
+        starts_a = {pid: p.start for pid, p in a.workstation(host).procs.items()}
+        assert starts_a == {pid: p.start for pid, p in b.workstation(host).procs.items()}
+        assert all(start <= a.t0 for start in starts_a.values())
+    assert task_epoch(a.t0) % TASK_EPOCH_GRID_S == 0 and a.t0 - TASK_EPOCH_GRID_S < task_epoch(a.t0) <= a.t0
 
 
 def test_default_scenario_covers_every_state_and_shape(world: DemoWorld) -> None:

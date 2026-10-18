@@ -11,10 +11,12 @@ from typing import Literal
 
 from rich.text import Text
 
-from runfleet.models import (GPU, ConnState, ErrorKind, FairShare, HostStatus, JobState, PartitionSummary,
+from runfleet.models import (ConnState, ErrorKind, FairShare, HostStatus, JobState, PartitionSummary,
                              PendingPriority)
 from runfleet.ui import theme
 from runfleet.util import humanize
+from runfleet.util.gpufree import (GPU_BUSY_MEM_MIB as GPU_BUSY_MEM_MIB, GPU_BUSY_UTIL as GPU_BUSY_UTIL,
+                                   gpu_in_use as gpu_in_use)     # moved to util.gpufree (shared with `runfleet agent`)
 
 _EIGHTHS = " ▏▎▍▌▋▊▉█"      # index = eighths of a cell
 _SPARK = "▁▂▃▄▅▆▇█"
@@ -66,19 +68,6 @@ def count_bar(used: int | None, total: int | None, *, max_cells: int = 16) -> Te
     out = Text("█" * filled, style=theme.level_style(used / total * 100, theme.DEFAULT_MEM_THRESHOLDS))
     out.append("░" * (cells - filled), style=theme.dim())
     return out
-
-
-GPU_BUSY_UTIL = 5.0             # % utilisation from which a GPU counts as in use
-GPU_BUSY_MEM_MIB = 1024.0       # memory held from which it counts as in use (an idle CUDA context holds a few 100 MiB)
-
-
-def gpu_in_use(g: GPU) -> bool:
-    """Whether a GPU should not be counted as free: busy, holding memory (another user's container or PID namespace
-    shows 0 % and no processes, yet launching there would OOM), or not sampled at all (unknown is never free)."""
-    if g.util_pct is None and g.mem_used_mib is None:
-        return True
-    return ((g.util_pct or 0) >= GPU_BUSY_UTIL or bool(g.processes)
-            or (g.mem_used_mib or 0) >= GPU_BUSY_MEM_MIB)
 
 
 def mini_util(pct: float | None, thresholds: tuple[float, float] = theme.DEFAULT_UTIL_THRESHOLDS) -> Text:

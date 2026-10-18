@@ -4,7 +4,7 @@ Reads happen at startup; writes are queued in memory and flushed in one transact
 exit) on a worker thread via `asyncio.to_thread`. A corrupt or unreadable database is renamed to
 `cache.sqlite.corrupt-<ts>` and replaced by a fresh one (§9 row 27); `Cache(None)` is an in-memory cache.
 `host_status` (each host's connection state) is written for `runfleet status`, which reads the file without this class
-(read-only, `runfleet.status`).
+(read-only, `runfleet.status`); `host_health` (per-section freshness, the ssh destination's hash) for `runfleet agent`.
 """
 
 from __future__ import annotations
@@ -23,8 +23,9 @@ from pathlib import Path
 from typing import Any
 
 from runfleet import paths
-from runfleet.models import (DETECT_REV, Capabilities, HostSnapshot, HostStatus, Job, JobKind, LogRef, NodeAlloc,
-                             from_json, to_json)
+from runfleet.agent.data import HostHealth, SectionHealth
+from runfleet.models import (DETECT_REV, Capabilities, ConnState, HostSnapshot, HostStatus, Job, JobKind, LogRef,
+                             NodeAlloc, from_json, to_json)
 
 log = logging.getLogger("runfleet.core.cache")
 
@@ -42,7 +43,95 @@ CREATE TABLE IF NOT EXISTS jobmeta     (host TEXT, job_id TEXT, job_id_raw TEXT,
                                         PRIMARY KEY (host, job_id));
 CREATE TABLE IF NOT EXISTS ended_tasks (host TEXT, job_id TEXT, ended_at REAL, json TEXT, PRIMARY KEY (host, job_id));
 CREATE TABLE IF NOT EXISTS host_status (host TEXT PRIMARY KEY, at REAL, state TEXT, error_kind TEXT, error TEXT);
+CREATE TABLE IF NOT EXISTS host_health (host TEXT PRIMARY KEY, at REAL, json TEXT);
 """
+HEALTH_V = 1
+
+
+def _iso(dt: datetime | None) -> str | None:
+    return None if dt is None else to_json(dt)
+
+
+def _dt(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    dt = datetime.fromisoformat(str(value))
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+def health_json(status: HostStatus, *, dest_hash: str, remote_user: str | None) -> dict[str, Any]:
+    """The `host_health.json` document of one host (version 1). Error kinds only: summaries, details and the ssh
+    log never go in (they can name a jump host or carry stderr)."""
+    return {
+        "v": HEALTH_V, "state": status.state.value, "dest_hash": dest_hash, "remote_user": remote_user,
+        "mux": status.mux, "last_ok": _iso(status.last_ok), "latency_s": status.latency_s,
+        "consecutive_failures": status.consecutive_failures, "controller_slowdown": status.controller_slowdown,
+        "tick_interval": status.tick_interval,
+        "sections": {name: {"ok": sec.ok, "outcome": sec.outcome, "last_ok": _iso(sec.last_ok),
+                            "error_kind": sec.error.kind.value if sec.error is not None else None}
+                     for name, sec in status.sections.items()},
+    }
+
+
+def merge_health(new: Mapping[str, Any], old: Any) -> dict[str, Any]:
+    """`new` (a :func:`health_json` document) with every `last_ok` it lacks (None: no success in this process,
+    e.g. a failing section right after start or in `agent --refresh`) taken from `old`, the stored document of
+    the same destination: a failure never erases when the data was last good. Another version or destination:
+    `new` as it is."""
+    out = dict(new)
+    if (not isinstance(old, Mapping) or old.get("v") != HEALTH_V or new.get("v") != HEALTH_V
+            or old.get("dest_hash") != new.get("dest_hash")):
+        return out
+    if out.get("last_ok") is None and isinstance(old.get("last_ok"), str):
+        out["last_ok"] = old["last_ok"]
+    old_secs = old.get("sections")
+    if isinstance(old_secs, Mapping) and isinstance(out.get("sections"), Mapping):
+        secs: dict[str, Any] = {}
+        for name, sec in out["sections"].items():
+            prev = old_secs.get(name)
+            if (isinstance(sec, Mapping) and sec.get("last_ok") is None and isinstance(prev, Mapping)
+                    and isinstance(prev.get("last_ok"), str)):
+                sec = {**sec, "last_ok": prev["last_ok"]}
+            secs[name] = sec
+        out["sections"] = secs
+    return out
+
+
+def health_from_json(data: Any, at: datetime) -> HostHealth | None:
+    """Inverse of :func:`health_json` (`at`: the row's time); None for another version or a damaged document.
+    Shared with readers that open the database read-only (`runfleet agent`)."""
+    try:
+        if not isinstance(data, Mapping) or data.get("v") != HEALTH_V:
+            return None
+        dest = data.get("dest_hash")
+        if dest is not None and not isinstance(dest, str):    # a bad identity: unreadable, as strict loading says
+            return None
+        sections = {
+            str(name): SectionHealth(name=str(name), ok=bool(sec["ok"]), outcome=str(sec["outcome"]),
+                                     last_ok=_dt(sec.get("last_ok")), error_kind=sec.get("error_kind"))
+            for name, sec in (data.get("sections") or {}).items()
+        }
+        latency, tick = data.get("latency_s"), data.get("tick_interval")
+        return HostHealth(
+            at=at, state=ConnState(data["state"]), dest_hash=dest,
+            remote_user=data.get("remote_user"), mux=data.get("mux"), last_ok=_dt(data.get("last_ok")),
+            latency_s=float(latency) if latency is not None else None,
+            consecutive_failures=int(data.get("consecutive_failures") or 0),
+            controller_slowdown=float(data.get("controller_slowdown") or 1.0),
+            tick_interval=float(tick) if tick is not None else None, sections=sections)
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as e:    # int(1e309): OverflowError
+        log.info("cache: unreadable host health (%s)", e)
+        return None
+
+
+def _stored_health(at: Any, text: Any) -> HostHealth | None:
+    """A host_health row (`at`, `json` columns) as strict loading reads it; None when damaged (JSON, time) or
+    unreadable by :func:`health_from_json` (another version, a bad field)."""
+    try:
+        data, when = json.loads(text), datetime.fromtimestamp(at, tz=UTC)
+    except (ValueError, TypeError, OverflowError, OSError, RecursionError):
+        return None
+    return health_from_json(data, when)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +204,7 @@ class Cache:
         self._pending_meta: dict[tuple[str, str], JobMeta] = {}
         self._pending_ended: dict[tuple[str, str], tuple[Job, float]] = {}
         self._pending_status: dict[str, tuple[float, str, str | None, str | None]] = {}
+        self._pending_health: dict[str, tuple[float, str]] = {}
         self._db = self._open()
 
     # ------------------------------------------------------------ connection
@@ -213,12 +303,31 @@ class Cache:
                 continue
         return out
 
+    def load_health(self, *, unreadable: set[str] | None = None) -> dict[str, HostHealth]:
+        """Every host's last recorded health (unreadable rows and other versions left out; their hosts are added to
+        `unreadable` when given: a row exists, its identity is unknown)."""
+        with self._db_lock:
+            rows = self._db.execute("SELECT host, at, json FROM host_health").fetchall()
+        out: dict[str, HostHealth] = {}
+        for host, at, text in rows:
+            health = _stored_health(at, text)
+            if health is not None:
+                out[host] = health
+            elif unreadable is not None:
+                unreadable.add(host)
+        return out
+
     def prune(self, now: datetime) -> None:
         t = now.timestamp()
         with self._db_lock, self._db:
             self._db.execute("DELETE FROM jobmeta WHERE last_seen < ?", (t - JOBMETA_RETENTION,))
             self._db.execute("DELETE FROM ended_tasks WHERE ended_at < ?", (t - ENDED_TASKS_RETENTION,))
             self._db.execute("DELETE FROM caps WHERE detected_at < ?", (t - CAPS_MAX_AGE,))
+            # a host's health is its rows' identity (which ssh destination wrote them): it goes only with the last
+            # of them, never before (a name reused for another machine after a week would pass for the same one)
+            self._db.execute("DELETE FROM host_health WHERE at < ? AND host NOT IN (SELECT host FROM snapshots "
+                             "UNION SELECT host FROM caps UNION SELECT host FROM jobmeta "
+                             "UNION SELECT host FROM ended_tasks)", (t - ENDED_TASKS_RETENTION,))
 
     # ------------------------------------------------------------ queued writes
     def put_snapshot(self, host: str, snap: HostSnapshot) -> None:
@@ -247,12 +356,23 @@ class Cache:
             self._pending_status[host] = (at.timestamp(), status.state.value, err.kind.value if err else None,
                                           err.summary if err else None)
 
+    def put_health(self, host: str, status: HostStatus, *, dest_hash: str, remote_user: str | None,
+                   at: datetime) -> None:
+        """The host's health as of `at` (sections, freshness, identity), rewritten with every snapshot by the poller
+        for `runfleet agent` (§5.5). The write keeps the stored row's `last_ok`s where this one has none
+        (:func:`merge_health`)."""
+        text = json.dumps(health_json(status, dest_hash=dest_hash, remote_user=remote_user))
+        with self._lock:
+            self._pending_health[host] = (at.timestamp(), text)
+
     def has_pending(self) -> bool:
         with self._lock:
             return bool(self._pending_snapshots or self._pending_caps or self._pending_meta or self._pending_ended
-                        or self._pending_status)
+                        or self._pending_status or self._pending_health)
 
-    def flush_sync(self) -> None:
+    def flush_sync(self) -> bool:
+        """Write the queued batch in one transaction. True when there was nothing to write or it committed; False
+        when the write failed and the batch was kept for the next flush."""
         # _db_lock first (flushes stay ordered: an older batch never overwrites a newer one), then _lock only for
         # the swap: a slow commit (busy timeout, slow home dir) must not block put_* on the event loop
         with self._db_lock:
@@ -262,11 +382,12 @@ class Cache:
                 metas, self._pending_meta = self._pending_meta, {}
                 ended, self._pending_ended = self._pending_ended, {}
                 status, self._pending_status = self._pending_status, {}
-            if not (snaps or caps or metas or ended or status):
-                return
+                health, self._pending_health = self._pending_health, {}
+            if not (snaps or caps or metas or ended or status or health):
+                return True
             try:
                 with self._db:
-                    self._write(snaps, caps, metas, ended, status)
+                    self._write(snaps, caps, metas, ended, status, health)
             except sqlite3.Error as e:
                 # Keep the batch for the next flush (disk full, read-only fs, a locked db): ended workstation tasks
                 # and job log paths are queued only on change, so dropping them would lose them for good. Newer
@@ -278,11 +399,16 @@ class Cache:
                     self._pending_meta = {**metas, **self._pending_meta}
                     self._pending_ended = {**ended, **self._pending_ended}
                     self._pending_status = {**status, **self._pending_status}
+                    self._pending_health = {**health, **self._pending_health}
+                return False
+            return True
 
     def _write(self, snaps: Mapping[str, HostSnapshot], caps: Mapping[str, tuple[Capabilities, float]],
                metas: Mapping[tuple[str, str], JobMeta], ended: Mapping[tuple[str, str], tuple[Job, float]],
-               status: Mapping[str, tuple[float, str, str | None, str | None]]) -> None:
+               status: Mapping[str, tuple[float, str, str | None, str | None]],
+               health: Mapping[str, tuple[float, str]]) -> None:
         db = self._db
+        self._forget_other_destinations(health)
         db.executemany("INSERT OR REPLACE INTO snapshots VALUES (?, ?, ?)",
                        [(h, s.taken_at.timestamp(), json.dumps(to_json(s))) for h, s in snaps.items()])
         db.executemany("INSERT OR REPLACE INTO caps VALUES (?, ?, ?)",
@@ -295,12 +421,68 @@ class Cache:
                        [(h, j.key.id, t, json.dumps(to_json(j))) for (h, _), (j, t) in ended.items()])
         db.executemany("INSERT OR REPLACE INTO host_status VALUES (?, ?, ?, ?, ?)",
                        [(h, *row) for h, row in status.items()])
+        if health:
+            db.executemany("INSERT OR REPLACE INTO host_health (host, at, json) VALUES (?, ?, ?)",
+                           [(h, t, self._merged_health(h, text)) for h, (t, text) in health.items()])
 
-    async def flush(self) -> None:
-        if self.has_pending():
-            await asyncio.to_thread(self.flush_sync)
+    def _forget_other_destinations(self, health: Mapping[str, tuple[float, str]]) -> None:
+        """Inside the write transaction, before this batch's rows: a host whose stored health names another ssh
+        destination than the one written now (a second config reusing the display name took it over) loses that
+        destination's capabilities, job metadata and ended tasks, which would otherwise pass for the new one's
+        as soon as its health is stored (§8.7). A stored row strict loading cannot read (damaged JSON or time,
+        another version, a bad field: the same :func:`_stored_health` check) counts as another destination
+        (`strict` loads rejected its rows already); a readable one without `dest_hash` (no identity recorded)
+        does not."""
+        for host, (_, text) in health.items():
+            row = self._db.execute("SELECT at, json FROM host_health WHERE host = ?", (host,)).fetchone()
+            if row is None:
+                continue
+            try:
+                new = json.loads(text)
+            except (ValueError, TypeError, RecursionError):
+                continue
+            old = _stored_health(row[0], row[1])
+            # unreadable: whose rows they are is unknown, so not the new one's
+            was = "" if old is None else old.dest_hash
+            now = new.get("dest_hash") if isinstance(new, Mapping) else None
+            if isinstance(was, str) and isinstance(now, str) and was != now:
+                self._db.execute("DELETE FROM caps WHERE host = ?", (host,))
+                self._db.execute("DELETE FROM jobmeta WHERE host = ?", (host,))
+                self._db.execute("DELETE FROM ended_tasks WHERE host = ?", (host,))
+                log.info("cache: %s now names another ssh destination; its old metadata dropped", host)
+
+    def _merged_health(self, host: str, text: str) -> str:
+        """Inside the write transaction (no other writer between this read and the replace)."""
+        row = self._db.execute("SELECT json FROM host_health WHERE host = ?", (host,)).fetchone()
+        if row is None:
+            return text
+        try:
+            old, new = json.loads(row[0]), json.loads(text)
+        except (ValueError, TypeError, RecursionError):
+            return text
+        return json.dumps(merge_health(new, old)) if isinstance(new, Mapping) else text
+
+    async def flush(self) -> bool:
+        """:meth:`flush_sync` on a worker thread; same result (True: nothing pending or committed). Also a barrier:
+        a flush in flight on another thread (e.g. the one a cancelled flush loop left running) has finished when
+        this returns, so the TUI's stop() never releases its instance locks while a batch is still being written.
+        (The batch is swapped out of the pending maps under _db_lock: pending or _db_lock held, never neither.)"""
+        if self.has_pending() or self._db_lock.locked():
+            return await asyncio.to_thread(self.flush_sync)
+        return True
 
     async def close(self) -> None:
         await self.flush()
         with self._db_lock:
             self._db.close()
+
+    def close_sync(self) -> bool:
+        """Flush, then close, on the calling thread (a flush in flight elsewhere finishes first: _db_lock); returns
+        the flush's result. `agent --refresh` releases its instance locks only after this returned, so a lock is
+        never free while its rows are half written; each write waits at most the 2 s busy timeout."""
+        try:
+            ok = self.flush_sync()
+        finally:
+            with self._db_lock:
+                self._db.close()
+        return ok

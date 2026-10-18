@@ -1,4 +1,4 @@
-"""[WP1] LogService: follow streams, line assembly, peek, fetch, search (§4.7.1), pager argv (§4.7).
+"""[WP1] LogService: follow streams, line assembly, peek, read, fetch, search (§4.7.1), pager argv (§4.7).
 
 Streams yield raw blocks (`StreamHandle.chunks()`), never lines, so a multi-MB CR-only tqdm line cannot overflow a
 reader limit. `LineAssembler` turns blocks into display lines with terminal semantics: `\\n` ends a line, `\\r` restarts
@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
+import dataclasses
 import logging
 import os
 import re
@@ -28,9 +29,9 @@ from runfleet.core.clock import Clock
 from runfleet.core.logsearch import LogQuery, LogSearchResult, SearchPlan
 from runfleet.core.service import LogPeek, LogUpdate
 from runfleet.errors import RunFleetError
-from runfleet.models import Capabilities, HostError, LogRef
+from runfleet.models import Capabilities, ErrorKind, HostError, LogRef
 from runfleet.probe import framing
-from runfleet.probe.section import ProbeScript, Section, StreamSpec
+from runfleet.probe.section import ProbeScript, Section, SectionOutcome, StreamSpec
 from runfleet.transport.base import ProbeResult, StreamHandle, Transport
 from runfleet.util import platform, shell
 
@@ -230,6 +231,58 @@ def parse_peek(stdout: str, stderr: str, nbytes: int, now: datetime) -> LogPeek:
         lines.append(live)
     shown = lines[-PEEK_LINES:]
     return LogPeek(lines=tuple(shown), size=size, mtime=mtime, fetched_at=now)
+
+
+@dataclass(frozen=True, slots=True)
+class LogRead:
+    """One bounded read of a log for `runfleet agent log` (§4.7): every complete line of the window, in memory."""
+    path: str
+    lines: tuple[str, ...]          # complete lines, "\r" progress collapsed (ANSI and control characters kept)
+    live: str | None                # the unterminated last segment (tqdm's current state); None in head mode
+    size: int | None                # file size / mtime at the read (None: unknown)
+    mtime: datetime | None
+    window_bytes: int               # bytes the window covered: min(size, nbytes), else the requested nbytes
+    started_mid_file: bool          # tail mode and the file is larger than the window (its first fragment dropped)
+    fetched_at: datetime
+    error: HostError | None = None  # transport failure (typed: auth, hostkey, timeout …); no lines then
+    file_error: str | None = None   # "No such file", "Permission denied", "log path unknown", …
+    partial: bool = False           # the section failed after some output (timeout, connection cut): lines may be few
+
+
+def _stat_line(stdout: str) -> tuple[int, datetime, str] | None:
+    head, _, body = stdout.partition("\n")
+    m = re.fullmatch(r"(\d+)\|(\d+)", head.strip())
+    if m is None:
+        return None
+    return int(m.group(1)), datetime.fromtimestamp(int(m.group(2)), tz=UTC), body
+
+
+def parse_read(stdout: str, stderr: str, nbytes: int, now: datetime, path: str) -> LogRead:
+    """`log.peek` output (`size|mtime`, then the last `nbytes`) -> ALL complete lines of the window plus the live
+    segment; the cut first fragment is dropped when the file is larger than the window (as :func:`parse_peek`)."""
+    parsed = _stat_line(stdout)
+    if parsed is None:
+        return LogRead(path=path, lines=(), live=None, size=None, mtime=None, window_bytes=nbytes,
+                       started_mid_file=False, fetched_at=now, file_error=_file_error(stderr) or "no output")
+    size, mtime, body = parsed
+    mid = size > nbytes
+    if mid and body:
+        cut = min((i for i in (body.find("\n"), body.find("\r")) if i >= 0), default=-1)
+        if cut < 0:
+            body = "…" + body
+        else:
+            body = body[cut + 2:] if body.startswith("\r\n", cut) else body[cut + 1:]
+    asm = LineAssembler()
+    lines = asm.feed(body.encode("utf-8", errors="replace")) if body else []
+    lines += asm.finish()
+    return LogRead(path=path, lines=tuple(lines), live=asm.live, size=size, mtime=mtime,
+                   window_bytes=min(size, nbytes), started_mid_file=mid, fetched_at=now)
+
+
+def _read_from_head(peek: LogPeek, nbytes: int, path: str) -> LogRead:
+    return LogRead(path=path, lines=peek.lines, live=None, size=peek.size, mtime=peek.mtime,
+                   window_bytes=min(peek.size, nbytes) if peek.size is not None else nbytes,
+                   started_mid_file=False, fetched_at=peek.fetched_at, file_error=peek.error)
 
 
 # ======================================================================================= streaming sessions
@@ -441,6 +494,48 @@ class LogService:
             return LogPeek(lines=(), size=None, mtime=None, fetched_at=now, error=res.error.summary)
         r = res.sections["log.head"]
         return parse_head(r.stdout, r.stderr, nbytes, now)
+
+    async def read(self, host: str, ref: LogRef, *, nbytes: int, head: bool = False) -> LogRead:
+        """ONE probe: the log's last `nbytes` (`log.peek`: stat + `tail -c`), or with `head` its start (`log.head`,
+        ≤ HEAD_LINES lines). In memory, never cached; never raises for host problems (they are `error`,
+        `file_error` or `partial`)."""
+        now = self.clock.now()
+        if not ref.path:
+            return LogRead(path="", lines=(), live=None, size=None, mtime=None, window_bytes=nbytes,
+                           started_mid_file=False, fetched_at=now, file_error="log path unknown")
+        path = ref.path
+        empty = LogRead(path=path, lines=(), live=None, size=None, mtime=None, window_bytes=nbytes,
+                        started_mid_file=False, fetched_at=now)
+        try:
+            section = head_section(path, nbytes) if head else peek_section(path, nbytes)
+        except ValueError as e:            # a remote path no shell command can carry (a newline in it)
+            return dataclasses.replace(empty, file_error=(str(e) or "invalid log path")[:120])
+        try:
+            res = await self._probe(host, framing.make_script([section], "log"))
+        except Exception as e:             # an unknown host, a broken transport: a typed error, not a crash
+            log.info("%s: log read failed: %r", host, e)
+            return dataclasses.replace(empty, error=HostError(ErrorKind.INTERNAL, (str(e) or type(e).__name__)[:80],
+                                                              at=now))
+        if res.error is not None:
+            return dataclasses.replace(empty, error=res.error)
+        r = res.sections.get(section.name)
+        if r is None:
+            return dataclasses.replace(empty, file_error="no output")
+        if not r.ok and not r.stdout:
+            known = _file_error(r.stderr)
+            if known is None and r.outcome is SectionOutcome.TIMEOUT:      # no byte came: a typed timeout
+                return dataclasses.replace(empty, error=HostError(ErrorKind.TIMEOUT, "log read timed out",
+                                                                  section=section.name, at=now))
+            return dataclasses.replace(empty, file_error=known or r.outcome.value)
+        try:
+            out = (_read_from_head(parse_head(r.stdout, r.stderr, nbytes, now), nbytes, path) if head
+                   else parse_read(r.stdout, r.stderr, nbytes, now, path))
+        except (ValueError, OverflowError, OSError):    # a stat line out of range: remote data, not our bug
+            return dataclasses.replace(empty, file_error="unreadable stat output")
+        if r.ok:
+            return out
+        # stat answered but the read failed (unreadable contents) or was cut: keep what came, say why
+        return dataclasses.replace(out, partial=True, file_error=out.file_error or _file_error(r.stderr))
 
     async def fetch(self, host: str, ref: LogRef, *, nbytes: int = 4 << 20) -> Path:
         if not ref.path:

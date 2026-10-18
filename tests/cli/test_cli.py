@@ -48,6 +48,7 @@ class Harness:
         monkeypatch.setattr(cli.paths, "log_file", lambda: self.log_path)
         monkeypatch.setattr(cli.paths, "cache_file", lambda: tmp_path / "cache.sqlite")
         monkeypatch.setattr(cli.paths, "debug_dir", lambda: tmp_path / "debug")
+        monkeypatch.setattr(cli.paths, "mux_dir", lambda: tmp_path / "mux")     # instance locks, managed sockets
         monkeypatch.setattr(cli.debugdump, "_dir", None)     # restored (disabled) after each test
 
     def _build(self, config: FleetConfig, transports: Any, clock: Any, cache: Any) -> FakeService:
@@ -118,7 +119,7 @@ def test_global_options_work_before_and_after_the_subcommand() -> None:
 def test_version_and_bad_usage(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["--version"])
-    assert exc.value.code == 0 and capsys.readouterr().out.strip() == "runfleet 0.7.2"
+    assert exc.value.code == 0 and capsys.readouterr().out.strip() == "runfleet 0.8.0"
     with pytest.raises(SystemExit) as exc:
         cli.main(["--frobnicate"])
     assert exc.value.code == 2
@@ -129,7 +130,7 @@ def test_version_and_bad_usage(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_python_m_runfleet_entry_point() -> None:
     out = subprocess.run([sys.executable, "-m", "runfleet", "--version"], capture_output=True, text=True, timeout=60)
-    assert out.returncode == 0 and out.stdout.strip() == "runfleet 0.7.2"
+    assert out.returncode == 0 and out.stdout.strip() == "runfleet 0.8.0"
 
 
 # ---------------------------------------------------------------------------------------------------- TUI start
