@@ -82,6 +82,14 @@ All notable changes to this project are documented here. The format follows
   agent `--refresh`, held them), so it ends up holding its hosts; the "another RunFleet is polling" notice is shown
   once.
 
+### Fixed
+- **False "controller busy" on hosts with uutils `date`** (Ubuntu's Rust coreutils ignores the width in `%3N`): a
+  ~100 ms query was timed as ~100,000,000 ms and backed polling off. The probe now reads `%s%9N` and converts to
+  milliseconds itself; a `date` without `%N` still times sections as 0. Thanks @ypd666 (#3).
+- **A Slurm host stayed "degraded" after its last job ended**: a job that finished between `squeue` and `sstat` left
+  an sstat error that nothing cleared once the queue was empty. An idle usage tick now records an empty success (a
+  shell no-op, no Slurm RPC); real sstat errors with running jobs stay visible. Thanks @ypd666 (#3).
+
 ## [0.7.2] - 2026-10-17
 
 ### Changed
