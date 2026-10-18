@@ -265,10 +265,15 @@ class SlurmCollector(SchedulerCollector):
         if ctx.caps.tools and "sstat" not in ctx.caps.tools:
             return None
         raws = self._sstat_ids(ctx)
+        if not raws:
+            if self._last_usage_at is None:
+                return None
+            # A job can end between squeue and sstat. An empty success clears
+            # the previous sstat error instead of leaving an idle host degraded.
+            # The shell no-op makes no Slurm RPC.
+            return Section("slurm.sstat", ":", timeout=1, meta={"ids_raw": []})
         self._last_usage_at = ctx.now
         self._sstat_last.update(dict.fromkeys(raws, ctx.now))
-        if not raws:
-            return None
         total = len({j.job_id_raw for j in self._own_running(ctx)})
         if total > len(raws):
             log.debug("%s: usage sampled for %d of %d running jobs this round", self.host.name, len(raws), total)
