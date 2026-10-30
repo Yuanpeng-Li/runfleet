@@ -17,6 +17,7 @@ Default scenario (mirrors the shapes of the field-probe fixtures in tests/fixtur
 from __future__ import annotations
 
 import logging
+import posixpath
 import random
 import zlib
 from collections.abc import Callable, Iterable, Sequence
@@ -350,6 +351,8 @@ class SimJob:
     idle_gpus: dict[int, int] = field(default_factory=dict)   # Attach: position in the job's GPU list on a node ->
                                      # MiB that GPU holds at 0 % (vega: GPU1 idle holding 85 GB, §7.16.8)
     shmem_mib: int = 0               # Attach: shared memory in the job's cgroup (vLLM, DataLoader workers)
+    train_log: str | None = None     # a launcher job (Popen(stdout=fh)): the program writes this file under the
+                                     # workdir; stdout holds the launcher's few lines (log.find, §4.7.2)
 
     @property
     def is_summary(self) -> bool:
@@ -784,6 +787,31 @@ def _write_job_log(c: SimCluster, job: SimJob, text: str, at: float) -> None:
         lg.write(text, at)
 
 
+def _write_program_log(c: SimCluster, job: SimJob, text: str, at: float) -> None:
+    """What the program prints: its own log file for a launcher job, else the job's stdout."""
+    if job.train_log is None:
+        _write_job_log(c, job, text, at)
+        return
+    lg = c.logs.get(job.train_log)
+    if lg is None:
+        lg = c.logs[job.train_log] = SimLog(job.train_log, at)
+    lg.write(text, at)
+
+
+def _launcher_header(c: SimCluster, job: SimJob, at: float) -> str:
+    """A launcher's stdout: a few lines, then silence while its child writes `train_log` (the field report)."""
+    stamp = local_ts(at, c.tz)
+    rel = (job.train_log or "").removeprefix(job.workdir.rstrip("/") + "/")
+    lines = (f"host {job.nodes[0] if job.nodes else '?'}  CUDA_VISIBLE_DEVICES="
+             f"{','.join(str(i) for i in range(job.gpus_per_node)) or 'none'}  python 3.12.7",
+             f"job {job.job_id} · {job.name} · workdir {job.workdir}",
+             f"run dir {posixpath.dirname(rel)}",
+             f"exec python -m vitfm.train --config configs/{job.name.split('--')[1]}.yaml --seed 42",
+             f"training output -> {rel} (Popen stdout=fh, stderr=STDOUT)",
+             "child started; waiting for it to exit")
+    return "".join(f"[{stamp}] launcher: {line}\n" for line in lines)
+
+
 def expand_pattern(pattern: str, job: SimJob, user: str) -> str:
     """Slurm filename pattern expansion (%x %j %A %a %u %N %%) as the controller does for scontrol StdOut."""
     out: list[str] = []
@@ -882,7 +910,9 @@ def _start_job(world: DemoWorld, c: SimCluster, job: SimJob, now: float) -> bool
     job.batch = StepUsage()
     job.step0 = StepUsage(ntasks=job.step_tasks) if job.step_tasks else None
     job.trainer = Trainer(epochs=300, epoch_s=max(30.0, job.duration_s / 300), iters=4500)
-    _write_job_log(c, job, _job_header(c, job, now), now)
+    if job.train_log is not None:
+        _write_job_log(c, job, _launcher_header(c, job, now), now)
+    _write_program_log(c, job, _job_header(c, job, now), now)
     world.note(f"{c.name}: {job.display_id} started on {','.join(job.nodes)}")
     return True
 
@@ -915,10 +945,13 @@ def _finish_job(world: DemoWorld, c: SimCluster, job: SimJob, state: str, now: f
         _write_job_log(c, job, f"slurmstepd: error: Detected 1 oom_kill event in StepId={job.job_id}.batch. "
                                "Some of the step tasks have been OOM Killed.\n", now)
     elif state == "FAILED":
-        _write_job_log(c, job, "\n" + traceback_text(job.failure, job.workdir), now)
+        _write_program_log(c, job, "\n" + traceback_text(job.failure, job.workdir), now)
     elif state == "COMPLETED":
-        _write_job_log(c, job, f"\n[{local_ts(now, c.tz)}] done · best vs_base -3.12% · saved "  # tqdm closes its bar
-                               f"{job.workdir}/runs/{job.name}/final.pt\n", now)
+        _write_program_log(c, job, f"\n[{local_ts(now, c.tz)}] done · best vs_base -3.12% · saved "  # tqdm: bar
+                                   f"{job.workdir}/runs/{job.name}/final.pt\n", now)
+    if job.train_log is not None and state in ("FAILED", "COMPLETED"):
+        _write_job_log(c, job, f"[{local_ts(now, c.tz)}] launcher: child exited with status "
+                               f"{0 if state == 'COMPLETED' else job.exit_code or 1}\n", now)
     exit_codes = {"COMPLETED": (0, 0), "FAILED": (job.exit_code or 1, 0), "TIMEOUT": (0, 0),
                   "OUT_OF_MEMORY": (0, 125), "PREEMPTED": (0, 0), "CANCELLED": (0, 0)}
     job.exit_code, job.exit_signal = exit_codes.get(state, (job.exit_code, job.exit_signal))
@@ -1038,7 +1071,7 @@ def _step_running(world: DemoWorld, c: SimCluster, job: SimJob, now: float, dt: 
     assert job.start is not None
     _update_usage(job, dt, rng)
     if job.trainer is not None and not job.stalled:
-        _write_job_log(c, job, job.trainer.advance(dt, now, c.tz, rng), now)
+        _write_program_log(c, job, job.trainer.advance(dt, now, c.tz, rng), now)
     limit_end = job.start + job.time_limit_s if job.time_limit_s else None
     planned_end = job.start + job.duration_s
     if limit_end is not None and now >= limit_end and planned_end > limit_end:
@@ -1246,8 +1279,9 @@ def _priority(half_life: str, reset: str, **weights: str) -> dict[str, str]:
 
 
 # what `command -v` finds; detect.tools reports the subset it asks for (render.DETECT_TOOLS)
-BASE_TOOLS = frozenset({"sh", "awk", "cat", "cut", "date", "getent", "grep", "head", "id", "kill", "nproc", "paste",
-                        "readlink", "sleep", "sort", "tail", "tr", "wc", "timeout", "less", "stat", "ps", "pgrep"})
+BASE_TOOLS = frozenset({"sh", "awk", "cat", "cut", "date", "find", "getent", "grep", "head", "id", "kill", "nproc",
+                        "paste", "readlink", "sleep", "sort", "tail", "tr", "wc", "timeout", "less", "stat", "ps",
+                        "pgrep"})
 SLURM_TOOLS = BASE_TOOLS | {"squeue", "sacct", "sinfo", "scontrol", "sstat", "scancel", "sacctmgr", "srun", "ssh",
                            "sprio", "sshare"}
 WS_TOOLS = BASE_TOOLS | {"nvidia-smi"}
@@ -1281,9 +1315,15 @@ def _run(world: DemoWorld, c: SimCluster, job: SimJob, *, started_ago: float, no
     job.trainer = Trainer(epochs=300, epoch_s=max(30.0, job.duration_s / 300), iters=4500)
     hist_end = now - log_idle
     text = _job_header(c, job, job.start) + job.trainer.history(job.start, hist_end, c.tz, rng)
-    lg = SimLog(job.log_paths[0], job.start)
+    if job.train_log is not None:        # the launcher wrote its lines at start; the program writes train_log
+        out = SimLog(job.log_paths[0], job.start)
+        out.write(_launcher_header(c, job, job.start), job.start + 3)
+        c.logs[job.log_paths[0]] = out
+        c.logs[job.train_log] = lg = SimLog(job.train_log, job.start + 3)
+    else:
+        lg = SimLog(job.log_paths[0], job.start)
+        c.logs[job.log_paths[0]] = lg
     lg.write(text, hist_end)
-    c.logs[job.log_paths[0]] = lg
     job.batch = StepUsage(ntasks=1, ave_cpu_s=started_ago * 1.05, ave_rss_kb=10_398_988, max_rss_kb=11_506_244,
                           disk_bytes=int(started_ago * 640_000), pages=3652)
     gpu_step = job.batch
@@ -1327,6 +1367,7 @@ def _build_default(world: DemoWorld) -> None:
     for build in (_build_k2, _build_vega, _build_lyra, _build_labstation, _build_lynx):
         build(world)
     _build_transitions(world)
+    _build_launcher(world)
     world.faults["lynx"] = {"auth"}          # ws-duo shape: needs a login until `connect`
     for host in world.hosts.values():
         if not any(host.cpu_jiffies):        # /proc/stat counters since boot, ~busy as the current load
@@ -1776,6 +1817,43 @@ def _build_lynx(world: DemoWorld) -> None:
 # ---------------------------------------------------------------- notifications showcase (§7.14)
 DEMO_WATCHED = "k2:3371232"          # the eval job that completes ~2 min in: a watched job's end notifies
 DEMO_AWAY_S = 8 * 3600               # "since you were away": the last visit, 8 h before the demo starts
+
+
+LAUNCHER_JOB = 3372131                   # k2: stdout = a launcher's few lines; the training writes train.log
+LAUNCHER_WORKDIR = "/shared/lab/alice/vitfm"
+LAUNCHER_TRAIN_LOG = f"{LAUNCHER_WORKDIR}/runs/in1k-b16/r0412/s42/train.log"
+# wandb's run directory is run-<start>-<id>; a fixed name here, since every CLI process re-anchors the world to its own
+# now: `agent log --files` then `--file wandb/…/output.log` (two processes) must name the same file
+LAUNCHER_WANDB_LOG = f"{LAUNCHER_WORKDIR}/wandb/run-in1k-b16-r0412kq7/files/output.log"
+
+
+def _build_launcher(world: DemoWorld) -> None:
+    """The field report behind "find other log files" (§4.7.2): a k2 job whose stdout is a launcher's 6 lines from
+    13 h ago, while the run's train.log under its workdir keeps growing. Around it, what `log.find` must list (an
+    eval.err, wandb's output.log) and must not (a run from 3 days ago, a .venv build log, a file 7 levels down,
+    metrics.jsonl)."""
+    t0 = world.t0
+    c = world.cluster("k2")
+    wd = LAUNCHER_WORKDIR
+    job = _job(c, LAUNCHER_JOB, "vitfm--in1k-b16--s42", partition="gpu-preempt", qos="gpu-priority",
+               submit=t0 - 13 * 3600 - 9 * 60, cpus=8, mem_mib=96 * 1024, gpus_per_node=1,
+               gpu_type="nvidia_h200_nvl", duration_s=40 * 3600, util_target=93.0, mem_target_mib=61000,
+               workdir=wd, command=f"{wd}/jobs/launch.sbatch", stdout_pattern=f"{wd}/logs/%x_%j.out",
+               train_log=LAUNCHER_TRAIN_LOG)
+    _run(world, c, job, started_ago=13 * 3600 + 4 * 60, nodes=["n-38-02"], gpu_idx=[[1]], cpu_ids=["8-15"])
+    start = job.start if job.start is not None else t0
+    run = posixpath.dirname(LAUNCHER_TRAIN_LOG)
+    side = ((f"{run}/eval.err", start + 95, "UserWarning: torch.utils.checkpoint: use_reentrant=None is deprecated;"
+                                             " pass it explicitly\n"),
+            (LAUNCHER_WANDB_LOG, start + 60,
+             "wandb: Tracking run with wandb version 0.22.2\nwandb: Run data is saved locally in wandb/\n"),
+            (f"{wd}/runs/in1k-b16/r0398/s42/train.log", t0 - 3 * 86400, "[old run] epoch 300/300 done\n"),
+            (f"{wd}/.venv/build.log", start + 30, "Successfully installed vitfm-0.4.1\n"),
+            (f"{wd}/data/cache/in1k/shards/a/b/prep.log", start + 20, "prepared 1281 shards\n"),
+            (f"{run}/metrics.jsonl", t0 - 30, '{"epoch": 97, "train_loss": 0.4312}\n'))
+    for path, at, text in side:
+        lg = c.logs[path] = SimLog(path, at)
+        lg.write(text, at)
 
 
 def demo_ui_state(now: datetime) -> dict[str, Any]:

@@ -63,6 +63,8 @@ def display_key(key: str) -> str:
 _DIGITS = tuple(str(i) for i in range(1, 10))
 COPY_MENU = ("copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle "
              "· Y again = stdout path")
+FIND_LOGS = ("other log files: pick one written under the job's workdir and follow it (one picked already: switch "
+             "to it; on it: pick another)")
 
 KEYMAP: dict[str, tuple[Key, ...]] = {
     "global": (
@@ -154,6 +156,7 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("o",), "stream('stdout')", "stdout", "view", "o/e", hint="stream", summary="stdout / stderr",
             hint_key="o/e"),
         Key(("e",), "stream('stderr')", "stderr", "view", in_help=False),
+        Key(("f",), "find_logs", FIND_LOGS, "view", hint="other logs"),
         Key(("F",), "toggle_follow", "follow on / off", "view", hint="follow"),
         Key(("l",), "app.log_viewer", "full log viewer", "nav", hint="full log"),
         Key(("L",), "open_cause", "log viewer at the failure line (cause chip)", "nav"),
@@ -217,6 +220,7 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("o",), "stream('stdout')", "stdout", "view", "o/e", hint="stream", summary="stdout / stderr",
             hint_key="o/e"),
         Key(("e",), "stream('stderr')", "stderr", "view", in_help=False),
+        Key(("f",), "find_logs", FIND_LOGS, "view", hint="other logs"),
         Key(("slash",), "search", "search the buffer", "nav", "/", hint="search"),
         Key(("n",), "search_next", "next match", "nav", "n/N", summary="next / previous match"),
         Key(("N",), "search_prev", "previous match", "nav", in_help=False),
@@ -225,7 +229,8 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("right_square_bracket",), "next_error", "next error / warning line", "nav", in_help=False),
         Key(("p",), "app.pager", "log in $PAGER", "nav", hint="pager"),
         Key(("R",), "reconnect", "reopen the log stream", "view"),
-        Key(("y",), "copy_path", "copy the path of the shown stream (stdout / stderr)", "act", hint="copy path"),
+        Key(("y",), "copy_path", "copy the path of the shown log (stdout / stderr / found file)", "act",
+            hint="copy path"),
         Key(("c",), "app.connect_host", "connect host", "act"),
     ),
     "attach_confirm": (
@@ -316,6 +321,15 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("escape", "q"), "close", "close", "nav", "esc"),
         Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
     ),
+    "found_logs": (
+        Key(("j",), "cursor_down", "move down", "nav", "j/k", summary="move"),
+        Key(("k",), "cursor_up", "move up", "nav", in_help=False),
+        Key(("enter",), "noop", "follow this file in the log view (o / e go back to stdout / stderr)", "nav", "↵",
+            bind=False),
+        Key(("r",), "rescan", "look again (one more probe)", "act"),
+        Key(("escape", "q"), "close", "close", "nav", "esc"),
+        Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
+    ),
     "prompt": (
         Key(("enter",), "noop", "use this value", "act", "↵", bind=False),
         Key(("escape",), "close", "cancel", "nav", "esc"),
@@ -356,7 +370,7 @@ CONTEXT_TITLES: dict[str, str] = {
     "settings": "Settings", "notifications": "Notifications", "digest": "Since you were away",
     "attention": "Needs you (Fleet a)", "watches": "GPU watches",
     "forwards": "Port forwards", "prompt": "Prompt", "search_prompt": "Search logs (prompt)",
-    "log_hits": "Search logs (results)",
+    "log_hits": "Search logs (results)", "found_logs": "Other log files (f)",
 }
 
 

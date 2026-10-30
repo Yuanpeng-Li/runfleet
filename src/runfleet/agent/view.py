@@ -13,12 +13,13 @@ from __future__ import annotations
 import dataclasses
 import fnmatch
 import json
+import posixpath
 import re
 import shlex
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import runfleet
@@ -28,6 +29,8 @@ from runfleet.agent.data import (EXIT_NO_DATA, EXIT_OK, EXIT_PARTIAL, NODE_FIELD
 from runfleet.backends.process.tasks import nearest_task
 from runfleet.backends.slurm import states as slurm_states
 from runfleet.core import events as core_events
+from runfleet.core.logs import (FIND_END_SLACK, FIND_UNREADABLE, FIND_WINDOW, find_window, known_logs, norm_log_path,
+                                stdout_quiet_for, suggest)
 from runfleet.models import GPU, ConnState, ErrorKind, Job, JobKind, JobState, LogRef, PartitionSummary, StateGroup
 from runfleet.util import humanize, platform
 from runfleet.util.gpufree import is_free
@@ -36,7 +39,7 @@ from runfleet.util.redact import escape_controls, scrub, scrub_log, strip_ansi
 from runfleet.wait import Target
 
 if TYPE_CHECKING:
-    from runfleet.core.logs import LogRead
+    from runfleet.core.logs import FoundLog, LogFiles, LogRead
 
 P = ProblemCode
 VERBS = ("brief", "jobs", "job", "host", "gpus", "events", "log", "help")
@@ -166,6 +169,7 @@ _MESSAGES: Mapping[ProblemCode, tuple[str, str]] = {
     P.NO_LOG_PATH: ("no log path known for this job", "none"),
     P.NO_LOG_YET: ("no log yet: the job has not started or its log file does not exist yet", "retry_later"),
     P.NOT_ALLOWED: ("another user's job: its log is not shown", "none"),
+    P.NOT_LISTED: ("not a log file found under the job's workdir", "check_id"),
     P.PARTIAL: ("the read was cut short: output is partial", "retry_later"),
     P.CACHE_BUSY: ("the RunFleet cache is busy", "retry_later"),
     P.CONFIG_MISMATCH: ("cached data belongs to another ssh destination", "ask_user"),
@@ -197,7 +201,7 @@ _FILE_ERRORS = ("No such file", "Permission denied", "log path unknown", "no out
 _PRIORITY: tuple[ProblemCode, ...] = (
     P.CONFIG_MISMATCH, P.DISABLED, P.AUTH_REQUIRED, P.HOSTKEY, P.DNS, P.JUMP, P.TIMEOUT, P.UNREACHABLE, P.NO_SSH,
     P.CACHE_BUSY, P.NO_DATA, P.LISTING_FAILED, P.STALE, P.PARTIAL, P.ERROR, P.INTERNAL, P.NOT_FOUND,
-    P.OUTSIDE_COVERAGE, P.NOT_ALLOWED, P.NO_LOG_YET, P.NO_LOG_PATH,
+    P.OUTSIDE_COVERAGE, P.NOT_ALLOWED, P.NOT_LISTED, P.NO_LOG_YET, P.NO_LOG_PATH,
 )
 
 
@@ -207,6 +211,8 @@ def message(p: Problem) -> str:
         return _STALE_MESSAGES.get(p.reason, f"job data is old ({p.reason})")
     if p.code is P.ERROR and p.reason:
         return p.reason                         # set by this module only, from fixed texts
+    if p.code is P.NOT_LISTED and p.reason in _NOT_LISTED_WHY:
+        return _NOT_LISTED_WHY[p.reason]
     if p.code is P.LISTING_FAILED and p.reason == "history":
         return "the host's accounting (ended jobs) is failing; the job may exist" if p.job else HISTORY_MESSAGE
     if p.code is P.LISTING_FAILED and p.reason == "nodes":
@@ -343,6 +349,7 @@ def hint(p: Problem, hv: HostView | None = None, fv: FleetView | None = None, *,
         P.NO_LOG_PATH: f"{cmd('job', [job])} shows what RunFleet knows",
         P.NO_LOG_YET: f"check again once it runs: {cmd('job', [job])}",
         P.NOT_ALLOWED: f"only your own jobs' logs are shown; {cmd('job', [job])} shows what is known",
+        P.NOT_LISTED: f"run {cmd('log', [job, '--files'])} and read a file it lists",
         P.PARTIAL: "re-run the same command",
         P.CACHE_BUSY: "re-run in a few seconds",
         P.CONFIG_MISMATCH: (f"the cached {host} rows were written by a config whose {host} is another machine; "
@@ -880,9 +887,10 @@ def _quote(arg: str) -> str | None:
 # options of the commands RunFleet prints that take a value (`runfleet` global ones and `agent` verbs' own); every
 # other "-…" word in a printed command is a flag
 VALUE_OPTIONS = frozenset({"-c", "--config", "--demo-seed", "--state", "--name", "--workdir", "--partition", "--since",
-                           "--limit", "--type", "--min", "--lines", "--bytes", "--grep", "--stream", "--timeout"})
+                           "--limit", "--type", "--min", "--lines", "--bytes", "--grep", "--stream", "--timeout",
+                           "--file"})
 FLAG_OPTIONS = frozenset({"--demo", "--json", "--attention", "--all-users", "--head", "--path-only", "--refresh",
-                          "--write", "--all"})
+                          "--write", "--all", "--files"})
 
 
 class _Pos(str):
@@ -2087,10 +2095,14 @@ def _job_lines(job: Job, hv: HostView, now: datetime, recent_window: float, fv: 
             lines.append(f"  next     cause unclear from scheduler → {log_cmd} (the log may name it)")
         else:
             lines.append(f"  next     {log_cmd}")
+    if quiet_stdout(job, now, fv.stall_after):
+        lines.append(CARD_QUIET + _cmd("log", [_pos(str(job.key)), "--files"], fv))
     return lines
 
 
-_CARD_OPTIONAL = ("  hints", "  gpu", "  priority", "  logs", "  workdir", "  where")
+# the second `next` of a running job whose stdout says little (quiet_stdout): dropped first when a card is too big
+CARD_QUIET = "  next     stdout is quiet; other logs: "
+_CARD_OPTIONAL = (CARD_QUIET, "  hints", "  gpu", "  priority", "  logs", "  workdir", "  where")
 
 
 def _bcap(text: str, nbytes: int) -> str:
@@ -2213,8 +2225,10 @@ def job(fv: FleetView, refs: Sequence[tuple[str, str]]) -> Document:
         found_any = True
         if len(found) == 1:
             j = found[0]
+            files_cmd = _cmd("log", [_pos(str(j.key)), "--files"], fv, as_json=True)
             obj = {**job_json(j, now, gpus_unknown=task_gpus_unknown(j, hv, now)), "pending": _pending_json(j),
-                   "note": clean(note, NAME_CAP) or None}
+                   "note": clean(note, NAME_CAP) or None,
+                   "other_logs": _exact(files_cmd, None)[0] if quiet_stdout(j, now, fv.stall_after) else None}
             short = _too_long(_cmd("log", [_pos(str(j.key)), "--lines", "80"], fv))
             dropped = f"{CARD_NEXT}    {short}" if isinstance(short, _Unprintable) else CARD_NEXT_DROPPED
             blocks.append(_Block(text=_fit_card(_job_lines(j, hv, now, fv.recent_window, fv, note), card_t, dropped),
@@ -2234,7 +2248,7 @@ def job(fv: FleetView, refs: Sequence[tuple[str, str]]) -> Document:
         blocks.append(_Block(rows=[_job_row(j, now, fv.recent_window, task_gpus_unknown(j, hv, now))
                                    for j in members],
                              objs=[_fit_job_json({**job_json(j, now, gpus_unknown=task_gpus_unknown(j, hv, now)),
-                                                  "pending": _pending_json(j), "note": None},
+                                                  "pending": _pending_json(j), "note": None, "other_logs": None},
                                                  card_j // 4) for j in members],
                              head=f"{ref}  array of {tasks}: " + " · ".join(f"{s} {n}" for s, n in counts.items()),
                              nxt=nxt, nxt_json=nxt_json, array={"ref": ref, "total": len(found), "tasks": tasks, "states": dict(counts),
@@ -2748,12 +2762,18 @@ def events(fv: FleetView, since: datetime, hosts: Sequence[str] = (), /, *, limi
 
 
 # ====================================================================================================== log
+def _host_error_problem(kind: str, hv: HostView | None, job_ref: str, key: str | None, what: str) -> Problem:
+    """The typed problem of a transport error (``hv`` None: no host / job yet, the caller adds them)."""
+    code = _KIND_CODE.get(kind, P.UNREACHABLE if kind in ("refused", "ssh", "mux") else P.ERROR)
+    reason = None if code is not P.ERROR else f"{what} failed"
+    if hv is None:
+        return Problem(code, reason=reason)
+    return Problem(code, host=hv.name, job=job_ref, reason=reason, key=key)
+
+
 def _read_problem(read: LogRead, hv: HostView, job_ref: str, key: str | None = None) -> Problem | None:
     if read.error is not None:
-        kind = read.error.kind.value
-        code = _KIND_CODE.get(kind, P.UNREACHABLE if kind in ("refused", "ssh", "mux") else P.ERROR)
-        reason = None if code is not P.ERROR else "log read failed"
-        return Problem(code, host=hv.name, job=job_ref, reason=reason, key=key)
+        return _host_error_problem(read.error.kind.value, hv, job_ref, key, "log read")
     if read.file_error is not None and not read.lines and read.live is None:
         fe = next((f for f in _FILE_ERRORS if f.lower() in read.file_error.lower()), "unreadable")
         if fe == "No such file":
@@ -2786,60 +2806,353 @@ def grep_terms(grep: str | None) -> list[str]:
     return [t.casefold() for t in (s.strip() for s in grep.split("|")) if t]
 
 
-def log(fv: FleetView, ref: tuple[str, str], read: LogRead | None, *, lines: int = 60, grep: str | None = None,
-        path_only: bool = False, stream: str = "auto", head: bool = False) -> Document:
-    """`agent log HOST:ID`: the last ``lines`` lines of one bounded read (``head``: the first, of a read of the file's
-    start), or the ``--grep`` hits with line numbers counted from the start of the window; the live segment, the
-    cause of a bad end; ``path_only`` needs no read. In text every remote line starts with "| " (the live segment
-    "| [live] "), so log content never looks like RunFleet's own lines; JSON keeps the (scrubbed) lines raw."""
+# ---------------------------------------------------------------- other log files (`log --files` / `--file PATH`)
+FIND_SLACK = 60.0            # s before the job's start the probe looks from (= core.logs.FIND_SLACK, which applies it)
+FOUND_PATH_CAP = 4096        # a found file's relative path (PATH_MAX): longer rows are dropped with a note, never cut
+#                              (a listed path is the `--file` selector; = agent.commands.FILE_MAX)
+_FIND_ERRORS = (("unsupported", "not supported on this host (needs GNU find)"),
+                ("no such", "the workdir does not exist"), ("permission denied", "the workdir is not readable"),
+                ("refusing", "the workdir is the filesystem root"))
+_FIND_FAILED = re.compile(r"find failed \(rc \d{1,3}\)")      # core.logs' own fixed text: shown as it is
+_NOT_LISTED_WHY = {"outside": "the path is outside the job's workdir",
+                   "workdir": "the path is the job's workdir, not a file",
+                   "directory": "the path names a directory, not a file",
+                   "incomplete": "not among the log files found: the search stopped early (it may exist)",
+                   "unreadable": "not among the log files found: some directories were unreadable (it may be in one)"}
+
+
+def quiet_stdout(job: Job, now: datetime, stall_after: float) -> bool:
+    """A running job of mine with a workdir whose stdout says little (core.logs.stdout_quiet_for, as the TUI's hint
+    judges it: unchanged for ``stall_after``, or tiny and unchanged for QUIET_TINY_AGE) — a launcher's few lines while
+    the real output goes to a file under the workdir (`agent log --files` finds it). Judged from the last stat, at
+    the job's last sighting."""
+    if not job.is_mine or job.state is not JobState.RUNNING or not job.workdir:
+        return False
+    out, _err = _logs(job)
+    if out is None or not out.path:
+        return False
+    return stdout_quiet_for(out, _seen_now(job, now), stall_after) is not None
+
+
+_norm = norm_log_path            # one leading "/", "." / ".." / "//" resolved: how core.logs compares log paths
+
+
+def under_workdir(workdir: str, path: str) -> str | None:
+    """``path`` (absolute, or relative to ``workdir``) normalised when it lies strictly under the absolute
+    ``workdir`` (never the filesystem root), else None. Lexical, POSIX (the remote host's paths): "..", "." and "//"
+    are resolved, symlinks are not (the probe lists no file reached through a symlinked directory; the read is a
+    plain tail of the path)."""
+    if not workdir.startswith("/") or not path or any(c in workdir + path for c in "\x00\n\r"):
+        return None
+    wd = _norm(workdir)
+    full = _norm(posixpath.join(wd, path))
+    return full if wd != "/" and full.startswith(wd + "/") else None
+
+
+def file_refusal(workdir: str, path: str) -> Problem | None:
+    """Why `--file PATH` is refused before any probe (``not_listed`` with a reason; no host / job yet): the path is
+    the workdir itself, names a directory (ends in "/", "/." or "/.."), or lies outside the workdir. None: the find
+    decides."""
+    if under_workdir(workdir, path) is None:
+        wd = _norm(workdir)
+        valid = workdir.startswith("/") and bool(path) and not any(c in workdir + path for c in "\x00\n\r")
+        same = valid and wd != "/" and _norm(posixpath.join(wd, path)) == wd
+        return Problem(P.NOT_LISTED, reason="workdir" if same else "outside")
+    if path.endswith(("/", "/.", "/..")):
+        return Problem(P.NOT_LISTED, reason="directory")
+    return None
+
+
+def workdir_rel(workdir: str, path: str) -> str:
+    """``path`` relative to ``workdir`` when under it, else as it is."""
+    full = under_workdir(workdir, path)
+    return full[len(_norm(workdir)) + 1:] if full is not None else path
+
+
+def listed(files: LogFiles, workdir: str) -> list[FoundLog]:
+    """The files a find listed that lie under the job's workdir (anything else is dropped: never a path outside
+    it), newest first."""
+    out = [f for f in files.files if f.path.startswith("/") and under_workdir(workdir, f.path) is not None]
+    return sorted(out, key=lambda f: f.mtime, reverse=True)
+
+
+def foreign_logs(hv: HostView | None, job: Job) -> dict[str, str]:
+    """The stdout / stderr files of other users' jobs on the host (normalised path -> label): a shared workdir may
+    hold them, and `--file` never reads another user's log (``not_allowed``, as `log` of their job)."""
+    if hv is None:
+        return {}
+    return known_logs([j for j in host_jobs(hv) if not j.is_mine], job.key)
+
+
+def file_precheck(job: Job, file: str, hv: HostView | None) -> Problem | None:
+    """What refuses `--file PATH` before any probe: no workdir, :func:`file_refusal`, another user's job's log
+    (``not_allowed``). None: the find decides."""
+    if not job.workdir:
+        return _NO_WORKDIR
+    if (refused := file_refusal(job.workdir, file)) is not None:
+        return refused
+    if under_workdir(job.workdir, file) in foreign_logs(hv, job):
+        return Problem(P.NOT_ALLOWED)
+    return None
+
+
+def file_choice(job: Job, file: str, files: LogFiles | None, hv: HostView | None = None
+                ) -> tuple[FoundLog | None, Problem | None]:
+    """`log --file PATH`: the listed file PATH names (relative to the job's workdir, or absolute), or why not —
+    no workdir, :func:`file_refusal` or another user's job's log (``not_allowed``; both decided before any probe),
+    the find failed, or the find of this call did not list it (``not_listed``; reason ``incomplete`` when its walk
+    stopped early). ``hv``: the job's host view (other users' logs). Problems carry no host / job yet."""
+    if (refused := file_precheck(job, file, hv)) is not None or not job.workdir:
+        return None, refused or _NO_WORKDIR
+    target = under_workdir(job.workdir, file)
+    if files is None:
+        return None, Problem(P.INTERNAL)
+    if (p := _find_problem(files)) is not None:
+        return None, p
+    hit = next((f for f in listed(files, job.workdir) if _norm(f.path) == target), None)
+    if hit is None:
+        why = _incomplete(files)
+        return None, Problem(P.NOT_LISTED, reason=None if why is None else
+                             "unreadable" if files.incomplete == FIND_UNREADABLE else "incomplete")
+    return hit, None
+
+
+def found_ref(found: FoundLog) -> LogRef:
+    """The log reference of a found file (read and followed like stdout)."""
+    return LogRef(stream="file", path=found.path, source="found", size=found.size, mtime=found.mtime)
+
+
+def host_jobs(hv: HostView) -> list[Job]:
+    """Every job the host view knows (the snapshot's, then the cache's ended workstation tasks): whose logs a
+    find may list next to the job's own."""
+    return [*(hv.snapshot.jobs.values() if hv.snapshot is not None else ()), *hv.ended_tasks]
+
+
+_NO_WORKDIR = Problem(P.ERROR, reason="the job's working directory is unknown: no other log files to find")
+
+
+def _no_find(fv: FleetView) -> Problem:
+    """Why no find ran for a job it could run for: no ssh client (agent.commands adds that problem), else a bug."""
+    return Problem(P.NO_SSH if any(p.code is P.NO_SSH for p in fv.problems) else P.INTERNAL)
+
+
+def _find_problem(files: LogFiles) -> Problem | None:
+    """Why a find failed (no host / job yet): a typed transport error, or a fixed text for its file error when it
+    listed nothing (a find that listed files despite one is used, with a note)."""
+    if files.error is not None:
+        return _host_error_problem(files.error.kind.value, None, "", None, "log file search")
+    if files.file_error is not None and not files.files:
+        return Problem(P.ERROR, reason=f"log file search: {_find_error_text(files.file_error)}")
+    return None
+
+
+def _find_error_text(file_error: str) -> str:
+    if _FIND_FAILED.fullmatch(file_error):
+        return file_error
+    low = file_error.lower()
+    return next((text for key, text in _FIND_ERRORS if key in low), "failed")
+
+
+def _incomplete(files: LogFiles) -> str | None:
+    """Why the walk may have missed files (LogFiles.incomplete: a short fixed reason), or None."""
+    if files.incomplete is not None:
+        return _cl(files.incomplete, 60)
+    return _find_error_text(files.file_error) if files.file_error is not None else None
+
+
+def log_files(fv: FleetView, ref: tuple[str, str], files: LogFiles | None) -> Document:
+    """`agent log HOST:ID --files`: the log files the one find of this call listed under the job's workdir (written
+    since the job started, up to shortly after an ended job's end; ``files`` None: no workdir, no probe), newest
+    first — path relative to the workdir, size, age, the job's own stdout / stderr and other known jobs' logs
+    marked — and the command that reads the newest file that is neither (core.logs.suggest)."""
     if fv.error is not None:
         return _error_doc(fv, "log")
     now = fv.generated_at
+    picked_job = _log_job(fv, ref)
+    if isinstance(picked_job, Document):
+        return picked_job
+    hv, jb, header, note = picked_job
+    hvs = [hv]
+    text_budget, json_budget = BUDGETS["log"]
+    jkey = str(jb.key)
+
+    def fail(p: Problem) -> Document:
+        return _log_fail(fv, hv, header, note, dataclasses.replace(p, host=hv.name, job=_ref(jb), key=jkey))
+
+    if not jb.workdir:
+        return fail(_NO_WORKDIR)
+    if files is None:
+        return fail(_no_find(fv))
+    if (p := _find_problem(files)) is not None:
+        return fail(p)
+    workdir = jb.workdir
+    out_ref, err_ref = _logs(jb)
+    own = {_norm(r.path): r.stream for r in (err_ref, out_ref) if r is not None and r.path}
+    others = known_logs(host_jobs(hv), jb.key)
+    rows = listed(files, workdir)
+    long_rows = [f for f in rows if len(workdir_rel(workdir, f.path)) > FOUND_PATH_CAP]
+    rows = [f for f in rows if f not in long_rows]                # never cut: a cut path selects nothing
+    since, until = find_window(jb)                # core.logs: the TUI picker's window too
+    started = jb.start_time is not None and not jb.est_start
+    entries = [(workdir_rel(workdir, f.path), f, own.get(_norm(f.path)), others.get(_norm(f.path))) for f in rows]
+    # a path that prints changed (secret-like text scrubbed) is shown, but `--file` cannot name it: never suggested
+    redacted = {_norm(f.path) for rel, f, *_x in entries if _safe(rel) != rel}
+    pick = suggest(rows, {*own, *others, *redacted})
+    other = workdir_rel(workdir, pick.path) if pick is not None else None
+    nxt = _cmd("log", [_pos(jkey), "--file", other], fv) if other is not None else None
+    nxt_json = _cmd("log", [_pos(jkey), "--file", other], fv, as_json=True) if other is not None else None
+    if nxt is not None and _nbytes(nxt) > text_budget // 3:          # a huge -c path and log path: prose, not cut
+        nxt = _too_long(nxt)
+    if nxt_json is not None and _nbytes(dumps({"n": nxt_json})) > json_budget // 3:
+        nxt_json = _too_long(nxt_json)
+    cutoff = (since - timedelta(seconds=FIND_SLACK) if since is not None
+              else files.fetched_at - timedelta(seconds=FIND_WINDOW))
+    upto = until + timedelta(seconds=FIND_END_SLACK) if until is not None else None
+    if since is None:
+        since_txt = "in the last 24 h"
+    elif started:
+        since_txt = f"since {_hm(cutoff, now)} (job start - {FIND_SLACK:.0f} s)"
+    else:                                      # an ended job with no known start: the day before its end
+        since_txt = f"since {_hm(cutoff, now)} (job end - {FIND_WINDOW / 3600:.0f} h, start unknown)"
+    if upto is not None:
+        since_txt += f" until {_hm(upto, now)} (job end + {FIND_END_SLACK / 60:.0f} min)"
+    jref = _cl(_ref(jb), NAME_CAP)
+    info = (f"# {jref} log files under {_cl(workdir, PATH_CAP)} written {since_txt}, newest first · fetched "
+            f"{_hm(files.fetched_at, now)}")
+    notes = [f"# note: {_safe(note)}"] if note else []
+    stopped = _incomplete(files)
+    if files.incomplete == FIND_UNREADABLE:        # the walk finished: nothing "so far" about it
+        notes.append("# note: some directories were unreadable: their files are not listed")
+    elif stopped is not None:
+        notes.append(f"# note: search stopped early ({stopped}): {len(rows) + len(long_rows)} found so far")
+    if files.truncated:
+        notes.append(f"# note: only the {len(rows) + len(long_rows)} newest files are listed")
+    if long_rows:
+        notes.append(f"# note: {len(long_rows)} files with a path over {FOUND_PATH_CAP} characters not listed")
+    if redacted:
+        notes.append(f"# note: {len(redacted)} paths are shown redacted (secret-like text): --file cannot name them")
+    table = [[_cl(rel, FOUND_PATH_CAP), humanize.size(f.size), _ago(f.mtime, now),
+              stream or (_cl(lbl, NAME_CAP) if lbl is not None else "")] for rel, f, stream, lbl in entries]
+
+    def render_text(k: int) -> str:
+        out = [header, info, *notes]
+        if not entries and (stopped is None or files.incomplete == FIND_UNREADABLE):
+            out.append(f"no log files (*.log *.out *.err *.stdout *.stderr) written under the workdir in that time"
+                       f"{' (in the readable directories)' if stopped is not None else ''}")
+        out += [f"  {ln}" for ln in _table(None, table[:k])]
+        if k < len(entries):
+            out.append(_footer(len(entries) - k, " files not shown (output budget)", None, None))
+        if nxt is not None:
+            out.append(f"next: {nxt.advice if isinstance(nxt, _Unprintable) else nxt}")
+        return "\n".join(out)
+
+    def render_json(k: int) -> dict[str, Any]:
+        objs = [{"path": _cl(rel, FOUND_PATH_CAP), "size": f.size, "mtime": iso(f.mtime), "age_s": _age_s(f.mtime, now),
+                 "stream": stream, "other_job": clean(lbl, NAME_CAP)} for rel, f, stream, lbl in entries[:k]]
+        find = {"job": jref, "key": _cl(jkey, NAME_CAP), "workdir": _cl(workdir, PATH_CAP), "since": iso(cutoff),
+                "until": iso(upto), "fetched_at": iso(files.fetched_at), "truncated": files.truncated,
+                "incomplete": stopped, "path_too_long": len(long_rows),
+                "redacted": len(redacted), "next": _exact(nxt_json, None)[0]}
+        trunc = _trunc(k, len(entries), None, "fewer files fit: read one with --file") if k < len(entries) else None
+        return _envelope(fv, "log", hvs, truncated=trunc, log=None, files=objs, find=find, file=None)
+
+    kt = _fit(len(entries), lambda k: _nbytes(render_text(k)), text_budget)
+    return Document(schema("log"), _fit_json(render_json, len(entries), json_budget, ["files"], fv=fv),
+                    _text_guard(render_text(kt), text_budget), _exit(fv, hvs))
+
+
+_NO_FILES: Mapping[str, Any] = {"files": None, "find": None, "file": None}     # log JSON keys of the other modes
+
+
+def _log_fail(fv: FleetView, hv: HostView | None, header: str, note: str, p: Problem, code: int = EXIT_NO_DATA,
+              as_of: str = "") -> Document:
+    """An error document of `agent log`; ``as_of``: the problem was decided from job data that old
+    (" (as of 12m ago)")."""
+    hvs = [hv] if hv is not None else []
+    text_budget, json_budget = BUDGETS["log"]
+    err = error_json(p, hv, fv)
+    err["message"] += as_of
+    data = _envelope(fv, "log", hvs, errors=[err], log=None, **_NO_FILES)
+    note_ = [f"# note: {_safe(note)}"] if note else []
+    room = text_budget - _nbytes(header) - sum(_nbytes(x) + 1 for x in note_) - 1
+    lines_ = [header, _problem_line(p, hv, fv, as_of, budget=room), *note_]
+    return Document(schema("log"), _guard(data, json_budget, fv=fv), _text_guard("\n".join(lines_), text_budget),
+                    code)
+
+
+def _log_job(fv: FleetView, ref: tuple[str, str]) -> tuple[HostView, Job, str, str] | Document:
+    """The one job of mine `agent log` reads (host view, job, header, note), or the error document: not found, an
+    array or a reused pid, another user's job, not started yet."""
+    now = fv.generated_at
     host_name, jtext = ref
     hv, found, prob, note = resolve(fv, host_name, jtext)
-    hvs = [hv] if hv is not None else []
-    header = _header(fv, hvs, "log")
-    text_budget, json_budget = BUDGETS["log"]
-
-    def fail(p: Problem, code: int = EXIT_NO_DATA, as_of: str = "") -> Document:
-        """An error document; ``as_of``: the problem was decided from job data that old (" (as of 12m ago)")."""
-        err = error_json(p, hv, fv)
-        err["message"] += as_of
-        data = _envelope(fv, "log", hvs, errors=[err], log=None)
-        note_ = [f"# note: {_safe(note)}"] if note else []
-        room = text_budget - _nbytes(header) - sum(_nbytes(x) + 1 for x in note_) - 1
-        lines_ = [header, _problem_line(p, hv, fv, as_of, budget=room), *note_]
-        return Document(schema("log"), _guard(data, json_budget, fv=fv), _text_guard("\n".join(lines_), text_budget),
-                        code)
-
+    header = _header(fv, [hv] if hv is not None else [], "log")
     if prob is not None:
-        return fail(prob)
+        return _log_fail(fv, hv, header, note, prob)
     assert hv is not None
     if len(found) > 1:
         why = (f"the id names {len(found)} tasks (a reused pid): give the full key, e.g. {_cl(str(found[-1].key), 64)}"
                if all(j.kind is JobKind.TASK for j in found)
                else f"the id names {len(found)} jobs (an array): give one task, e.g. HOST:ID_N")
-        return fail(Problem(P.ERROR, host=hv.name, job=f"{hv.name}:{jtext}", reason=why))
+        return _log_fail(fv, hv, header, note, Problem(P.ERROR, host=hv.name, job=f"{hv.name}:{jtext}", reason=why))
     jb = found[0]
-    jref = _cl(_ref(jb), NAME_CAP)
     jkey = str(jb.key)                   # commands name the full key (a task's display id can name two tasks)
     if not jb.is_mine:
-        return fail(Problem(P.NOT_ALLOWED, host=hv.name, job=_ref(jb), key=jkey))
+        return _log_fail(fv, hv, header, note, Problem(P.NOT_ALLOWED, host=hv.name, job=_ref(jb), key=jkey))
     if not started(jb):                  # judged from the job's last sighting: say how old that is
-        return fail(Problem(P.NO_LOG_YET, host=hv.name, job=_ref(jb), key=jkey), as_of=f" ({_as_of(jb, now)})" if _old(jb, now)
-                    else "")
-    lref = pick_log(jb, stream)
+        return _log_fail(fv, hv, header, note, Problem(P.NO_LOG_YET, host=hv.name, job=_ref(jb), key=jkey),
+                         as_of=f" ({_as_of(jb, now)})" if _old(jb, now) else "")
+    return hv, jb, header, note
+
+
+def log(fv: FleetView, ref: tuple[str, str], read: LogRead | None, *, lines: int = 60, grep: str | None = None,
+        path_only: bool = False, stream: str = "auto", head: bool = False, file: str | None = None,
+        files: LogFiles | None = None) -> Document:
+    """`agent log HOST:ID`: the last ``lines`` lines of one bounded read (``head``: the first, of a read of the file's
+    start), or the ``--grep`` hits with line numbers counted from the start of the window; the live segment, the
+    cause of a bad end; ``path_only`` needs no read. ``file`` (`--file PATH`): the read is of that file instead, which
+    the find of this call (``files``) must have listed under the job's workdir. In text every remote line starts with
+    "| " (the live segment "| [live] "), so log content never looks like RunFleet's own lines; JSON keeps the
+    (scrubbed) lines raw."""
+    if fv.error is not None:
+        return _error_doc(fv, "log")
+    now = fv.generated_at
+    picked_job = _log_job(fv, ref)
+    if isinstance(picked_job, Document):
+        return picked_job
+    hv, jb, header, note = picked_job
+    hvs = [hv]
+    text_budget, json_budget = BUDGETS["log"]
+
+    def fail(p: Problem) -> Document:
+        return _log_fail(fv, hv, header, note, p)
+
+    jref = _cl(_ref(jb), NAME_CAP)
+    jkey = str(jb.key)
+    rel: str | None = None
+    if file is not None:
+        hit, fprob = file_choice(jb, file, files, hv)
+        if fprob is not None and fprob.code is P.INTERNAL:
+            fprob = _no_find(fv)
+        if fprob is not None:
+            return fail(dataclasses.replace(fprob, host=hv.name, job=_ref(jb), key=jkey))
+        assert hit is not None
+        lref: LogRef | None = found_ref(hit)
+        rel = workdir_rel(jb.workdir or "", hit.path)
+    else:
+        lref = pick_log(jb, stream)
     if lref is None or not lref.path:
         return fail(Problem(P.NO_LOG_PATH, host=hv.name, job=_ref(jb), key=jkey))
     out_ref, err_ref = _logs(jb)
     meta = {"job": jref, "key": _cl(str(jb.key), NAME_CAP), "stream": lref.stream, "path": _cl(lref.path, PATH_CAP),
-            "merged": _merged(out_ref, err_ref)}
+            "merged": rel is None and _merged(out_ref, err_ref)}
     path_line = f"{jref} {lref.stream} {_cl(lref.path, PATH_CAP)}" + (" (merged)" if meta["merged"] else "")
+    extra = {**_NO_FILES, "file": _cl(rel, FOUND_PATH_CAP) if rel is not None else None}
     if path_only:
-        data = _envelope(fv, "log", hvs, log={**meta, "size": lref.size, "mtime": iso(lref.mtime), "window_bytes": None,
-                                              "started_mid_file": None, "fetched_at": None, "first_line": None,
-                                              "total_lines": None, "shown_lines": 0,
-                                              "lines": [], "live": None, "grep": None, "cause": None})
+        data = _envelope(fv, "log", hvs, **extra,
+                         log={**meta, "size": lref.size, "mtime": iso(lref.mtime), "window_bytes": None,
+                              "started_mid_file": None, "fetched_at": None, "first_line": None, "total_lines": None,
+                              "shown_lines": 0, "lines": [], "live": None, "grep": None, "cause": None})
         return Document(schema("log"), _guard(data, json_budget, fv=fv), _text_guard(f"{header}\n{path_line}", text_budget),
                         _exit(fv, hvs))
     if read is None:
@@ -2879,7 +3192,7 @@ def log(fv: FleetView, ref: tuple[str, str], read: LogRead | None, *, lines: int
                  f"{total_hits} hits" + (f", last {len(shown)} shown" if total_hits > len(shown) else "")
                  ) if terms else f"# {where}"
     width = len(str(shown[-1][0])) if shown else 1
-    grep_args = [_pos(jkey), "--grep", "Traceback|Error"]       # cut by the budget: the telling lines only
+    grep_args = [_pos(jkey), *(["--file", rel] if rel is not None else []), "--grep", "Traceback|Error"]
     nxt_text, nxt_json = (_cmd("log", grep_args, fv), _cmd("log", grep_args, fv, as_json=True)) if not terms \
         else (None, None)
     nxt_advice = "fewer or narrower --grep terms show the rest" if terms else "or fewer --lines"
@@ -2930,7 +3243,7 @@ def log(fv: FleetView, ref: tuple[str, str], read: LogRead | None, *, lines: int
                                                "hits": [{"n": n, "text": t} for n, t in b]},
                "cause": cause}
         errs = [error_json(p, hv, fv)] if p is not None else []
-        return _envelope(fv, "log", hvs, truncated=trunc, errors=errs, log=obj)
+        return _envelope(fv, "log", hvs, truncated=trunc, errors=errs, log=obj, **extra)
 
     kt = _fit(len(shown), lambda k: _nbytes(render_text(k)), text_budget)
     return Document(schema("log"), _fit_json(render_json, len(shown), json_budget, fv=fv),
@@ -2971,14 +3284,19 @@ _HELP_VERBS: Mapping[str, tuple[str, str, tuple[str, ...], str]] = {
              "filter{states,name,workdir,partition,since,attention,all_users} jobs[] (job fields below)"),
     "job": ("job HOST:ID…", "(≤10) times, placement, pending reason + advice + priority hints (never a queue\n"
             "     position), exit + cause, GPU use, log paths; not_found / outside_coverage / listing_failed differ",
-            (), "jobs[] (job fields + pending{reason,advice,est_start,priority} note) arrays[]{ref,total,tasks,"
-                "states,shown}"),
-    "log": ("log HOST:ID [--lines N≤400] [--bytes N] [--head] [--stream out|err] [--grep 'A|B'] [--path-only]",
+            (), "jobs[] (job fields + pending{reason,advice,est_start,priority} note other_logs: the --files "
+                "command when stdout is quiet) arrays[]{ref,total,tasks,states,shown}"),
+    "log": ("log HOST:ID [--lines N≤400] [--bytes N] [--head] [--stream out|err] [--grep 'A|B'] [--path-only]\n"
+            "     [--files | --file PATH]",
             "one bounded read (1 ssh probe); grep = literal case-insensitive substrings, ≤50 hits; --stream err\n"
-            "     falls back to stdout only when merged",
-            ("--lines", "--bytes", "--head", "--stream", "--grep", "--path-only"),
+            "     falls back to stdout only when merged; --files: log files written under the workdir while the\n"
+            "     job ran (a launcher's real output); --file PATH reads one (2 probes)",
+            ("--lines", "--bytes", "--head", "--stream", "--grep", "--path-only", "--files", "--file"),
             "log{job,key,stream,path,merged,size,mtime,window_bytes,started_mid_file,fetched_at,first_line,"
-            "total_lines,shown_lines,lines[],live,grep{terms,total,hits[]{n,text}},cause}"),
+            "total_lines,shown_lines,lines[],live,grep{terms,total,hits[]{n,text}},cause} file (--file: PATH "
+            "relative to the workdir) files[]{path,size,mtime,age_s,stream,other_job} find{job,key,workdir,"
+            "since,until,fetched_at,truncated,incomplete (why the list may miss files),path_too_long,redacted,next} "
+            "(--files; log null)"),
     "gpus": ("gpus [HOST…] [--type T] [--min N]", "free GPUs: Slurm per partition (MIG apart; --type: only that\n"
              "     type's free/total), workstation per GPU; nothing matches: the 3 places with most free",
              ("--type", "--min"),

@@ -215,11 +215,11 @@ class ResourceAlloc:
 
 @dataclass(frozen=True, slots=True)
 class LogRef:
-    stream: Literal["stdout", "stderr"]
+    stream: Literal["stdout", "stderr", "file"]   # "file": another log under the workdir (log.find, §4.7.2)
     path: str | None             # absolute, expanded; None if unknown
     pattern: str | None = None   # raw Slurm pattern ("…/logs/%x_%j.out") if that is all we have
     merged: bool = False         # stderr goes to the stdout file
-    source: Literal["scontrol", "squeue", "sacct", "template", "procfd", "cache", "demo"] = "squeue"
+    source: Literal["scontrol", "squeue", "sacct", "template", "procfd", "cache", "demo", "found"] = "squeue"
     size: int | None = None      # from the last stat
     mtime: datetime | None = None
     error: str | None = None     # "No such file", "Permission denied"

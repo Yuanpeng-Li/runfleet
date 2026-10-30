@@ -139,9 +139,9 @@ def keys(d: dict[str, Any]) -> list[str]:
 # ---------------------------------------------------------------- J3: every printed command round-trips
 _DESTS = {"--state": "state", "--name": "name", "--workdir": "workdir", "--partition": "partition",
           "--since": "since", "--limit": "limit", "--type": "type", "--min": "min", "--lines": "lines",
-          "--grep": "grep", "--stream": "stream", "--bytes": "bytes", "--timeout": "timeout"}
+          "--grep": "grep", "--stream": "stream", "--bytes": "bytes", "--timeout": "timeout", "--file": "file"}
 _FLAGS = {"--json": "json", "--attention": "attention", "--all-users": "all_users", "--head": "head",
-          "--path-only": "path_only", "--refresh": "refresh", "--write": "write"}
+          "--path-only": "path_only", "--refresh": "refresh", "--write": "write", "--files": "list_files"}
 _POSITIONAL = {"job": "ids", "log": "id", "host": "host", "help": "topic"}
 
 
@@ -288,7 +288,7 @@ def test_job_verb_keys(demo: FleetView) -> None:
     d = view.job(demo, [("k2", "3371400"), ("lyra", "32377076"), ("k2", "99")]).data
     assert keys(d) == sorted([*ENVELOPE, "arrays", "jobs"])
     for j in d["jobs"]:
-        assert keys(j) == sorted([*JOB, "note", "pending"])
+        assert keys(j) == sorted([*JOB, "note", "other_logs", "pending"])
     assert keys(d["arrays"][0]) == ["ref", "shown", "states", "tasks", "total"]
     assert keys(d["errors"][0]) == ERROR and d["errors"][0]["code"] == "outside_coverage"
     pend = view.job(demo, [("vega", "824507")]).data["jobs"][0]["pending"]
@@ -325,7 +325,7 @@ def test_host_gpus_events_log_help_keys(demo: FleetView) -> None:
     assert keys(e["coverage"][0]) == ["gap", "history_at", "history_from", "host", "jobs_at", "no_data",
                                       "tasks_from"]
     lg = view.log(demo, ("k2", "3371400"), _read(["a", "b"]), lines=10).data
-    assert keys(lg) == sorted([*ENVELOPE, "log"])
+    assert keys(lg) == sorted([*ENVELOPE, "file", "files", "find", "log"])
     assert keys(lg["log"]) == ["cause", "fetched_at", "first_line", "grep", "job", "key", "lines", "live", "merged",
                                "mtime", "path", "shown_lines", "size", "started_mid_file", "stream", "total_lines",
                                "window_bytes"]
@@ -388,8 +388,9 @@ def test_gpus_mig_apart_and_scope(demo: FleetView) -> None:
     doc = view.gpus(demo)
     assert "# scope: Slurm counts cover only" in doc.text
     k2 = next(p for p in doc.data["partitions"] if p["partition"] == "gpu-preempt")
-    assert (k2["free"], k2["total"], k2["mig_free"]) == (12, 108, 11) and k2["planned"] == 14
-    assert "12/108 +11 MIG (14 planned)" in doc.text
+    # 11: the launcher job (demo.world.LAUNCHER_JOB, "find other log files") holds one H200 of gpu-preempt
+    assert (k2["free"], k2["total"], k2["mig_free"]) == (11, 108, 11) and k2["planned"] == 14
+    assert "11/108 +11 MIG (14 planned)" in doc.text
     h100 = view.gpus(demo, gpu_type="h100")
     assert {p["partition"] for p in h100.data["partitions"]} == {"lab", "h100"}
     assert not h100.data["workstation_gpus"]

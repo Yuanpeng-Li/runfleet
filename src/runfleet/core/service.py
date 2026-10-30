@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from runfleet.core.actions import ActionService
     from runfleet.core.logsearch import LogQuery, LogSearchResult
     from runfleet.core.forwards import PortForward
-    from runfleet.core.logs import LogService
+    from runfleet.core.logs import LogFiles, LogService
     from runfleet.core.poller import BackendHooks, HostLanes, HostPoller
     from runfleet.probe.section import ProbeScript
 
@@ -102,6 +102,15 @@ class FleetAPI(Protocol):
     async def search_logs(self, host: str, query: LogQuery, *, max_matches: int = 200) -> LogSearchResult: ...
         # palette › Search logs… only (never a timer): one `log.search` probe over the host's own recent log files
         # (logsearch.plan: ≤ 20 files, last 256 KiB each, ≤ 1 MiB, ≤ max_matches excerpts); never raises (§4.7.1)
+    async def find_logs(self, host: str, workdir: str, *, since: datetime | None = None,
+                        until: datetime | None = None) -> LogFiles: ...
+        # on demand only (never a timer): one `log.find` probe listing log-like files (*.log *.out *.err *.stdout
+        # *.stderr) written under a job's workdir since `since` - 60 s (the job's start; None = the last 24 h) and, for
+        # an ended job, not after `until` (its end) + 300 s (callers: logs.find_window(job)); at most 6 path components
+        # below the workdir (≤ 5 nested directories), newest first, ≤ 30 (truncated); `incomplete`
+        # says why the walk may have missed files. The caller marks the job's own stdout/stderr and other jobs' logs
+        # (logs.known_logs / suggest). A picked file is followed / read as LogRef(stream="file", path=…,
+        # source="found"). Never raises (LogFiles.error / file_error, §4.7.2)
     # actions
     def actions_for(self, keys: Sequence[JobKey]) -> list[ActionSpec]: ...
         # merged per action id across hosts; disabled_reason precedence: read-only mode -> host not OK/DEGRADED
@@ -837,6 +846,10 @@ class FleetService(FleetAPI):
         search = logsearch.plan(host, self.store.jobs([host]) if host in self.store.hosts else (), self.clock.now(),
                                 self.config.general.recent_window)
         return await self.logs.search(host, search, query, max_matches=max_matches)
+
+    async def find_logs(self, host: str, workdir: str, *, since: datetime | None = None,
+                        until: datetime | None = None) -> LogFiles:
+        return await self.logs.find(host, workdir, since=since, until=until)
 
     # ================================================================ actions
     def actions_for(self, keys: Sequence[JobKey]) -> list[ActionSpec]:

@@ -1,6 +1,6 @@
 """[WP4] IO side of `runfleet agent` (docs/AGENT_INTERFACE.md §4, §3.5): the read-only cache read, the fleet
 view built from it (identity check, data source), the explicit `--refresh`, the `--demo` fleet polled in
-memory, and the one-probe log read.
+memory, the one-probe log read and the one-probe find of other log files under a job's workdir.
 
 The cache path never spawns a process and never writes: the database is opened `mode=ro` in one read
 transaction, like `runfleet.status`, without `core.cache.Cache` (its constructor creates, migrates and
@@ -30,7 +30,7 @@ from runfleet.agent.data import (REFRESH_FLOOR, STALE_AFTER, FleetView, HostHeal
 from runfleet.config import FleetConfig, HostConfig
 from runfleet.core.cache import ENDED_TASKS_RETENTION, Cache, health_from_json, health_json
 from runfleet.core.clock import Clock
-from runfleet.core.logs import LogRead
+from runfleet.core.logs import LogFiles, LogRead, find_window
 from runfleet.core.service import (FleetService, TransportFactory, claim_instance_lock, instance_lock_file,
                                    lock_attempt_at, lock_holder, release_instance_lock, try_instance_lock_at)
 from runfleet.models import ConnState, ErrorKind, HostError, HostSnapshot, HostStatus, Job, LogRef, from_json
@@ -337,7 +337,7 @@ def build_view(config: FleetConfig, hosts: Sequence[HostConfig], rows: CacheRows
     done = outcomes or {}
     views = tuple(host_view(h, rows, now, lock_base=lock_base, outcome=done.get(h.name)) for h in hosts)
     return FleetView(generated_at=now, hosts=views, recent_window=config.general.recent_window, error=error,
-                     problems=fleet_problems)
+                     stall_after=config.general.stall_after, problems=fleet_problems)
 
 
 def load_view(config: FleetConfig, names: Sequence[str] | None, *, cache_path: Path, now: datetime,
@@ -658,7 +658,7 @@ async def demo_view(config: FleetConfig, transports: TransportFactory, clock: Cl
             snapshot=snap, health=health, source=Source.DEMO,
             sacct_window_s=cfg.slurm.sacct_window if kind == "slurm" else None))
     return FleetView(generated_at=now, hosts=tuple(views), recent_window=config.general.recent_window,
-                     demo=True)
+                     demo=True, stall_after=config.general.stall_after)
 
 
 # ====================================================================================================== log
@@ -715,6 +715,38 @@ async def read_log(config: FleetConfig, host: HostView, job_ref: str | Job, *, s
         return await asyncio.wait_for(service.logs.read(cfg.name, ref, nbytes=nbytes, head=head), timeout)
     except TimeoutError:
         return dataclasses.replace(empty, error=HostError(ErrorKind.TIMEOUT, f"log read timed out after "
+                                                          f"{timeout:.0f} s", at=clock.now()))
+    finally:
+        with contextlib.suppress(Exception):
+            await service.stop()
+
+
+async def find_logs(config: FleetConfig, host: HostView, job: Job, *, clock: Clock, timeout: float,
+                    transports: TransportFactory | None = None) -> LogFiles | None:
+    """`agent log --files` / `--file`: ONE bounded find of the log files written under the job's workdir since it
+    started, up to shortly after an ended job's end (LogService.find), under one deadline. None when the job has no known workdir (zero probes). A session-
+    transport host waiting for a login gets an AUTH error without any network; a deadline that passes gives a
+    TIMEOUT error."""
+    workdir = job.workdir
+    if not workdir:
+        return None
+    now = clock.now()
+    empty = LogFiles(workdir=workdir, files=(), fetched_at=now)
+    if host.session_transport and host.state in AUTH_STATES:
+        kind = ErrorKind.HOSTKEY if host.state is ConnState.HOSTKEY else ErrorKind.AUTH
+        return dataclasses.replace(empty, error=HostError(kind, "login needed (session transport)", at=now))
+    cfg = next((h for h in config.hosts if h.name == host.name), None)
+    if cfg is None:
+        raise ValueError(f"unknown host {host.name!r}")
+    from runfleet.transport import make_transport
+
+    service = FleetService(_readonly(config), transports or make_transport, clock, None)
+    service.lock_path = False
+    try:
+        since, until = find_window(job)
+        return await asyncio.wait_for(service.logs.find(cfg.name, workdir, since=since, until=until), timeout)
+    except TimeoutError:
+        return dataclasses.replace(empty, error=HostError(ErrorKind.TIMEOUT, f"log find timed out after "
                                                           f"{timeout:.0f} s", at=clock.now()))
     finally:
         with contextlib.suppress(Exception):

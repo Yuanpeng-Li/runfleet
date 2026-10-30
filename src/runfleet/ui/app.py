@@ -196,6 +196,7 @@ class RunFleetApp(App[None]):
         self.update_status: Any = None          # update.Status of the last check this run (None: not asked yet)
         self.update_checking = False
         self.log_search_query: Any = None       # the last Search logs… query this run (the prompt starts with it)
+        self.found_logs: dict[JobKey, LogRef] = {}   # job -> the file picked with `f` (this session only)
 
     # ------------------------------------------------------------------ lifecycle
     def get_theme_variable_defaults(self) -> dict[str, str]:
@@ -866,21 +867,32 @@ class RunFleetApp(App[None]):
             refs = [r for r in job.logs if r.stream == "stdout"]
         return refs[0] if refs else None
 
+    def stream_ref(self, job: Job, stream: str) -> LogRef | None:
+        """The log a view shows: stdout / stderr as polled, or ``file`` = the one picked with `f` for this job."""
+        if stream == "file":
+            return self.found_logs.get(job.key)
+        return self.log_ref(job, stream)
+
     def action_log_viewer(self, stream: str = "stdout", search: bool = False) -> None:
+        from runfleet.ui.screens.job_detail import JobDetailScreen
         from runfleet.ui.screens.log_viewer import LogScreen
 
         job = self._current_job()
         if job is None:
             self.toast("no job selected", severity="warning")
             return
-        if not job.logs:
-            self.toast(f"{job.key.label}: no log path known", severity="warning")
-            return
         screen = self.base_screen()
         if isinstance(screen, LogScreen):
             return
         cur = getattr(screen, "stream", stream)
-        log_screen = LogScreen(job.key, cur if isinstance(cur, str) else stream)
+        cur = cur if isinstance(cur, str) else stream
+        detail = screen.detail if isinstance(screen, JobDetailScreen) and screen.key == job.key else None
+        resolved = detail.logs if detail is not None else ()                  # the refs the detail's probe resolved
+        # a file picked with `f`, or a stdout only the detail resolved, needs no polled path
+        if not job.logs and self.stream_ref(job, cur) is None and not any(r.path for r in resolved):
+            self.toast(f"{job.key.label}: no log path known", severity="warning")
+            return
+        log_screen = LogScreen(job.key, cur, resolved)
         log_screen.open_search = search
         self.push_screen(log_screen)
 
@@ -889,8 +901,12 @@ class RunFleetApp(App[None]):
         if job is None:
             return
         screen = self.base_screen()
-        stream = getattr(screen, "stream", "stdout")
-        ref = self.log_ref(job, stream if isinstance(stream, str) else "stdout")
+        shown = getattr(screen, "shown_ref", None)            # job detail / log viewer: the ref the view follows
+        if callable(shown) and getattr(screen, "key", None) == job.key:
+            ref = shown()
+        else:
+            stream = getattr(screen, "stream", "stdout")
+            ref = self.stream_ref(job, stream if isinstance(stream, str) else "stdout")
         if ref is None or ref.path is None:
             self.toast(f"{job.key.label}: no log path known", severity="warning")
             return
@@ -961,7 +977,8 @@ class RunFleetApp(App[None]):
 
     def hint_overrides(self, contexts: Sequence[str]) -> dict[str, str | None]:
         """Hint-bar labels for the current selection: `^k` says what it would run (cancel / terminate) and is hidden
-        when nothing selected can get it (no selection, only ended jobs); the action menu likewise."""
+        when nothing selected can get it (no selection, only ended jobs); the action menu likewise. `f` (other log
+        files) is left out on the job detail's live GPU / Procs tabs."""
         try:
             jobs = [j for j in (self.store.job(k) for k in self._targets()) if j is not None]
         except Exception:                      # hints must never break the UI
@@ -974,6 +991,8 @@ class RunFleetApp(App[None]):
             out["app.quick_kill"] = "terminate" if all(j.kind is JobKind.TASK for j in live) else "cancel"
         if not jobs:
             out["app.action_menu"] = None
+        if "job_live" in contexts:             # GPU / Procs tab: its r / a / S hints need the room more than `f`
+            out["find_logs"] = None
         return out
 
     def action_action_menu(self) -> None:

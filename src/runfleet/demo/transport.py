@@ -241,6 +241,13 @@ def _h_search(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
                              per_file=_meta_int(m, "per_file", 262144), budget=_meta_int(m, "budget", 1 << 20))
 
 
+def _h_find(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
+    m = s.meta
+    return render.log_find(h, workdir=_meta_str(m, "workdir", ""), since=_meta_int(m, "since", 0),
+                           max_depth=_meta_int(m, "max_depth", 6), max_files=_meta_int(m, "max_files", 30),
+                           until=_meta_int(m, "until", 0) if m.get("until") is not None else None)
+
+
 def _h_attach_node(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
     c = _cluster(h, "ssh" if s.meta.get("mode") == "ssh" else "srun")
     return c if isinstance(c, Out) else render.attach_node(c, now, s.meta)
@@ -306,6 +313,7 @@ HANDLERS: dict[str, Handler] = {
     "log.fetch": _h_fetch,
     "log.head": _h_head,
     "log.search": _h_search,
+    "log.find": _h_find,
     "slurm.attach.audit": _h_attach_audit,
 }
 

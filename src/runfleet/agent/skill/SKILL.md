@@ -24,6 +24,7 @@ runfleet agent jobs --state finished --since 1d    # everything that ended (done
 runfleet agent jobs --workdir DIR --name 'GLOB'    # one project's jobs (references/with-run-skills.md)
 runfleet agent job k2:2332861                      # times, placement, pending reason/priority, exit cause, log paths
 runfleet agent log k2:2332861 --lines 80           # bounded scrubbed tail (1 ssh probe); --grep 'Traceback|Error', --head
+runfleet agent log k2:2332861 --files              # launcher jobs write their real output elsewhere; read: --file PATH
 runfleet agent gpus --type h100 --min 4            # where N free GPUs of a type are (free ≠ schedulable for you)
 runfleet agent host k2                             # health: login, failing probes, data ages, partitions, load
 runfleet agent events --since 2h                   # submitted / started / ended ok|bad / time low / host problems
@@ -49,8 +50,7 @@ Waiting: run `runfleet wait` in the background if your agent supports background
   ("accounting (sacct) is failing"): finished/failed counts are a lower bound (`≥`) — say "at least". `no_log_yet`: the
   job has not started or its log file does not exist yet; `not_allowed`: another user's log, never readable.
 - Pending: report the reason as given; RunFleet never knows a queue position — don't invent one.
-- Events: re-query with an overlapping window (last check minus 30m) and dedupe by event id `<job>:<kind>`
-  (`k2:2331977:ended_bad`); accounting can report an end late.
+- Events: re-query an overlapping window (last check minus 30m), dedupe by event id `<job>:<kind>`; an end may show up late.
 - `# +N more → <command>`: runfleet commands RunFleet prints are runnable as printed (JSON `truncated.next`, with
   `--json`); when one call cannot hold the rest it is narrower (one host) and the advice after it
   (`truncated.advice`) says how to get the others. "no command printed: …" names the change instead ("repeat your

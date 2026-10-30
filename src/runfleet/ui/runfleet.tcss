@@ -122,6 +122,7 @@ ModalScreen { background: transparent; align: center middle; }   /* no backdrop:
 #doctor-box, #manual-box { width: 92; }
 #ls-box { width: 120; }                      /* = log_search.BOX_W */
 #ls-prompt-box { width: 100; }
+#fl-box { width: 104; }                      /* = found_logs.BOX_W */
 .dialog-buttons { height: auto; align-horizontal: right; padding-top: 1; }
 /* menus in dialogs (action menu, digest, forwards): the highlighted option on the cursor tint, not the accent — the
    prompts keep their own colours (dim, orange, muted), which sit at 1.0-1.6:1 on the accent */

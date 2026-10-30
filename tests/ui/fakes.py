@@ -22,6 +22,7 @@ from runfleet.config import (FleetConfig, GeneralSettings, HostConfig, NotifySet
 from runfleet.core.clock import ManualClock
 from runfleet.core import logsearch
 from runfleet.core.forwards import PortForward
+from runfleet.core.logs import FIND_END_SLACK, FIND_MAX_FILES, FoundLog, LogFiles
 from runfleet.core.logsearch import LogQuery, LogSearchResult
 from runfleet.core.service import LogPeek, LogUpdate
 from runfleet.core.store import ChangeSet, FleetStore, HostState
@@ -616,6 +617,12 @@ class FakeService:
         self.log_head: dict[str, list[str]] = {}            # path -> head_log lines (default: the first log_lines)
         self.search_errors: dict[str, str] = {}             # host -> search_logs error (no probe)
         self.search_gate: asyncio.Event | None = None       # set: search_logs waits for it (a slow host)
+        self.found_files: dict[str, list[FoundLog]] = {}    # workdir -> what find_logs lists there (any order)
+        self.find_errors: dict[str, HostError] = {}         # host -> find_logs transport error
+        self.find_file_error: str | None = None             # set: find_logs answers it (BusyBox find, no workdir)
+        self.find_gate: asyncio.Event | None = None         # set: find_logs waits for it (loading state)
+        self.find_incomplete: str | None = None             # set: find_logs' walk stopped early ("timed out", …)
+        self.detail_logs: dict[JobKey, tuple[LogRef, ...]] = {}   # job_detail's logs (default: the job's)
         self.already_connected: set[str] = set()
         self.logins: dict[str, Callable[[], int]] = {}      # connect_login answers (session transport hosts)
         # Settings (FleetAPI runtime host management): in memory like --demo unless a test sets config_path
@@ -708,7 +715,8 @@ class FakeService:
             snap = self.store.hosts[key.host].snapshot
             procs = tuple(p for p in (snap.procs if snap else ()) if p.task == key)
         fields = dict(job.raw) | {"WorkDir": job.workdir or "", "Command": job.command or ""}
-        return JobDetail(job, fields, job.alloc.per_node, steps, job.logs, job.gpu, procs, procs_note,
+        return JobDetail(job, fields, job.alloc.per_node, steps, self.detail_logs.get(key, job.logs), job.gpu, procs,
+                         procs_note,
                          {"CUDA_VISIBLE_DEVICES": "3"} if job.kind is JobKind.TASK else {}, explanation,
                          self.clock.now(), efficiency=efficiency_lines(efficiency(job, steps)))   # like the collector
 
@@ -763,6 +771,26 @@ class FakeService:
         res = SectionResult(section.name, SectionOutcome.OK if out.stdout else SectionOutcome.EMPTY, out.rc,
                             out.stdout, out.stderr, 7)
         return logsearch.parse(host, query, search, res, max_matches=max_matches)
+
+    async def find_logs(self, host: str, workdir: str, *, since: datetime | None = None,
+                        until: datetime | None = None) -> LogFiles:
+        """``found_files[workdir]`` written since ``since`` (None: the last 24 h) and, for an ended job, up to
+        ``until`` + FIND_END_SLACK; newest first, capped like log.find; ``find_incomplete`` marks the walk cut."""
+        self._record("find_logs", host, workdir, since, until)
+        if self.find_gate is not None:
+            await self.find_gate.wait()
+        now = self.clock.now()
+        if host in self.find_errors:
+            return LogFiles(workdir, (), now, error=self.find_errors[host])
+        if self.find_file_error is not None:
+            return LogFiles(workdir, (), now, file_error=self.find_file_error)
+        cutoff = since - timedelta(seconds=60) if since is not None else now - timedelta(hours=24)
+        end = until + timedelta(seconds=FIND_END_SLACK) if until is not None else None
+        files = sorted((f for f in self.found_files.get(workdir, ())
+                        if f.mtime >= cutoff and (end is None or f.mtime <= end)),
+                       key=lambda f: f.mtime, reverse=True)
+        return LogFiles(workdir, tuple(files[:FIND_MAX_FILES]), now, truncated=len(files) > FIND_MAX_FILES,
+                        incomplete=self.find_incomplete)
 
     async def head_log(self, host: str, ref: LogRef, *, nbytes: int = 32768) -> LogPeek:
         self._record("head_log", host, ref.path)

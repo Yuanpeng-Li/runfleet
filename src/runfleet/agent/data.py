@@ -64,6 +64,8 @@ class ProblemCode(StrEnum):
     NO_LOG_PATH = "no_log_path"
     NO_LOG_YET = "no_log_yet"         # the job has not started / its log file does not exist yet
     NOT_ALLOWED = "not_allowed"       # another user's log
+    NOT_LISTED = "not_listed"         # `log --file`: not a log file found under the job's workdir (outside it, the
+                                      # workdir itself, a directory, or not among the files the find of this call listed)
     PARTIAL = "partial"
     CACHE_BUSY = "cache_busy"
     CONFIG_MISMATCH = "config_mismatch"
@@ -163,6 +165,7 @@ class FleetView:
     hosts: tuple[HostView, ...]                # config order
     recent_window: float                       # general.recent_window (s)
     demo: bool = False
+    stall_after: float = 1800.0                # general.stall_after (s): a running job's stdout this quiet is "quiet"
     error: str | None = None                   # no data at all (missing / busy / unreadable cache): exit 1
     problems: tuple[Problem, ...] = ()         # fleet-level (cache_busy, no_ssh, …)
     # how the call was made, repeated in every command the output suggests (runnable as printed): `-c PATH` (None:

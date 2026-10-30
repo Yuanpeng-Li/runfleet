@@ -23,15 +23,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from runfleet.agent.data import Document, FleetView, Problem, ProblemCode
+from runfleet.agent.data import Document, FleetView, HostView, Problem, ProblemCode
 from runfleet.errors import RunFleetError
 from runfleet.util.redact import escape_controls, scrub
 
 if TYPE_CHECKING:
     from runfleet.config import FleetConfig
     from runfleet.core.clock import Clock
-    from runfleet.core.logs import LogRead
+    from runfleet.core.logs import LogFiles, LogRead
     from runfleet.core.service import TransportFactory
+    from runfleet.models import Job
     from runfleet.wait import Target
 
 VERBS = ("brief", "jobs", "job", "log", "gpus", "host", "events", "help")
@@ -42,6 +43,7 @@ LOG_LINES_DEFAULT = 60
 LOG_BYTES_DEFAULT, LOG_BYTES_MAX = 32 << 10, 256 << 10
 STREAMS = ("auto", "out", "err")
 GREP_MAX, GREP_TERMS_MAX = 400, 20     # --grep: the terms are echoed back, inside the log budget
+FILE_MAX = 4096                        # --file PATH: characters (PATH_MAX: every listed path fits)
 DEMO_SEED = 7
 CACHE_THREAD = "runfleet-agent-cache"          # the daemon thread of a cache read (agent.mcp waits for it)
 _DUR = re.compile(r"(\d+(?:\.\d+)?)([smhdw])")
@@ -52,7 +54,12 @@ ERROR_TEXT_MAX = 300                 # bytes: an error text that echoes caller i
 
 
 class UsageError(RunFleetError):
-    """A bad verb, parameter, host name, id or time (CLI exit 2); raised before any IO."""
+    """A bad verb, parameter, host name, id or time (CLI exit 2); raised before any IO. ``mcp``: the same problem
+    in the MCP tools' parameter names when the message names CLI flags (``list_files`` for ``--files``)."""
+
+    def __init__(self, message: str, *, mcp: str | None = None) -> None:
+        super().__init__(message)
+        self.mcp = mcp
 
 
 def safe_text(text: str, limit: int = ERROR_TEXT_MAX) -> str:
@@ -201,6 +208,7 @@ def build_request(verb: str, raw: Mapping[str, Any], config: FleetConfig, *,
                 raise UsageError(f"grep: at most {GREP_TERMS_MAX} alternatives and {GREP_MAX} characters")
             for key in ("head", "path_only"):
                 p.flag(key)
+            _check_files(p)
         named = tuple(dict.fromkeys(t.host for t in targets))
         return Request(verb, named, named, targets=targets, **common)
     if verb == "host":
@@ -233,6 +241,29 @@ def build_request(verb: str, raw: Mapping[str, Any], config: FleetConfig, *,
         p.text("type")
         p.count("min", 0, minimum=0)
     return Request(verb, hosts, typed, **common)
+
+
+def _check_files(p: _Params) -> None:
+    """`log --files` / `--file PATH`: one of them, with the read options that make sense (a UsageError names the
+    clash); PATH one line, no NUL, at most FILE_MAX characters (whether it lies under the job's workdir is decided
+    once the job is known, before any probe)."""
+    listing, file = p.flag("list_files"), p.text("file")
+    if file is not None and (not file.strip() or len(file) > FILE_MAX or any(c in file for c in "\x00\n\r")):
+        raise UsageError(f"file: a path under the job's workdir (one line, at most {FILE_MAX} characters)")
+    if not listing and file is None:
+        return
+    given = {"list_files": listing, "file": file is not None, "stream": p.text("stream") is not None,
+             "path_only": p.flag("path_only"), "grep": bool(p.text("grep")), "head": p.flag("head")}
+    allowed = ("list_files",) if listing else ("file", "grep", "head")
+    clash = [name for name, on in given.items() if on and name not in allowed]
+    if clash:
+        mode = "list_files" if listing else "file"
+        raise UsageError(f"{_FLAGS[mode]} does not combine with {' '.join(_FLAGS[c] for c in clash)}",
+                         mcp=f"{mode} does not combine with {' '.join(clash)}")
+
+
+_FLAGS = {"list_files": "--files", "file": "--file", "stream": "--stream", "path_only": "--path-only",
+          "grep": "--grep", "head": "--head"}       # `agent log` parameters -> their CLI flags (usage errors)
 
 
 # ================================================================================================== the fleet
@@ -280,8 +311,10 @@ def _demo(seed: int, clock: Clock) -> tuple[FleetConfig, TransportFactory]:
 
 
 # ================================================================================================== rendering
-def render(req: Request, fv: FleetView, read: LogRead | None = None, *, path_only: bool | None = None) -> Document:
-    """The agent.view document of a request over a fleet view (fv.error set: the verb's no-data document)."""
+def render(req: Request, fv: FleetView, read: LogRead | None = None, *, path_only: bool | None = None,
+           files: LogFiles | None = None) -> Document:
+    """The agent.view document of a request over a fleet view (fv.error set: the verb's no-data document);
+    ``files``: the find of `log --files` / `--file`."""
     from runfleet.agent import view
 
     if req.config_path is not None or req.demo_seed is not None:
@@ -303,9 +336,11 @@ def render(req: Request, fv: FleetView, read: LogRead | None = None, *, path_onl
         return view.job(fv, [(t.host, t.job) for t in req.targets])
     if req.verb == "log":
         t = req.targets[0]
+        if p.flag("list_files"):
+            return view.log_files(fv, (t.host, t.job), files)
         return view.log(fv, (t.host, t.job), read, lines=p.count("lines", LOG_LINES_DEFAULT) or LOG_LINES_DEFAULT,
                         grep=p.text("grep"), path_only=p.flag("path_only") if path_only is None else path_only,
-                        stream=p.text("stream") or "auto", head=p.flag("head"))
+                        stream=p.text("stream") or "auto", head=p.flag("head"), file=p.text("file"), files=files)
     if req.verb == "gpus":
         return view.gpus(fv, gpu_type=p.text("type"), min_free=p.count("min", 0, minimum=0) or 0,
                          hosts=req.typed_hosts)
@@ -432,7 +467,9 @@ async def _in_daemon_thread(fn: Callable[[], FleetView]) -> FleetView:
 async def _with_log(req: Request, config: FleetConfig, fv: FleetView, *, clock: Clock,
                     transports: TransportFactory | None, timeout: Callable[[], float]) -> Document:
     """Render; for `log`, first the one bounded read of the log agent.view will show (no probe when the job is
-    unknown, ambiguous, someone else's, has no log path, or `path_only`)."""
+    unknown, ambiguous, someone else's, has no log path, or `path_only`). `--files`: one find under the job's
+    workdir instead; `--file PATH`: that find, then the read of PATH only when the find listed it (a PATH outside
+    the workdir is refused before any probe)."""
     from runfleet.agent import source, view
 
     if req.verb != "log" or fv.error is not None:
@@ -444,6 +481,10 @@ async def _with_log(req: Request, config: FleetConfig, fv: FleetView, *, clock: 
     hv, found, problem = view.lookup(fv, t.host, t.job)
     if problem is not None or hv is None or len(found) != 1 or not found[0].is_mine:
         return render(req, fv)
+    file = p.text("file")
+    if p.flag("list_files") or file is not None:
+        return await _with_files(req, config, fv, hv, found[0], file, clock=clock, transports=transports,
+                                 timeout=timeout)
     stream = p.text("stream") or "auto"
     ref = view.pick_log(found[0], stream)
     if ref is None or not ref.path:
@@ -454,3 +495,28 @@ async def _with_log(req: Request, config: FleetConfig, fv: FleetView, *, clock: 
     read = await source.read_log(config, hv, found[0], stream=stream, nbytes=nbytes, head=p.flag("head"),
                                  clock=clock, timeout=timeout(), transports=transports, log_ref=ref)
     return render(req, fv, read)
+
+
+async def _with_files(req: Request, config: FleetConfig, fv: FleetView, hv: HostView, job: Job, file: str | None, *,
+                      clock: Clock, transports: TransportFactory | None, timeout: Callable[[], float]) -> Document:
+    """`log --files` / `--file PATH` of one job of mine: no probe for a job that has not started, has no workdir or
+    a PATH outside it, the workdir itself, a directory or another user's job's log (agent.view says why); else the one find (bounded by an
+    ended job's end), and for `--file` the read of the listed file."""
+    from runfleet.agent import source, view
+
+    p = _Params(req.params)
+    workdir = job.workdir
+    if not view.started(job) or not workdir or (file is not None and view.file_precheck(job, file, hv) is not None):
+        return render(req, fv)
+    if transports is None and _ssh_missing(config, [hv.name]):
+        return render(req, _with_problem(fv, Problem(ProblemCode.NO_SSH, host=hv.name)))
+    files = await source.find_logs(config, hv, job, clock=clock, timeout=timeout(), transports=transports)
+    if file is None:
+        return render(req, fv, files=files)
+    hit, _why = view.file_choice(job, file, files, hv)
+    if hit is None:
+        return render(req, fv, files=files)
+    nbytes = min(p.count("bytes", LOG_BYTES_DEFAULT) or LOG_BYTES_DEFAULT, LOG_BYTES_MAX)
+    read = await source.read_log(config, hv, job, nbytes=nbytes, head=p.flag("head"), clock=clock,
+                                 timeout=timeout(), transports=transports, log_ref=view.found_ref(hit))
+    return render(req, fv, read, files=files)

@@ -336,7 +336,7 @@ src/runfleet/
     clock.py             FROZEN Clock protocol, RealClock, ManualClock                  [WP1]
     poller.py            HostPoller: ticks, cadence modes, backoff, lanes, MonitorView  [WP1]
     actions.py           ActionService: eligibility, plan, execute, action log          [WP1]
-    logs.py              LogService: follow streams, line assembly, peek, read (agent), fetch, search, pager argv  [WP1]
+    logs.py              LogService: follow streams, line assembly, peek, read (agent), fetch, search, find (§4.7.2), pager argv  [WP1]
     logsearch.py         cross-job log search (§4.7.1): scope, the `log.search` command, its parser, excerpts (pure)  [WP1]
     cache.py             SQLite cache (§5.5)                                            [WP1]
     doctor.py            per-host diagnostics → DoctorReport                            [WP1]
@@ -363,7 +363,8 @@ src/runfleet/
               attention.py ("needs you" picker of the Fleet view, `a`, §7.4)
               save_view.py (palette › Save view as…: the name prompt, §7.6)
               gpu_watch.py (palette › Watch free GPUs… prompt and the Watches list, §7.14)
-              log_search.py (palette › Search logs… / ^f in Jobs: the prompt and the results, §4.7.1)  [WP3]
+              log_search.py (palette › Search logs… / ^f in Jobs: the prompt and the results, §4.7.1)
+              found_logs.py (other log files of a job under its workdir: pick one and follow it, §4.7.2)  [WP3]
     widgets/  header.py hintbar.py tabs.py fleet_view.py host_card.py jobs_view.py job_table.py job_preview.py
               gpus_view.py gpu_panel.py proc_table.py node_table.py log_view.py filter_bar.py
               attach_panel.py (Attach status line + live GPU rows, §7.16)
@@ -612,11 +613,14 @@ class ResourceAlloc:
 
 @dataclass(frozen=True, slots=True)
 class LogRef:
-    stream: Literal["stdout", "stderr"]
+    stream: Literal["stdout", "stderr", "file"]   # "file": another log under the workdir (log.find, §4.7.2)
     path: str | None             # absolute, expanded; None if unknown
     pattern: str | None = None   # raw Slurm pattern ("…/logs/%x_%j.out") if that is all we have
     merged: bool = False         # stderr goes to the stdout file
-    source: Literal["scontrol", "squeue", "sacct", "template", "procfd", "cache", "demo"] = "squeue"
+    source: Literal["scontrol", "squeue", "sacct", "template", "procfd", "cache", "demo", "found"] = "squeue"
+    # A file the user / an agent picked from FleetAPI.find_logs is LogRef(stream="file", path=<abs>,
+    # source="found", size=…, mtime=…): never in Job.logs (collectors only produce stdout / stderr refs), it is
+    # peeked, followed, head-read and read exactly like a stdout (additive after 0.8.0).
     size: int | None = None      # from the last stat
     mtime: datetime | None = None
     error: str | None = None     # "No such file", "Permission denied"
@@ -1647,6 +1651,18 @@ class FleetAPI(Protocol):
     async def search_logs(self, host: str, query: LogQuery, *, max_matches: int = 200) -> LogSearchResult: ...
         # palette › Search logs… only (never a timer): one `log.search` probe over the host's own recent log files
         # (logsearch.plan: ≤ 20 files, last 256 KiB each, ≤ 1 MiB, ≤ max_matches excerpts); never raises (§4.7.1)
+    async def find_logs(self, host: str, workdir: str, *, since: datetime | None = None,
+                        until: datetime | None = None) -> LogFiles: ...
+        # on demand only (never a timer; read-only, allowed with --readonly): ONE `log.find` probe listing the
+        # log-like files written under a job's workdir since `since` - 60 s (the job's start; None = the last 24 h)
+        # and, for an ENDED job, not after `until` (its end) + 300 s (None = no upper bound); callers take both from
+        # logs.find_window(job). At most 6 path components below the workdir (≤ 5 nested directories),
+        # newest first, ≤ 30 (`truncated` beyond); `incomplete` says why the walk may have missed files (timed out,
+        # output cut, sort failed, some directories unreadable, find failed). The caller (UI, agent) marks the job's
+        # own stdout/stderr and other jobs' (logs.known_logs) and never suggests them (logs.suggest); a picked file is
+        # followed / read as LogRef(stream="file", path=…, source="found"). Never raises: LogFiles.error (typed
+        # transport failure), file_error (no such directory, permission denied, unsupported find, a find that failed
+        # before listing anything) (§4.7.2). Additive after 0.8.0: a FakeService gains this one method
     # actions
     def actions_for(self, keys: Sequence[JobKey]) -> list[ActionSpec]: ...
         # merged per action id across hosts; disabled_reason precedence: read-only mode -> host not OK/DEGRADED
@@ -2181,6 +2197,105 @@ locale the probe prelude exports).
   was rewritten, a `\r` update overwrote the match) the nearest line with it wins, with a note saying so; when the
   file grew by more than 8 MiB since the search, the usual last 64 KiB are streamed and the last line with the needle
   is used; the line never arriving within 5 s falls back the same way.
+
+#### 4.7.2 Other log files of a job (`core/logs.py`: `find_window`, `find_section`, `parse_find`, `LogService.find`, `known_logs`, `suggest`, `stdout_quiet_for`)
+Field report: a Slurm job's stdout (`logs/<name>_<jobid>.out`) held only a launcher's 661 bytes from 13 h ago, because
+the launcher started the training with `Popen(stdout=fh)` into `<workdir>/runs/<task>/<run>/s42/train.log`. RunFleet
+only knows Slurm's StdOut/StdErr (and a workstation task's fd 1/2), so the Logs tab looked like "no log". **Find other
+log files** lists what was written under the job's workdir and follows the one the user (TUI) or an agent picks.
+- **On demand only** (never a timer, never the poller; read-only, allowed with `--readonly`): `FleetAPI.find_logs(host,
+  workdir, since=, until=)` sends ONE probe (purpose `log`, the
+  on-demand lane like peek/search) with one section `log.find` (remote timeout 15 s, `requires` find/sort/head,
+  `max_stdout` ≈ 130 KB).
+- **Window** (`find_window(job) -> (since, until)`, one rule for the TUI picker and the agent): `since` = the job's
+  start (a scheduler estimate is no start); `until` = its end once it ended (`state.is_terminal`; a running job's
+  `end_time` is only its time limit). An ended job with no usable start searches the `FIND_WINDOW` (24 h) before its
+  end — `since` None would mean the last 24 h from now, which misses (and inverts against `until`) a job that ended
+  days ago. Neither known: `(None, None)`, the last 24 h.
+- **Rules**: regular files (`-type f`; `find -H`: only the workdir itself may be a symlink, symlinked files and
+  directories below it are neither listed nor entered, so nothing outside the workdir is ever named) at most
+  `FIND_MAX_DEPTH = 6` path components below it (`-mindepth 1 -maxdepth 6`: `a/b/c/d/e/x.log` is listed — at most 5
+  nested directories — and `a/b/c/d/e/f/x.log` is not), named `*.log *.out *.err *.stdout *.stderr` (wandb's `files/output.log` is a
+  `*.log`), modified after `since - 60 s` (`since` None: the last 24 h) and, for an ended job, at or before `until +
+  FIND_END_SLACK` (300 s: late flushes and teardown; `! -newermt @N`, N rounded up) — in a shared workdir what later jobs wrote is
+  theirs, not this job's — skipping (`-prune`) directories named `.git`
+  `.venv*` `venv` `node_modules` `__pycache__` `.cache` `.mypy_cache` `.pytest_cache` `site-packages`, and names with a
+  control character (a newline would break the line format). Newest first, at most `FIND_MAX_FILES = 30`
+  (`truncated` when more matched — and only then; counted before a record is dropped, so a dropped name never hides
+  the cap). The workdir is validated (`util.shell.path`: absolute, one line),
+  normalised and `shlex`-quoted once into `d=`; `/` and a `..` component are refused, nothing is sent (normalising
+  `/a/link/../job` lexically would name `/a/job`, not where the remote symlink leads). The probe does **not** exclude
+  the job's own stdout/stderr — the callers mark them (both the UI and the agent list them, marked `stdout`/`stderr`).
+- **Exact command** (GNU find; `{wd}` quoted, `{cutoff}` = epoch seconds, `{until}` = end + 300 s, an ended job only):
+  ```sh
+  d={wd}
+  [ -d "$d" ] || { echo @@nodir; exit 0; }
+  { [ -r "$d" ] && [ -x "$d" ]; } || { echo @@denied; exit 0; }
+  find -H "$d" -maxdepth 0 -newermt @0 -printf '' >/dev/null 2>&1 ||
+    { [ -d "$d" ] || { echo @@nodir; exit 0; }; echo @@unsupported; exit 0; }
+  if command -v timeout >/dev/null 2>&1; then t='timeout -k 1 12'; else t=; fi
+  exec 3>&1
+  r=$({ { $t find -H "$d" -mindepth 1 -maxdepth 6 \( -type d \( -name .git -o -name '.venv*' -o … \) \) -prune -o -type f
+        \( -name '*.log' -o -name '*.out' -o … \) ! -path '*[[:cntrl:]]*' -newermt @{cutoff} [! -newermt @{until}]
+        -printf '%T@ %s %p\037\n'; echo $? >&4; } | { sort -rn || echo "@@sort $?"; } | head -n 31 >&3; } 4>&1)
+  [ "$r" = 0 ] || [ -d "$d" ] || { echo @@nodir; exit 0; }   # the workdir went away during the walk
+  echo "@@end $r"
+  ```
+  `find` alone is bounded to 12 s, so a slow tree (NFS, a dataset of a million files) still yields what it found
+  (`@@end 124`); find's own status leaves the pipeline on fd 4. A BusyBox / BSD find has neither `-newermt` nor
+  `-printf`: the one-line check answers `@@unsupported` instead of wrong output.
+- **Output → `LogFiles`** (`parse_find`): `MTIME SIZE PATH\037` lines (`%T@` keeps sub-second order; `\037` ends a
+  whole record), re-sorted newest first; a path outside the workdir or not valid UTF-8 is dropped, and so is a record
+  without its `\037` (find killed mid-record — sort then adds the newline — or output cut: a prefix of a name is never
+  offered). `@@nodir` / `@@denied` / `@@unsupported` → `file_error` ("No such directory", "Permission denied",
+  "unsupported: needs GNU find (-printf, -newermt)"); a missing tool → "unsupported: find not installed"; a timeout
+  with no byte → `error` (`ErrorKind.TIMEOUT`); a transport failure → `error` (typed, as `LogService.read`).
+- **`incomplete`** — a short fixed reason the walk may have missed files, kept apart from `truncated` (a full list cut
+  at 30) so a stopped walk never reads as complete or as capped. The files found so far are kept; where the table
+  names a `file_error` for "none", that empty result carries the `file_error` alone (no `incomplete`):
+
+  | Probe output | `files` | `incomplete` | `file_error` |
+  |---|---|---|---|
+  | `@@end 124` / `137` (find's 12 s), or the section timed out | what it found (maybe none) | "timed out" | — |
+  | no `@@end` (`max_stdout` cut it, or the section ended early without a transport error) | what came | "output cut" | with none: the stderr's error or "no output" |
+  | `@@sort RC` | what came | "sort failed" | with none: sort's message or "sort failed (rc N)" |
+  | `@@end N` (N ≠ 0), every stderr line `find: …: Permission denied` | what it found (maybe none) | "some directories unreadable" | — |
+  | `@@end N` then `@@nodir` (the workdir itself removed or renamed during the walk; also a `find: '<workdir>': No such file or directory` line) | what it found (none in practice) | "find failed (rc N)" | "No such directory" |
+  | `@@end N`, any other stderr | what it found | "find failed (rc N)" | with none: the first other line (`_file_error`, ≤ 120 chars) or "find failed (rc N)" — an NFS I/O error is never "no log files" |
+
+  A `find: …: No such file or directory` line for a path below the workdir (a temp directory removed or renamed
+  during the walk) is tolerated: that entry is simply not listed. A dropped connection is not "output cut": the
+  transport failure is a typed `error` and the records already received are dropped (`LogService.find`). The framing
+  keeps at most `STDERR_LIMIT` (4096) bytes of stderr (`head -c`), so ~100 unreadable directories end it mid-line:
+  a capped stderr that does not end in a newline loses its last, partial line before it is classified (otherwise
+  "fi" would read as find's error).
+- **Other jobs' logs** (`known_logs(jobs, exclude) -> {path: label}`): the stdout/stderr paths (absolute, normalised by
+  `norm_log_path`) of the other jobs on the same host → "job <label> stdout|stderr". A shared workdir holds every job's
+  `logs/<name>_<id>.out`; both callers mark those rows with the label. **`suggest(files, skip)`**: the newest file
+  whose normalised path is not in `skip` (the job's own stdout/stderr + `known_logs`): the picker's starting cursor
+  and the agent's `next:` line. Nothing left → no suggestion (no `next:` line). The picker's cursor starts on the
+  picked file being shown, else the suggestion, else the `◀ shown` row (the job's own stream the view shows), else the
+  first row that is not another job's log, else the first row: `enter` never lands on another job's log while a
+  safer row is listed.
+- **Wording** (both surfaces): a walk that stopped (timed out, output cut, sort failed, find failed) reads `search
+  stopped early (<reason>): N found so far` and never "no log files"; unreadable directories (the walk finished)
+  read `some directories were unreadable: their files are not listed` — never "stopped early" or "so far". The
+  30-file cap (`truncated`) is said as well when it holds too.
+- **When to offer it** (`stdout_quiet_for(ref, now, stall_after)`, one rule for the TUI's hint and the agent's card):
+  seconds since the stdout last changed when it is quiet — unchanged longer than `stall_after` (the "log idle" rule),
+  or `≤ QUIET_TINY` (4096) bytes and unchanged `≥ QUIET_TINY_AGE` (600 s); else None (also with no mtime). The agent
+  passes its own clock for the snapshot (`_seen_now`), so a 202-byte stdout written seconds ago is never "quiet".
+- **Following a found file**: `LogRef(stream="file", path=<abs>, source="found", size, mtime)` goes through the usual
+  `log.peek` / `log.head` / `log.tail` / `log.fetch` / `LogService.read` — nothing in §4.7 depends on the stream
+  being stdout. The UI (`ui/screens/found_logs.py`, §7.2) and the agent (§8.7) pick and remember it; the core keeps
+  no state.
+- **Demo** (§10.6): `log.find` is answered from the simulated files (`render.log_find`, the same rules including
+  `until`, `@@nodir` for a directory no job / process / file uses). k2 job 3372131 `vitfm--in1k-b16--s42` is the field
+  report: its stdout is a launcher's 6 lines from 13 h ago while `runs/in1k-b16/r0412/s42/train.log` under
+  `/shared/lab/alice/vitfm` keeps growing; next to it an `eval.err` and wandb's
+  `wandb/run-in1k-b16-r0412kq7/files/output.log` (a fixed name: every CLI process re-anchors the world to its own now,
+  and `agent log --files` then `--file …` run in two processes) are listed, a run from 3 days ago, a `.venv` build log,
+  a file 7 levels down and `metrics.jsonl` are not.
 
 ### 4.8 Session transport (`transport/session.py`, `transport/agent.py`)
 
@@ -3129,6 +3244,7 @@ added; `tests/integration/test_signal_script.py` runs the real one.
 | WatchesScreen (modal) | `screens/gpu_watch.py` | palette › Watches | the GPU watches with what each is doing (waiting, holds 1 of 2, fired, quiet until, paused); `d` removes, `n` adds (§7.14) |
 | SearchPromptScreen (modal) | `screens/log_search.py` | palette › Search logs…, `ctrl+f` in the Jobs view, `/` in the results | pattern, regex / match-case options, what would be read per host (keymap context `search_prompt`, §4.7.1) |
 | LogSearchScreen (modal) | `screens/log_search.py` | the prompt's `enter` | what was read and every cap; matches per job file with the excerpt highlighted; `enter` pushes LogScreen above it, landed on the hit (keymap context `log_hits`, §4.7.1) |
+| FoundLogsScreen (modal) | `screens/found_logs.py` | `f` in the job detail or the log viewer (own jobs with a workdir) | the log-like files written under the job's workdir while it ran (one `log.find` probe in a worker): path relative to the workdir, size, age, newest first; the job's own stdout/stderr (also as job detail resolved them, carried into the log viewer) and other jobs' logs marked; cursor on the file shown, else `logs.suggest`, never another job's log while another row is left; what was searched and whether the walk was capped or incomplete. `enter` follows the file in the Logs tab / viewer, `r` looks again (keymap context `found_logs`, §4.7.2) |
 | SettingsScreen (modal) | `screens/settings.py` | `,`, header `⚙`, palette › Settings, start with a config without hosts | herdr-style panel: Hosts (save / remove / test / add / reorder), General, About (§7.13) |
 
 ### 7.3 Mockups (120×35 unless stated)
@@ -3758,10 +3874,10 @@ and detail screens keep Textual's focus traversal. `→`/`right` keeps DataTable
 | Fleet view | arrows/`hjkl` move between cards · `enter`/double-click host detail · click selects (on a card's job row or a panel activity row: opens that job) · `a` needs you: what needs the user fleet-wide (§7.4) · `space` (or a header chip click) scopes · `c` connect · `C` log in to every host needing auth (§7.15) · `s` host shell · `t` enable/disable polling · `e` error details |
 | Jobs view | `j`/`k`/arrows/wheel move · `g`/`G`/`home`/`end` first/last · `ctrl+d`/`ctrl+u`/`pgdn`/`pgup` half page · `enter`/double-click detail · `l` log viewer · `p` log in `$PAGER` · `ctrl+f` search the logs of your recent jobs in scope (§4.7.1) · `x`/right-click action menu · `ctrl+k` cancel (Slurm) / terminate (task) · `space` mark and move down · `V` mark all visible / clear · `A` mark / clear the row's whole array · `y`/`Y` copy id / copy menu (`Y Y` = stdout path, §7.15) · `s` shell · `P` forward a port · `c` connect the row's host · `f` next state preset · `o` next sort column · `O` reverse sort · `z` cycle grouping · `u` toggle other users' GPU processes · `w` watch / unwatch the row or the marked rows (§7.14) |
 | GPUs view | navigation as Jobs · `enter` owning job/task (or host) · `x` actions of the owning task · `ctrl+k` terminate owning own task · `c` connect the row's host · `a` copy `CUDA_VISIBLE_DEVICES` for N free GPUs (workstations) · `o`/`O` sort |
-| Job detail | `[`/`]` previous/next tab · `o`/`e` stdout/stderr · `F` follow on/off · `l` full log viewer · `L` log viewer landed on the cause chip's line (§5.2.8) · `/` search the log (opens the log viewer with its search box; never the Jobs filter) · `p` pager · `r` refresh detail (reopens a dead stream) · `x`, `ctrl+k`, `s`, `c`, `y`, `Y`, `P`, `w` as in Jobs · `esc`/`q` back |
+| Job detail | `[`/`]` previous/next tab · `o`/`e` stdout/stderr · `F` follow on/off · `l` full log viewer · `L` log viewer landed on the cause chip's line (§5.2.8) · `/` search the log (opens the log viewer with its search box; never the Jobs filter) · `p` pager · `r` refresh detail (reopens a dead stream) · `f` other log files (picked already: switch to it; on it: pick another; §4.7.2) · `x`, `ctrl+k`, `s`, `c`, `y`, `Y`, `P`, `w` as in Jobs · `esc`/`q` back |
 | Host detail | `enter` on a process opens its task · `ctrl+k` terminate task · `x` actions · `u` other users · `o`/`O` sort · `s` shell · `c` connect · `t` enable/disable · workstation: `a` free-GPU picker · cluster: `f` nodes with free GPUs only, `[`/`]` previous/next partition |
-| Log viewer | `F` follow on/off · `G` bottom + follow · `g` top of the buffer · `o`/`e` stream · `/` search the buffer, `n`/`N` next/previous match (`esc` clears) · `]`/`[` next/previous error or warning line (§5.2.8) · `p` pager · `R` reopen the stream · `y` copy path · `c` connect |
-| Modals | Confirm: `y` / `enter` on Confirm, `n`/`esc` cancel, `tab` moves between params and buttons · Action menu: `j`/`k`/`enter` · Notifications: `j`/`k`, `enter` opens the job (a GPU watch: its host) · Since you were away: `j`/`k`, `enter` opens a failed job, `f` filters the Jobs view to it · Needs you: `j`/`k`, `enter` opens the job · GPU watches: `j`/`k`, `n` new watch, `d`/`delete` removes one · Port forwards: `enter` copies the URL again, `ctrl+k` cancels · Prompt: `enter` uses the value, `esc` cancels · Search logs: `tab` to the options, `space` toggles, `enter` in the pattern searches; results: `j`/`k`, `enter` opens the log viewer at the match (`esc` there comes back), `/` edits the search · `F1` in any dialog: help with the dialog's keys · Help: typing filters (`q` included); `?`, `F1` and `esc` close; a glyph legend sits under the keys |
+| Log viewer | `F` follow on/off · `G` bottom + follow · `g` top of the buffer · `o`/`e` stream · `/` search the buffer, `n`/`N` next/previous match (`esc` clears) · `]`/`[` next/previous error or warning line (§5.2.8) · `f` other log files (picked already: switch to it; on it: pick another) · `p` pager · `R` reopen the stream · `y` copy path · `c` connect |
+| Modals | Confirm: `y` / `enter` on Confirm, `n`/`esc` cancel, `tab` moves between params and buttons · Action menu: `j`/`k`/`enter` · Notifications: `j`/`k`, `enter` opens the job (a GPU watch: its host) · Since you were away: `j`/`k`, `enter` opens a failed job, `f` filters the Jobs view to it · Needs you: `j`/`k`, `enter` opens the job · GPU watches: `j`/`k`, `n` new watch, `d`/`delete` removes one · Port forwards: `enter` copies the URL again, `ctrl+k` cancels · Prompt: `enter` uses the value, `esc` cancels · Search logs: `tab` to the options, `space` toggles, `enter` in the pattern searches; results: `j`/`k`, `enter` opens the log viewer at the match (`esc` there comes back), `/` edits the search · Other log files: `j`/`k`, `enter` follows the file, `r` looks again, `esc` closes · `F1` in any dialog: help with the dialog's keys · Help: typing filters (`q` included); `?`, `F1` and `esc` close; a glyph legend sits under the keys |
 | Settings | `tab`/`→` and `shift+tab`/`←` section · `j`/`k`/arrows/wheel move · `space`/`enter` toggle host / next value / open · `t` test host · `a` add ssh target · `p` poll a saved host this run left out · `J`/`K` or `shift+↓`/`↑` reorder saved hosts · `/` filter · `e` config in `$EDITOR` · `?` these keys · `esc`/`q`/`,` close (`esc` first leaves the input line or a pending confirm) |
 
 ### 7.9 Mouse
@@ -4624,6 +4740,7 @@ runfleet agent jobs   [HOST…] [--state S] [--name GLOB] [--workdir PREFIX] [--
                       [--attention] [--all-users]
 runfleet agent job    HOST:ID…                (≤ 10) times, placement, pending reason + advice, exit cause, log paths
 runfleet agent log    HOST:ID [--stream out|err] [--lines N≤400] [--bytes N≤256K] [--head] [--grep 'A|B'] [--path-only]
+                      [--files | --file PATH]  other log files under the job's workdir (below)
 runfleet agent gpus   [HOST…] [--type T] [--min N]
 runfleet agent host   HOST
 runfleet agent events --since DUR|ISO [HOST…]
@@ -4666,7 +4783,39 @@ its cached rows and, in `host_health`, its last success), confirm the flush (`fl
 cancelled the refresh: a lock is never free while its rows are half written). No ssh client: no refresh,
 `no_ssh`. `log` is the one verb that always probes: one `LogService.read` (stat + `tail -c` or the head, in memory,
 never a temp file) of the ref the document shows; none for an unknown / ambiguous / other user's job, `no_log_path`
-or `--path-only`. One end-to-end deadline (`--timeout`) covers refresh, cache read (a daemon thread, abandoned past
+or `--path-only`. **Other log files** (a launcher's stdout holds a few lines while the program writes
+`runs/…/train.log`): `--files` runs one `LogService.find` (§4.7.2) under the job's workdir since its start
+and, for an ended job, up to its end (`core.logs.find_window`, the TUI picker's window; an ended job with no start:
+the 24 h before its end; neither known: the last 24 h; the core adds `FIND_END_SLACK`, so a shared workdir's later jobs
+do not fill the list; text and JSON `find.since` / `find.until` show the window searched), and lists the files newest
+first — path relative to the workdir, size, age, the job's own stdout / stderr marked, other jobs' logs marked with
+`core.logs.known_logs` over the host view's snapshot jobs and ended tasks (`job ID stdout`), `next:` reading
+`core.logs.suggest` (the newest file that is neither; none left: no `next:`) (JSON `files[]{path,size,mtime,age_s,
+stream,other_job}`, `find{job,key,workdir,since,until,fetched_at,truncated,incomplete,path_too_long,redacted,next}`, `log`
+null; a path that prints scrubbed is listed but counted in `redacted`, noted, and never suggested — `--file` cannot
+name it). `truncated` = more than 30 matched (`only the 30 newest files are listed`); `incomplete` = `LogFiles.incomplete`,
+the fixed reason the walk may have missed files (`timed out`, `output cut`, `sort failed`, `some directories
+unreadable`, `find failed (rc N)`), printed `search stopped early (<reason>): N found so far` and never as "no log
+files" — except unreadable directories (the walk finished): `some directories were unreadable: their files are not
+listed`. `--file PATH` (relative to
+the workdir or absolute) is read with the same tail / `--head` / `--grep` as stdout (`LogRef(stream="file",
+source="found")`, JSON `file` = the relative path) only when the find of the same call lists it: `view.under_workdir`
+normalises lexically (POSIX: `..`, `.`, `//`; never `/` itself) and `view.file_refusal` makes a path outside the
+workdir (reason `outside`), the workdir itself (`workdir`: "the path is the job's workdir, not a file") or one ending
+in `/`, `/.`, `/..` (`directory`) `not_listed` before the find (a `--refresh` still polls first); one the find does
+not list is `not_listed` after it (reason `incomplete` when the walk stopped early, `unreadable` when some
+directories were unreadable: it may exist; two probes in all). `--file` takes up to 4096 characters (PATH_MAX) and listed
+paths are never cut (they are the selectors): a longer one is dropped with a note (`path_too_long`); a `next` command
+over a third of the budget becomes prose (`_too_long`). A path that is the stdout / stderr of another user's job on
+the host (`view.foreign_logs`: a shared workdir) is `not_allowed` before the find, like `log` of that job. The
+read is a plain tail of the path: no claim against a symlink swapped in between the find and the read. Own jobs that
+have started only; `--file` never with `--stream` / `--path-only`, `--files` never with `--file` / `--grep` /
+`--head` / `--stream` / `--path-only` (usage errors; `--lines` / `--bytes` are ignored; MCP `read_log` names its
+parameters instead: `list_files does not combine with file`). The `job`
+card of a running job of mine with a workdir whose stdout is quiet — `core.logs.stdout_quiet_for` at
+`_seen_now(job, now)`, the TUI hint's rule: unchanged for `general.stall_after`, or ≤ 4 KiB and unchanged for 10 min —
+adds `next     stdout is quiet; other logs: runfleet agent log ID --files` (dropped first when the card is too
+big; JSON `other_logs`). MCP `read_log` takes `list_files` and `file`. One end-to-end deadline (`--timeout`) covers refresh, cache read (a daemon thread, abandoned past
 it) and the probe; past it plus 5 s the answer is a no-data document. `--demo` polls the simulated fleet in memory
 (instant probes, no lock, no cache).
 
@@ -4686,7 +4835,7 @@ the deadline), nothing found, or a runtime error; 2 usage (unknown verb / host /
 transport: "press c in the TUI"), `hostkey` (never folded into auth), `dns` `unreachable` `timeout` `jump`, `stale`
 (reason `tui_idle` `no_poller` `refresh_skipped` `refresh_failed` …), `disabled`, `no_data`, `not_found` (only when
 the job list is current and the id is inside what the data covers), `outside_coverage`, `listing_failed`,
-`no_log_path`, `partial`, `cache_busy`, `config_mismatch`, `no_ssh`, `error`, `internal`.
+`no_log_path`, `not_listed` (`log --file`: not a file the find lists under the job's workdir; reason `outside` / `workdir` / `directory`: refused before it), `partial`, `cache_busy`, `config_mismatch`, `no_ssh`, `error`, `internal`.
 
 **Budgets** (serialized bytes; text / JSON): brief 2 / 6 KB, jobs 8 / 40 KB (40 rows), job 3 / 6 KB each, log 24 /
 32 KB, host and gpus 4 / 12 KB, events 6 / 24 KB (≤ 100), help 6 / 8 KB. A cut keeps problems, then attention, then
@@ -5215,6 +5364,7 @@ Owner = `Section.owner` (name prefix). All `meta` values are also interpolated (
 | `log.fetch` | `path: str`, `bytes: int` | pager fallback |
 | `log.head` | `path: str`, `bytes: int` | start of a progress-only log (once per followed log) |
 | `log.search` | `paths: list[str]`, `pattern: str` (the ERE grep runs), `icase: bool`, `regex: bool`, `max_matches: int`, `per_file: int`, `budget: int` | cross-job log search, on demand (§4.7.1) |
+| `log.find` | `workdir: str` (normalised), `since: int` (epoch cutoff, slack applied), `until: int \| None` (an ended job: end + 300 s; None = no upper bound), `max_depth: int`, `max_files: int` | other log files under a job's workdir, on demand (§4.7.2) |
 | `slurm.attach.node<i>` (Attach, §7.16) | `mode: "ssh"\|"srun"`, `node: str`, `job_id_raw: str`, `jobs_raw: list[str]` (own running jobs on the node read by node.cg/node.pids, target first), `sluids: list[str]` (parallel to jobs_raw, "" unknown), `inner_nonce: str`, `inner: list[str]` (nested section names in order) | one node hop carrying the nested node script |
 | `slurm.attach.audit` (late, Attach) | `mode: str`, `job_id_raw: str`, `nodes: list[str]` | no-leftover audit |
 | `node.id` `node.cg` `node.ps` `node.pids` `node.map` `node.gpu` `node.apps` `node.self` (nested, owner `node`) | — (answered via the outer section's meta) | §7.16.3 |

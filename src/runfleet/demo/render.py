@@ -11,13 +11,14 @@ command builders (a demo that reused them could not catch a drift between collec
 
 from __future__ import annotations
 
+import fnmatch
 import random
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from runfleet.core import logsearch
+from runfleet.core import logs, logsearch
 from runfleet.demo.world import (MIN_JOB_AGE_S, SimCluster, SimGPU, SimHost, SimJob, SimNode, SimProc,
                                  SimWorkstation, StepUsage, compress_ranges, expand_pattern, free_gpus, gpu_type_at,
                                  node_cpus_used, stable_hash)
@@ -941,6 +942,39 @@ def log_search(h: SimHost, *, paths: Sequence[str], pattern: str, icase: bool, m
             left -= len(lines)
     out.append(f"@@end {left} {budget}\n")
     return Out("".join(out))
+
+
+def _is_dir(h: SimHost, path: str) -> bool:
+    """A directory exists where a job / process works or a simulated file lives below."""
+    prefix = path.rstrip("/") + "/"
+    if any(p.startswith(prefix) for p in h.logs):
+        return True
+    if isinstance(h, SimCluster):
+        return any(j.workdir.rstrip("/") == path.rstrip("/") for j in h.jobs.values())
+    return any(p.cwd.rstrip("/") == path.rstrip("/") for p in h.procs.values())
+
+
+def log_find(h: SimHost, *, workdir: str, since: int, max_depth: int, max_files: int,
+             until: int | None = None) -> Out:
+    """The `log.find` script (core/logs.py, §4.7.2) on the simulated files: ``@@nodir``, or ``%T@ %s %p\\037`` lines of
+    the log-like files under `workdir` (≤ `max_depth` levels, pruned directories skipped, written after `since` and,
+    for an ended job, not after `until`), newest first, at most `max_files` + 1, then ``@@end 0``."""
+    if not _is_dir(h, workdir):
+        return Out("@@nodir\n")
+    prefix = workdir.rstrip("/") + "/"
+    rows: list[tuple[float, str, int]] = []
+    for path, lg in h.logs.items():
+        if not path.startswith(prefix):
+            continue
+        parts = path[len(prefix):].split("/")
+        if len(parts) > max_depth or lg.mtime <= since or (until is not None and lg.mtime > until):
+            continue
+        if any(fnmatch.fnmatchcase(d, pat) for d in parts[:-1] for pat in logs.FIND_PRUNE):
+            continue
+        if any(fnmatch.fnmatchcase(parts[-1], pat) for pat in logs.FIND_NAMES):
+            rows.append((lg.mtime, path, lg.size))
+    rows.sort(key=lambda r: (-r[0], r[1]))
+    return Out("".join(f"{m:.10f} {size} {path}\x1f\n" for m, path, size in rows[:max_files + 1]) + "@@end 0\n")
 
 
 def exitscan(h: SimHost, *, tasks: Sequence[tuple[str, Sequence[str]]], nbytes: int = 8192) -> Out:

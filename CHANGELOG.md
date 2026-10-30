@@ -5,6 +5,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Find other log files of a job.** When a job's stdout holds only a launcher's few lines (`Popen(stdout=fh)` into
+  `runs/<task>/<run>/train.log`), RunFleet can now list the log-like files written under the job's workdir while it
+  ran and follow the one you pick. One bounded probe on the login node or workstation, on demand only: files named
+  `*.log *.out *.err *.stdout *.stderr` (wandb's `output.log` included) at most 5 directories below the workdir
+  (`a/b/c/d/e/train.log`), written since the job started and, for a job that ended, no later than 5 minutes after its
+  end (what later jobs wrote in a shared workdir is theirs; an ended job with no known start: the 24 h before its end), newest first, at most 30; `.git`, virtualenvs, `node_modules`, caches and `site-packages` are skipped,
+  and symlinks are never followed out of the workdir. A search that could not finish says so and why (timed out after
+  12 s, output cut, sort or find failed); a timeout or an output cap keeps what it found, a dropped connection is an
+  error. Unreadable subdirectories are named as such (the files found elsewhere are listed). A failed search is never
+  shown as "no log files". The job's own stdout/stderr are listed and marked, and so are other jobs' logs in the same workdir
+  (`job 3370736 stdout`); neither is ever the suggested file. In the TUI, `f` in the job detail or the log viewer opens
+  the list (your own jobs with a known workdir; the Logs tab of a running job whose stdout went quiet points to it),
+  starting on the file shown or the newest file that is not a job's stdout/stderr (never on another job's log while
+  something else is listed); `enter` follows it in the Logs tab like stdout, `r`
+  looks again, and later `f` switches back to the picked file (on it: pick another), `o`/`e` back to stdout/stderr.
+  For agents, `runfleet agent job` adds a `next` line when the stdout is quiet (the same rule as the TUI),
+  `runfleet agent log JOB --files` lists the files with a `next:` command for the suggested one, and `--file PATH`
+  reads one of the listed files (relative to the workdir or absolute; anything else is refused); MCP `read_log` takes
+  `list_files` / `file`. Needs GNU find (Linux login nodes and workstations); elsewhere the list says "unsupported".
+  Works with `--demo` (k2 job 3372131).
+
 ## [0.8.0] - 2026-10-18
 
 ### Added

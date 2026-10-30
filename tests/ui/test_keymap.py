@@ -12,6 +12,7 @@ from runfleet.ui.screens.action_menu import ActionLogScreen, ActionMenuScreen
 from runfleet.ui.screens.attention import AttentionScreen
 from runfleet.ui.screens.confirm import AttachConfirmScreen, ConfirmScreen
 from runfleet.ui.screens.forwards import ForwardsScreen, PortPromptScreen
+from runfleet.ui.screens.found_logs import FoundLogsScreen
 from runfleet.ui.screens.gpu_watch import WatchesScreen, WatchPromptScreen
 from runfleet.ui.screens.help import HelpScreen
 from runfleet.ui.screens.host_detail import HostDetailScreen
@@ -38,6 +39,7 @@ OWNERS: dict[str, tuple[type, ...]] = {
     "notifications": (NotificationsScreen,), "digest": (DigestScreen,), "attention": (AttentionScreen,),
     "forwards": (ForwardsScreen,), "prompt": (PortPromptScreen, SaveViewScreen, WatchPromptScreen),
     "watches": (WatchesScreen,), "search_prompt": (SearchPromptScreen,), "log_hits": (LogSearchScreen,),
+    "found_logs": (FoundLogsScreen,),
 }
 
 

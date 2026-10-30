@@ -312,6 +312,217 @@ def test_no_cache_flag_is_a_usage_error(env: Env, capsys: pytest.CaptureFixture[
     assert rc == 2 and "--no-cache" in err
 
 
+# ====================================================================================================== other log files
+LAUNCHER = "k2:3372131"          # demo.world.LAUNCHER_JOB: stdout = a launcher's few lines, train.log under the workdir
+TRAIN_REL = "runs/in1k-b16/r0412/s42/train.log"
+
+
+@pytest.fixture
+def probes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The section names every demo probe of the call ran (in order)."""
+    from runfleet.demo.transport import DemoTransport
+
+    seen: list[str] = []
+    real = DemoTransport.probe
+
+    async def spy(self: DemoTransport, script: Any, *, timeout: float) -> Any:
+        seen.extend(s.name for s in script.sections)
+        return await real(self, script, timeout=timeout)
+
+    monkeypatch.setattr(DemoTransport, "probe", spy)
+    return seen
+
+
+def test_log_files_lists_the_launchers_real_log(env: Env, capsys: pytest.CaptureFixture[str],
+                                               probes: list[str]) -> None:
+    from runfleet.demo import world
+
+    assert LAUNCHER == f"k2:{world.LAUNCHER_JOB}" and world.LAUNCHER_TRAIN_LOG.endswith("/" + TRAIN_REL)
+    rc, out, err = run(["--demo", "agent", "log", LAUNCHER, "--files"], capsys)
+    assert (rc, err) == (0, "") and probes.count("log.find") == 1 and "log.peek" not in probes
+    lines = out.splitlines()
+    assert lines[1].startswith(f"# {LAUNCHER} log files under {world.LAUNCHER_WORKDIR} written since ")
+    rows = [ln.split() for ln in lines[2:] if ln.startswith("  ")]
+    assert rows[0][0] == TRAIN_REL                                             # newest first
+    assert any(r[0].startswith("logs/") and r[-1] == "stdout" for r in rows)  # the job's own stdout, marked
+    assert {"eval.err", "output.log"} <= {r[0].rsplit("/", 1)[-1] for r in rows}
+    assert not any(x in out for x in ("metrics.jsonl", ".venv", "r0398", "prep.log"))
+    assert lines[-1] == f"next: runfleet --demo agent log {LAUNCHER} --file {TRAIN_REL}"
+    rc, doc = run_json(["--demo", "agent", "log", LAUNCHER, "--files"], capsys)
+    assert rc == 0 and doc["log"] is None and doc["files"][0]["path"] == TRAIN_REL
+    assert doc["find"]["next"] == f"runfleet --demo agent log {LAUNCHER} --file {TRAIN_REL} --json"
+    assert len(out.encode()) <= 24 << 10 and len(json.dumps(doc).encode()) <= 32 << 10
+
+
+def test_log_file_reads_a_listed_file_like_stdout(env: Env, capsys: pytest.CaptureFixture[str],
+                                                 probes: list[str]) -> None:
+    rc, out, _ = run(["--demo", "agent", "log", LAUNCHER, "--file", TRAIN_REL, "--lines", "5"], capsys)
+    assert rc == 0 and [s for s in probes if s.startswith("log.")] == ["log.find", "log.peek"]
+    assert "# last 5 of" in out and "epoch" in out and out.splitlines()[1].startswith(f"# {LAUNCHER} file /")
+    rc, doc = run_json(["--demo", "agent", "log", LAUNCHER, "--file", TRAIN_REL, "--grep", "epoch"], capsys)
+    assert rc == 0 and doc["log"]["stream"] == "file" and doc["log"]["path"].endswith("/" + TRAIN_REL)
+    assert doc["file"] == TRAIN_REL and doc["log"]["grep"]["total"] > 0
+    rc, doc = run_json(["--demo", "agent", "log", LAUNCHER, "--file", f"./runs/../{TRAIN_REL}", "--head",
+                        "--lines", "3"], capsys)
+    assert rc == 0 and doc["log"]["first_line"] == 1 and len(doc["log"]["lines"]) == 3      # normalised, then read
+    absolute = doc["log"]["path"]
+    rc, doc = run_json(["--demo", "agent", "log", LAUNCHER, "--file", absolute, "--lines", "1"], capsys)
+    assert rc == 0 and doc["file"] == TRAIN_REL
+
+
+@pytest.mark.parametrize(("path", "outside"), [
+    ("../../../../etc/passwd", True), ("/etc/passwd", True), ("/shared/lab/alice/vitfm2/x.log", True),
+    ("runs/in1k-b16/r0412/s42/metrics.jsonl", False),           # not a log name: the find never lists it
+    ("runs/in1k-b16/r0398/s42/train.log", False),               # written 3 days before the job started
+    (".venv/build.log", False),                                 # pruned
+])
+def test_log_file_refuses_what_the_find_does_not_list(env: Env, capsys: pytest.CaptureFixture[str],
+                                                     probes: list[str], path: str, outside: bool) -> None:
+    rc, doc = run_json(["--demo", "agent", "log", LAUNCHER, "--file", path], capsys)
+    err = doc["errors"][0]
+    assert rc == 1 and err["code"] == "not_listed" and doc["log"] is None and err["job"] == LAUNCHER
+    assert "log.peek" not in probes and "log.head" not in probes                # never read
+    assert ("log.find" not in probes) is outside                                  # outside: refused before ssh
+    assert (err["message"] == "the path is outside the job's workdir") is outside
+    assert err["hint"] == f"run runfleet --demo agent log {LAUNCHER} --files and read a file it lists"
+
+
+@pytest.mark.parametrize(("path", "message"), [
+    ("runs/..", "the path is the job's workdir, not a file"), (".", "the path is the job's workdir, not a file"),
+    ("runs/in1k-b16/", "the path names a directory, not a file"),
+])
+def test_log_file_naming_the_workdir_or_a_directory(env: Env, capsys: pytest.CaptureFixture[str],
+                                                   probes: list[str], path: str, message: str) -> None:
+    rc, doc = run_json(["--demo", "agent", "log", LAUNCHER, "--file", path], capsys)
+    assert rc == 1 and doc["errors"][0]["code"] == "not_listed" and doc["errors"][0]["message"] == message
+    assert "log.find" not in probes
+
+
+def test_log_files_of_an_ended_job_in_a_shared_workdir(env: Env, capsys: pytest.CaptureFixture[str]) -> None:
+    """An ended job's list stops at its end (+5 min), other jobs' stdout is marked and never suggested."""
+    _rc, doc = run_json(["--demo", "agent", "jobs", "k2", "--state", "finished", "--limit", "400"], capsys)
+    ended = [j["id"] for j in doc["jobs"] if j["mine"] and j.get("ended_at")]
+    assert ended
+    seen_other = False
+    for jid in ended:
+        rc, got = run_json(["--demo", "agent", "log", jid, "--files"], capsys)
+        if rc != 0:
+            continue
+        find, files = got["find"], got["files"]
+        assert find["until"] is not None and all(f["mtime"] <= find["until"] for f in files)
+        others = {f["path"] for f in files if f["other_job"]}
+        seen_other |= bool(others)
+        assert all(f["other_job"].startswith("job ") for f in files if f["other_job"])
+        nxt = find["next"]
+        assert nxt is None or not any(nxt.split(" --file ", 1)[1].startswith(p + " ") for p in others)
+        assert nxt is None or not any(f["stream"] and nxt.split(" --file ", 1)[1].startswith(f["path"] + " ")
+                                      for f in files)
+    assert seen_other
+
+
+def test_job_card_quiet_line_follows_the_tui_rule(env: Env, capsys: pytest.CaptureFixture[str]) -> None:
+    """A tiny stdout written just now is not "quiet" (round 1 called the demo eval task's 202 B stdout, written 0 s
+    ago, quiet); the launcher's 539 B stdout, unchanged for 13 h, is."""
+    _rc, card = run_json(["--demo", "agent", "job", LAUNCHER], capsys)
+    assert card["jobs"][0]["other_logs"] is not None and card["jobs"][0]["logs"]["stdout_size"] == 539
+    _rc, evals = run_json(["--demo", "agent", "jobs", "labstation", "--name", "eval_ckpt*", "--state", "active"], capsys)
+    fresh = [j["id"] for j in evals["jobs"]]
+    assert fresh
+    _rc, card = run_json(["--demo", "agent", "job", fresh[0]], capsys)
+    assert card["jobs"][0]["logs"]["stdout_size"] == 202 and card["jobs"][0]["other_logs"] is None
+
+
+def test_log_files_of_another_users_job_is_not_allowed(env: Env, capsys: pytest.CaptureFixture[str],
+                                                      probes: list[str]) -> None:
+    _rc, doc = run_json(["--demo", "agent", "jobs", "--all-users", "--state", "all", "--limit", "400"], capsys)
+    other = next(j["id"] for j in doc["jobs"] if not j["mine"] and j["group"] == "active")
+    probes.clear()
+    for flags in (["--files"], ["--file", "x.log"]):
+        rc, doc = run_json(["--demo", "agent", "log", other, *flags], capsys)
+        assert rc == 1 and doc["errors"][0]["code"] == "not_allowed" and doc["files"] is None
+    assert "log.find" not in probes
+
+
+def test_job_card_of_the_launcher_points_at_its_other_logs(env: Env, capsys: pytest.CaptureFixture[str]) -> None:
+    rc, out, _ = run(["--demo", "agent", "job", LAUNCHER], capsys)
+    quiet = [ln for ln in out.splitlines() if "stdout is quiet" in ln]
+    assert rc == 0 and quiet == [f"  next     stdout is quiet; other logs: runfleet --demo agent log {LAUNCHER} --files"]
+    rc, doc = run_json(["--demo", "agent", "job", LAUNCHER], capsys)
+    assert doc["jobs"][0]["other_logs"] == f"runfleet --demo agent log {LAUNCHER} --files --json"
+    printed = shlex.split(quiet[0].split("other logs: ", 1)[1])
+    rc, out, _ = run(printed[1:], capsys)                                       # runnable as printed
+    assert rc == 0 and TRAIN_REL in out
+
+
+@pytest.mark.parametrize(("args", "clash"), [
+    (["--files", "--grep", "x"], "--files does not combine with --grep"),
+    (["--files", "--file", "a.log"], "--files does not combine with --file"),
+    (["--files", "--path-only"], "--files does not combine with --path-only"),
+    (["--file", "a.log", "--stream", "err"], "--file does not combine with --stream"),
+    (["--file", "a.log", "--path-only"], "--file does not combine with --path-only"),
+    (["--file", ""], "file: a path under the job's workdir"),
+    (["--file", "a\nb.log"], "file: a path under the job's workdir"),
+    (["--file", "x" * 4097], "at most 4096 characters"),
+])
+def test_files_flag_clashes_are_usage_errors(env: Env, capsys: pytest.CaptureFixture[str], args: list[str],
+                                            clash: str) -> None:
+    rc, out, err = run(["--demo", "agent", "log", LAUNCHER, *args], capsys)
+    assert rc == 2 and out == "" and clash in err
+
+
+def test_mcp_read_log_lists_and_reads_other_files(env: Env) -> None:
+    from runfleet.agent import mcp
+
+    runner = mcp.command_runner(config_path=None, demo=True, demo_seed=commands.DEMO_SEED, clock=env.clock)
+    listed = runner("log", {"id": LAUNCHER, "list_files": True})
+    assert listed.exit_code == 0 and listed.data["files"][0]["path"] == TRAIN_REL
+    read = runner("log", {"id": LAUNCHER, "file": TRAIN_REL, "lines": 3})
+    assert read.exit_code == 0 and read.data["log"]["stream"] == "file" and len(read.data["log"]["lines"]) == 3
+
+
+def test_mcp_list_files_of_an_ended_job_without_a_start(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 2: an ended job with no start time searched "the last 24 h" from now, inverted against its end for a job
+    that ended 3 days ago (nothing listed, `--file` refused); the TUI searched the 24 h before its end. Both now use
+    core.logs.find_window, and the MCP result shows that window."""
+    from runfleet.agent import mcp, source
+    from runfleet.core.logs import LogService
+
+    end = NOW - timedelta(days=3)
+    real_view, real_find = source.demo_view, LogService.find
+    asked: list[tuple[Any, Any]] = []
+
+    async def demo_view(*a: Any, **kw: Any) -> Any:              # k2:3371193 ended 3 days ago, start unknown
+        fv = await real_view(*a, **kw)
+        hosts = []
+        for hv in fv.hosts:
+            if hv.name == "k2" and hv.snapshot is not None:
+                old = dataclasses.replace(hv.snapshot.jobs["3371193"], start_time=None, end_time=end)
+                hv = dataclasses.replace(hv, snapshot=dataclasses.replace(
+                    hv.snapshot, jobs={**hv.snapshot.jobs, "3371193": old}))
+            hosts.append(hv)
+        return dataclasses.replace(fv, hosts=tuple(hosts))
+
+    async def find(self: Any, host: str, workdir: str, *, since: Any, until: Any = None) -> Any:
+        asked.append((since, until))
+        return await real_find(self, host, workdir, since=since, until=until)
+
+    monkeypatch.setattr(source, "demo_view", demo_view)
+    monkeypatch.setattr(LogService, "find", find)
+    server = mcp.Server(mcp.command_runner(config_path=None, demo=True, demo_seed=commands.DEMO_SEED,
+                                           clock=env.clock))
+    server.handle({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                   "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "orb"}}})
+    reply = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": "read_log", "arguments": {"id": "k2:3371193", "list_files": True}}})
+    assert reply is not None
+    res = reply["result"]
+    assert res["isError"] is False and asked == [(end - timedelta(hours=24), end)]
+    find_ = res["structuredContent"]["find"]
+    assert find_["since"] == (end - timedelta(hours=24, seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert find_["until"] == (end + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert "(job end - 24 h, start unknown) until " in res["content"][0]["text"]
+
+
 # ====================================================================================================== SKILL.md
 def _skill_command_lines() -> list[str]:
     text = SKILL_MD.read_text(encoding="utf-8")

@@ -36,6 +36,10 @@ failed, cancelled and ended; `ended` alone is only a workstation task gone with 
   `<log>.pid`. RunFleet's id for that run is `HOST:p<pid>` (e.g. `labstation:p642229`): the pid printed at launch
   or stored in `<log>.pid`. RunFleet finds the log from the process's open stdout, so `agent log` works while
   the process lives; after it ends, use ws-run's `status.sh` with the log path.
+- A run whose program writes its own log under the run dir (`runs/<task>/<run>/s42/train.log`, wandb's
+  `output.log`) leaves that stdout with a launcher's few lines: `runfleet agent log ID --files` lists the files
+  written under the job's workdir while it ran (other jobs' logs marked), `--file PATH` reads one of them the same
+  bounded way.
   JSON also carries `key` (`labstation:p642229-1788696459`, pid plus start time); either form is accepted.
 - Array task: `HOST:<parent>_<index>`; a whole array: `HOST:<parent>`. Tasks that have not started are one pending
   range row (`k2:31270818_[8-24%2]`): a task id inside it (`k2:31270818_12`) resolves to that range until the task

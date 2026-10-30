@@ -178,6 +178,8 @@ runfleet agent jobs --state finished --since 1d    # everything that ended in th
 runfleet agent jobs --workdir DIR --name 'orb-*'   # one project's jobs
 runfleet agent job k2:2332861                # times, placement, why it pends, why it ended, log paths
 runfleet agent log k2:2332861 --lines 80     # bounded, scrubbed log tail — the only verb that runs ssh (1 probe)
+runfleet agent log k2:2332861 --files        # log files written under the job's workdir while it ran
+runfleet agent log k2:2332861 --file runs/a/s42/train.log   # read one of them like stdout
 runfleet agent gpus --type h100 --min 4      # where N free GPUs of a type are
 runfleet agent host k2                       # login, failing probes, data ages, partitions, load
 runfleet agent events --since 2h             # submitted / started / ended / time low / host problems
@@ -201,6 +203,15 @@ shell — double quotes on Windows; a value starting with `-` as `--name=-x*`; a
 `labstation:p642229-1788696459`), narrowed to one host when one call cannot hold the rest, with a hint in
 parentheses. When an argument holds text RunFleet redacts (a `-c` path with `token=` in it) or the command would not
 fit, no command is printed and the hint says why and what to change ("repeat your command with --limit 37").
+A job started through a launcher (a script that runs the training with `Popen(stdout=fh)` or `> train.log`) leaves
+its stdout with a few lines while the real output goes to a file under the workdir. `agent job` then adds "stdout is
+quiet; other logs: runfleet agent log ID --files", which lists the log-like files (`*.log *.out *.err`, wandb's
+`output.log`, …) written there since the job started (for a job that ended, up to 5 minutes after its end; one with
+no known start time, the day before its end), newest first, the job's own stdout and stderr marked and other jobs' logs marked `job ID stdout`; `next:` suggests the
+newest file that is neither. A search that did not finish says `search stopped early (timed out): N found so far`
+rather than "no log files"; one that could not read some directories says `some directories were unreadable: their
+files are not listed`. `--file PATH` reads one of them with the same tail, `--head` and `--grep`. Only a file
+that list shows can be read (never anything outside the workdir, nor the workdir itself), and only for your own jobs.
 
 - **Freshness.** The answers are as fresh as the cache: a running TUI saves it every 10 s. `--refresh` polls once
   first, but only hosts whose data is over a minute old, that nobody tried to refresh in the last minute (otherwise
@@ -325,6 +336,26 @@ Search the log in your pager with `p` (`less` on the remote host when available,
 the loaded buffer (`n`/`N`); `]`/`[` jump to the next / previous error or warning line (Traceback, `…Error`, CUDA out
 of memory, NCCL errors, `Killed`, OOM kills, `slurmstepd: error`, `DUE TO TIME LIMIT`, preemption, segmentation
 faults, NaN losses, disk quota), which are shown in red (warnings in yellow) here and in the job detail log panes.
+
+**Other log files** (`f` in the job detail and the log viewer). Many jobs print only a launcher's few lines to their
+stdout while the program writes its real log somewhere under the working directory
+(`runs/cifar/warmup/s42/train.log`). `f` lists the files written under the job's workdir while it ran — since it
+started (no known start time: the day before its end), and for a job that ended up to 5 minutes after its end, so a
+later job's files in the same directory stay out (one quick look on the login node or workstation: `*.log`, `*.out`,
+`*.err`, `*.stdout`, `*.stderr`, wandb's `output.log`; a file at most five directories below the workdir, as in
+`a/b/c/d/e/train.log`, never into `.git`, virtualenvs, `node_modules` or caches; the newest 30), newest first, with
+their size and age. The job's own stdout / stderr are marked, and so are other jobs' logs in a shared directory (`job
+2332862 stdout`); the cursor starts on the file shown, else on the newest file that is neither (never on another job's
+log while something else is listed). A search that did not finish says so (`search stopped early (timed out): 3 found
+so far`) rather than "no log file"; unreadable directories are named as such (`some directories were unreadable: their
+files are not listed`), with the 30-file cap when it applies too. `enter` follows the chosen file in the Logs tab (it
+switches there from Summary or GPU), like stdout; the stream line then reads `o` / `e` / `f(train.log)`: `o` and `e`
+go back to stdout and stderr, `f` back to the file, and `f` on the file picks another (`r` in the list looks again).
+RunFleet remembers the chosen file per job until it exits, so `l`, `p` and `y` use it too. Only your own jobs with a
+known workdir; a host where `find` cannot list files by time (BusyBox) says so. When a running job's stdout has been
+quiet for longer than `stall_after` (or holds at most 4 KiB and has not changed for 10 minutes) — the same rule as
+`runfleet agent job`'s "stdout is quiet" — the Logs tab and the log viewer say so: `stdout quiet for 13h; f finds
+other log files in the workdir`.
 
 **Search logs** (palette › *Search logs…*, or `ctrl+f` in the Jobs view). Finds text in the logs of several jobs at
 once: your own jobs on the hosts in scope (`0` all, `1`–`9` one host) that are running or ended within the recent
@@ -466,12 +497,12 @@ Every view lists its keys with `?`. The table below is generated from the same s
 | Fleet view | `↑`/`k` host above · `↓`/`j` host below · `←`/`h` previous host · `→`/`l` next host · `↵` host detail · `a` jobs that need you, fleet-wide: failed, low on time, never start (↵ opens one) · `space` scope to this host · `c` connect (log in: Duo / password prompts) · `C` log in to every host needing auth (one terminal session) · `s` shell on the host · `t` enable / disable polling · `e` error details |
 | Jobs view | `j` move down · `k` move up · `g`/`home` first row · `G`/`end` last row · `^d`/`pgdn` half page down · `^u`/`pgup` half page up · `↵` job detail · `l` log viewer · `p` log in $PAGER · `^f` search recent jobs' logs · `x` action menu · `^k` cancel job / terminate task · `space` mark / unmark · `V` mark all / clear marks · `A` mark the whole array of this row (cancel / hold act on all of it) · `y` copy id · `Y` copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle · Y again = stdout path · `s` shell · `P` forward a port (TensorBoard, Jupyter …) to localhost · `c` connect host · `/` filter jobs · `f` next state preset · `o` next sort column · `O` reverse sort · `z` group by · `u` other users · `w` watch / unwatch (notify on start, end, GPU idle; marked rows too) |
 | GPUs view | `j` move down · `k` move up · `g`/`home` first row · `G`/`end` last row · `↵` owning job / task (or host) · `x` actions of the owning task · `^k` terminate the owning task · `c` connect host · `a` copy CUDA_VISIBLE_DEVICES for N free GPUs of this workstation · `o` next sort column · `O` reverse sort · `/` filter jobs (Jobs view) |
-| Job detail | `[` previous tab · `]` next tab · `o` stdout · `e` stderr · `F` follow on / off · `l` full log viewer · `L` log viewer at the failure line (cause chip) · `/` search the log (opens the log viewer) · `p` log in $PAGER · `r` refresh detail · `x` action menu · `^k` cancel / terminate · `s` shell · `c` connect host · `y` copy id · `Y` copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle · Y again = stdout path · `P` forward a port (TensorBoard, Jupyter …) to localhost · `w` watch / unwatch (notify on start, end, GPU idle) · `a` live readings: auto-refresh on / off (GPU / Procs tab) · `S` live readings: read this job's own GPUs with srun (asks first; one permanent sacct row) |
+| Job detail | `[` previous tab · `]` next tab · `o` stdout · `e` stderr · `f` other log files: pick one written under the job's workdir and follow it (one picked already: switch to it; on it: pick another) · `F` follow on / off · `l` full log viewer · `L` log viewer at the failure line (cause chip) · `/` search the log (opens the log viewer) · `p` log in $PAGER · `r` refresh detail · `x` action menu · `^k` cancel / terminate · `s` shell · `c` connect host · `y` copy id · `Y` copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle · Y again = stdout path · `P` forward a port (TensorBoard, Jupyter …) to localhost · `w` watch / unwatch (notify on start, end, GPU idle) · `a` live readings: auto-refresh on / off (GPU / Procs tab) · `S` live readings: read this job's own GPUs with srun (asks first; one permanent sacct row) |
 | Job detail · GPU / Procs tab (running Slurm job) | `r` read the node now (srun asks first) and refresh the detail · `a` auto-refresh on / off (ssh: every attach_refresh while the tab is open) · `S` read this job's own GPUs with srun when ssh landed in another job (asks first) |
 | Host detail | `^k` terminate the selected task · `x` actions · `s` shell · `c` connect · `t` enable / disable polling · `e` error details |
 | Host detail (workstation) | `↵` open the process' task · `l` log of the selected task · `u` other users' processes · `[` previous GPU: only its processes, all users (click a GPU too) · `]` next GPU · `a` copy CUDA_VISIBLE_DEVICES for N free GPUs · `o` next sort column · `O` reverse sort |
 | Host detail (cluster) | `↵` my job on the selected node · `f` nodes with free GPUs only · `[` previous partition · `]` next partition |
-| Log viewer | `F` follow on / off · `G` bottom + follow · `g` top of the buffer · `o` stdout · `e` stderr · `/` search the buffer · `n` next match · `N` previous match · `[` previous error / warning line · `]` next error / warning line · `p` log in $PAGER · `R` reopen the log stream · `y` copy the path of the shown stream (stdout / stderr) · `c` connect host |
+| Log viewer | `F` follow on / off · `G` bottom + follow · `g` top of the buffer · `o` stdout · `e` stderr · `f` other log files: pick one written under the job's workdir and follow it (one picked already: switch to it; on it: pick another) · `/` search the buffer · `n` next match · `N` previous match · `[` previous error / warning line · `]` next error / warning line · `p` log in $PAGER · `R` reopen the log stream · `y` copy the path of the shown log (stdout / stderr / found file) · `c` connect host |
 | srun confirmation (live readings) | `y` read once (one srun step, one permanent sacct row) · `a` allow srun reads for this job until RunFleet exits (each read still adds a row) · `n`/`esc` cancel · `f1` help (this dialog) |
 | Confirm dialog | `y` confirm · `n`/`esc` cancel · `tab` move between params and buttons · `f1` help (this dialog) |
 | Action menu | `j` move down · `k` move up · `↵` run the action · `letter` pick the entry by its key (copy menu: Y again = stdout path) · `esc`/`q` close · `f1` help (this dialog) |
@@ -484,6 +515,7 @@ Every view lists its keys with `?`. The table below is generated from the same s
 | Port forwards | `j` move down · `k` move up · `↵` copy the local URL again · `^k` cancel the forward (ssh -O cancel, local) · `esc`/`q` close · `f1` help (this dialog) |
 | Search logs (prompt) | `↵` search (in the pattern field) · `tab` move to the options: regular expression, match case · `space` toggle the option under the cursor · `esc` cancel · `f1` help (this dialog) |
 | Search logs (results) | `j` move down · `k` move up · `↵` open the log viewer at this match (esc there comes back here) · `/` edit the search and run it again · `esc`/`q` close · `f1` help (this dialog) |
+| Other log files (f) | `j` move down · `k` move up · `↵` follow this file in the log view (o / e go back to stdout / stderr) · `r` look again (one more probe) · `esc`/`q` close · `f1` help (this dialog) |
 | Prompt | `↵` use this value · `esc` cancel · `f1` help (this dialog) |
 | Dialogs | `esc`/`q` close · `f1` help (this dialog) |
 | Settings | `tab`/`→` next section (Hosts → General → About) · `S-tab`/`←` previous section · `↓`/`j` move down · `↑`/`k` move up · `space`/`↵` toggle host (save + poll / remove) · change value · open · `t` test the host now (read-only probe) · `a` add an ssh target that is not in ~/.ssh/config · `p` poll a saved host this run left out (its saved settings, file unchanged) · `J`/`S-↓` move host down (card order, number keys) · `K`/`S-↑` move host up · `/` filter hosts · `e` open config.toml in $EDITOR · `?`/`f1` these keys · `esc`/`q`/`,` close |

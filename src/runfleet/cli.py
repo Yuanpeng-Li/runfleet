@@ -313,7 +313,8 @@ AGENT_HELP = {
     "brief": "entry point: hosts, my R/PD/failed counts, attention items, free GPUs (≤2 KB)",
     "jobs": "one row per job, filtered",
     "job": "one card per job: times, placement, pending reason, exit cause, log paths (≤10 ids)",
-    "log": "bounded, scrubbed log tail of one job (the one verb that runs ssh: 1 probe)",
+    "log": "bounded, scrubbed log tail of one job (the one verb that runs ssh: 1 probe); --files / --file PATH: "
+           "the other log files under its workdir",
     "gpus": "free GPUs: Slurm per partition and type, workstations per GPU",
     "host": "one host's health: login, failing probes, data ages, partitions, load",
     "events": "submitted / started / ended / time low / host problems since a time",
@@ -369,6 +370,11 @@ def _agent_parsers(sub: Any) -> None:
             v.add_argument("--head", action="store_true", help="the start of the file instead")
             v.add_argument("--grep", metavar="'A|B'", help="literal, case-insensitive alternatives; ≤50 hits")
             v.add_argument("--path-only", action="store_true", help="only the path (no ssh)")
+            v.add_argument("--files", dest="list_files", action="store_true",
+                           help="list the log files written under the job's workdir while it ran (launchers "
+                           "write the real output there, not to stdout); other jobs' logs are marked")
+            v.add_argument("--file", metavar="PATH", help="read that file instead (relative to the workdir, or "
+                           "absolute): only one the --files search lists")
         elif verb == "host":
             v.add_argument("host", metavar="HOST")
         else:
@@ -1166,7 +1172,7 @@ def cmd_status(args: argparse.Namespace, clock: Clock, out: Callable[[str], None
 # ====================================================================================================== agent
 _AGENT_KEYS = ("hosts", "ids", "id", "host", "topic", "refresh", "timeout", "limit", "state", "name", "workdir",
                "partition", "since", "attention", "all_users", "stream", "lines", "bytes", "head", "grep",
-               "path_only", "type", "min")
+               "path_only", "list_files", "file", "type", "min")
 
 
 def cmd_agent(args: argparse.Namespace, clock: Clock, out: Callable[[str], None]) -> int:

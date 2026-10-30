@@ -263,9 +263,12 @@ def test_arguments_reach_the_dispatcher_under_its_names() -> None:
     result(s.handle(call("job_detail", {"ids": ["k2:1", "vega:2"]})))
     result(s.handle(call("runfleet_help", {"topic": "log"})))
     result(s.handle(call("gpu_availability", {"type": "h100", "min": 0})))
+    result(s.handle(call("read_log", {"id": "k2:7", "list_files": True})))
+    result(s.handle(call("read_log", {"id": "k2:7", "file": "runs/a/train.log", "lines": 5, "list_files": None})))
     assert runner.calls == [
         ("log", {"id": "k2:2332861", "lines": 80, "stream": "err", "grep": "nan|oom", "head": False, "timeout": 5}),
-        ("job", {"ids": ["k2:1", "vega:2"]}), ("help", {"topic": "log"}), ("gpus", {"type": "h100", "min": 0})]
+        ("job", {"ids": ["k2:1", "vega:2"]}), ("help", {"topic": "log"}), ("gpus", {"type": "h100", "min": 0}),
+        ("log", {"id": "k2:7", "list_files": True}), ("log", {"id": "k2:7", "file": "runs/a/train.log", "lines": 5})]
     assert isinstance(runner.calls[0][1]["lines"], int)
 
 
@@ -286,6 +289,10 @@ def test_arguments_reach_the_dispatcher_under_its_names() -> None:
     ("read_log", {"id": "k2:1", "timeout": 0}),
     ("read_log", {"id": "k2:1", "timeout": True}),
     ("read_log", {"id": "k2:1", "timeout": mcp.TIMEOUT_MAX + 1}),
+    ("read_log", {"id": "k2:1", "list_files": "yes"}),
+    ("read_log", {"id": "k2:1", "file": 3}),
+    ("read_log", {"id": "k2:1", "file": "x" * 4097}),
+    ("read_log", {"id": "k2:1", "files": True}),                      # the CLI spelling is not an argument
     ("job_detail", {"ids": []}),
     ("job_detail", {"ids": [f"k2:{i}" for i in range(11)]}),
     ("fleet_events", {}),
@@ -297,6 +304,25 @@ def test_schema_violations_are_invalid_params(name: str, arguments: Any) -> None
     reply = server(runner).handle(call(name, arguments))
     assert error_code(reply) == mcp.INVALID_PARAMS
     assert runner.calls == []
+
+
+@pytest.mark.parametrize(("arguments", "text"), [
+    ({"list_files": True, "file": "a.log"}, "list_files does not combine with file"),
+    ({"list_files": True, "grep": "x", "head": True}, "list_files does not combine with grep head"),
+    ({"list_files": True, "path_only": True}, "list_files does not combine with path_only"),
+    ({"file": "a.log", "stream": "err"}, "file does not combine with stream"),
+    ({"file": "a.log", "path_only": True}, "file does not combine with path_only"),
+])
+def test_read_log_usage_errors_name_the_tool_parameters(arguments: dict[str, Any], text: str) -> None:
+    """Round 2: `list_files` with `file` said "--files does not combine with --file" (the CLI's flags); the CLI
+    keeps its flag names."""
+    runner = mcp.command_runner(config_path=None, demo=True, demo_seed=commands.DEMO_SEED, clock=None)
+    r = result(server(runner).handle(call("read_log", {"id": "k2:3372131", **arguments})))
+    assert r["isError"] is True and r["content"][0]["text"] == f"usage error: {text}"
+    with pytest.raises(commands.UsageError) as exc:
+        runner("log", {"id": "k2:3372131", **arguments})
+    assert str(exc.value).startswith("--files does not combine with --" if "list_files" in arguments else
+                                     "--file does not combine with --")
 
 
 def test_dispatcher_errors_are_tool_errors_without_details(caplog: pytest.LogCaptureFixture) -> None:
