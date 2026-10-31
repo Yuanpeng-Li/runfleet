@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-31
+
 ### Added
 - **Find other log files of a job.** When a job's stdout holds only a launcher's few lines (`Popen(stdout=fh)` into
   `runs/<task>/<run>/train.log`), RunFleet can now list the log-like files written under the job's workdir while it
@@ -63,6 +65,11 @@ All notable changes to this project are documented here. The format follows
   cached summary instead of reading sshare / sreport / sbank again. When the screen is short, a cluster with SU
   limits keeps its room before usage-only ones.
   Works with `--demo` (lyra: limits and sbank; k2 and vega: usage only).
+
+### Fixed
+- Cancelling a probe on a session host (the `K` of the session agent) signals the job's process group first and
+  its escaped descendants after, so the job's shell can no longer see its child die and run its next command before
+  its own SIGTERM arrives.
 
 ## [0.8.0] - 2026-10-18
 
@@ -549,7 +556,8 @@ First public release.
   opt-in with `--yes`); `scripts/gen_docs.py`; `scripts/screenshots.py`.
 - CI: lint, types and tests on Python 3.11 and 3.13, plus a packaging job that runs the demo from the built wheel.
 
-[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.0...v0.7.1
