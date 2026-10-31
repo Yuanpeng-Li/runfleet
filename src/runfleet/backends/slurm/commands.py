@@ -162,6 +162,87 @@ def names_cmd(users: Sequence[str]) -> str:
     return "getent passwd " + _q(check_name(u, "user") for u in users) + " | cut -d: -f1,5; true"
 
 
+# account usage (§5.2.11; Account): the user's own accounts and rows only. Accounts are validated (check_name) and
+# passed as one quoted comma list; day counts are integers RunFleet computes; a start is `now-<N>days` or a
+# YYYY-MM-DD formatted from a date object. Nothing taken from remote data is interpolated. No --json (lyra has none).
+MAX_ACCOUNTS = 12
+ACCT_CHUNK_DAYS = 30        # k2 refuses sacct ranges of ~60 days and more ("Too wide of a date range in query", rc 0)
+ACCT_SHARE_MAX_STDOUT = 64_000
+ACCT_SREPORT_MAX_STDOUT = 64_000
+ACCT_SBANK_MAX_STDOUT = 32_000
+ACCT_JOBS_MAX_STDOUT = 2 * 1024 * 1024                  # per chunk: ≈ 12 k rows; a cut chunk marks the report truncated
+ACCT_SHARE_FIELDS = "Account,User,RawUsage,GrpTRESMins,GrpTRESRaw"
+SREPORT_TRES = "cpu,gres/gpu,billing"
+ACCT_JOBS_FIELDS = ["JobIDRaw", "Account", "Partition", "QOS", "State", "ElapsedRaw", "Start", "End", "AllocTRES",
+                    "JobName"]                          # JobName last: free text (split with maxsplit)
+_START_RE = re.compile(r"^(?:now-\d{1,4}days|\d{4}-\d{2}-\d{2})$")
+
+
+def _accts(accounts: Sequence[str]) -> str:
+    if not accounts:
+        raise ValueError("no accounts")
+    if len(accounts) > MAX_ACCOUNTS:
+        raise ValueError(f"more than {MAX_ACCOUNTS} accounts")
+    return shlex.quote(",".join(check_name(a, "account") for a in accounts))
+
+
+def check_start(start: str) -> str:
+    """An sreport start: `now-<N>days` or `YYYY-MM-DD` (built by RunFleet, never copied from remote text)."""
+    if not _START_RE.match(start):
+        raise ValueError(f"invalid report start {start!r}")
+    return start
+
+
+def acct_share_cmd(accounts: Sequence[str]) -> str:
+    """`slurm.acct_share` — one ctld RPC. The account rows (User empty) carry the account's SU limit (GrpTRESMins)
+    and charged usage (GrpTRESRaw); without -a only the user's own rows follow, indented by one space."""
+    return f"sshare -h -P -A {_accts(accounts)} -o {ACCT_SHARE_FIELDS}"
+
+
+def acct_sreport_cmd(accounts: Sequence[str], start: str, *, totals: bool) -> str:
+    """`slurm.acct_sreport[.p<i>]` — one dbd RPC, minutes per TRES, columns Cluster|Account|Login|TRES Name|Used: the
+    Proper Name column (GECOS) is cut on the host and never read. totals=False (periodic summary): the user's rows
+    (`user=`, as verified on all three clusters; `accounts` unused). totals=True (on-demand report): the accounts'
+    total rows (Login empty) and the user's rows; other members' rows never leave the host."""
+    head = "sreport -n -P cluster AccountUtilizationByUser"
+    tail = f"start={check_start(start)} end=now -t Minutes --tres={SREPORT_TRES}"
+    if not totals:
+        return f'{head} user="$(id -un)" {tail} | cut -d\'|\' -f1-3,5-'
+    return (f"{head} accounts={_accts(accounts)} {tail} "
+            "| awk -F'|' -v me=\"$(id -un)\" '$3 == \"\" || $3 == me' | cut -d'|' -f1-3,5-")
+
+
+def acct_sbank_cmd(accounts: Sequence[str]) -> str:
+    """`slurm.acct_sbank` — a site wrapper (lyra): one call per account, each block after `@@acct <account>`; never
+    without -a (that lists every member of every account)."""
+    _accts(accounts)
+    return ("for a in " + _q(check_name(a, "account") for a in accounts)
+            + '; do echo "@@acct $a"; sbank balance statement -a "$a" 2>&1; done; true')
+
+
+def acct_jobs_cmd(older_days: int, newer_days: int, sep: str = SEP) -> str:
+    """`slurm.acct_jobs.c<i>` — one dbd RPC: the user's allocations overlapping [now - older_days, now - newer_days]
+    (at most ACCT_CHUNK_DAYS wide); never-started rows (ElapsedRaw 0) are dropped on the host."""
+    older, newer = int(older_days), int(newer_days)
+    if not 0 <= newer < older or older - newer > ACCT_CHUNK_DAYS:
+        raise ValueError(f"invalid sacct chunk {older}..{newer} days")
+    if len(sep) != 1:                                  # awk reads a longer -F as a regex ("|" alternates)
+        raise ValueError("the sacct separator must be one character")
+    end = "now" if newer == 0 else f"now-{newer}days"
+    col = ACCT_JOBS_FIELDS.index("ElapsedRaw") + 1
+    return (f'sacct -u "$(id -un)" -S now-{older}days -E {end} -X -n -P --delimiter={shlex.quote(sep)} '
+            f"--format={','.join(ACCT_JOBS_FIELDS)} | awk -F{shlex.quote(sep)} '${col} != \"0\"'")
+
+
+def acct_chunks(days: int) -> list[tuple[int, int]]:
+    """(older_days, newer_days) of the sacct chunks covering the last `days` days, oldest first, each at most
+    ACCT_CHUNK_DAYS wide: 7 -> [(7, 0)]; 90 -> [(90, 60), (60, 30), (30, 0)]."""
+    if days <= 0:
+        raise ValueError(f"invalid window {days} days")
+    out = [(min(n + ACCT_CHUNK_DAYS, days), n) for n in range(0, days, ACCT_CHUNK_DAYS)]
+    return out[::-1]
+
+
 # ---------------------------------------------------------------- detect (capability) commands (§5.1)
 VERSION_CMD = "sinfo --version"
 # + the priority settings of §5.2.10 (PriorityType, every PriorityWeight*, flags, decay, max age, usage reset)
@@ -186,6 +267,8 @@ PARTS_CMD = (
     "a=$(printf '%s\\n' \"$p\" | sed '/^$/d' | cut -d'|' -f3 | sort -u | paste -sd, -); i=$((i + 1)); done; "
     "[ -z \"$a\" ] && [ $ok = 1 ] && echo parents=complete; "
     "scontrol show partition -o")
+QOS_CMD = "sacctmgr -n -P show qos format=Name,UsageFactor"   # Account (§5.2.11): charging rules, `name|factor`
+QOS_MAX_STDOUT = 64_000
 SACCTFMT_CMD = "sacct --helpformat"
 GPUTRES_CMD = ("j=$(sacct -u \"$(id -un)\" -S now-14days -E now -X -n -P --format=JobIDRaw,AllocTRES,State "
                "| awk -F'|' '$2 ~ /gres\\/gpu/ && $3 !~ /^(RUNNING|PENDING)/ {j=$1} END {print j}'); "

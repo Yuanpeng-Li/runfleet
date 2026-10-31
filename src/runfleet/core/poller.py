@@ -49,6 +49,9 @@ REDETECT_AFTER = 6 * 3600.0      # background re-detection (§5.1)
 SNAPSHOT_CAPS_MAX_AGE = 3600.0   # `snapshot` reuses cached capabilities this young instead of a detect probe
 DEFAULT_TICK = 15.0              # only if a profile declares no interval group at all
 JOBMETA_TOUCH = 3600.0           # rewrite an unchanged jobmeta row at most hourly (last_seen)
+# detected fields a failing section leaves empty, where the previous detection of the same cluster stays (§5.1:
+# `slurm.qos` unreadable -> the cached UsageFactors are still right; Account, §5.2.11)
+STICKY_CAPS = ("qos_usage_factor",)
 # Busy Slurm controller (§5.4): these sections talk to slurmctld / slurmdbd; their stderr or a slow answer slows the
 # host's Slurm cadence ×2 per busy tick (up to ×8), halved again after BUSY_DECAY healthy ticks
 BUSY_SECTIONS = frozenset({"slurm.squeue", "slurm.sacct", "slurm.sacct_ids", "slurm.sinfo"})
@@ -148,7 +151,7 @@ def merge_outputs(outputs: Sequence[CollectorOutput]) -> CollectorOutput:
     followups: set[str] = set()
     handled: set[str] = set()
     for out in outputs:
-        for f in ("jobs", "gpus", "gpu_procs", "procs", "nodes", "partitions", "metrics"):
+        for f in ("jobs", "gpus", "gpu_procs", "procs", "nodes", "partitions", "metrics", "account"):
             v = getattr(out, f)
             if v is not None:
                 values[f] = v
@@ -173,6 +176,14 @@ def update_monitor_view(view: MonitorView, out: CollectorOutput, now: datetime) 
     if out.metrics is not None:
         changes["metrics"] = out.metrics
     return dataclasses.replace(view, **changes) if changes else view   # type: ignore[arg-type]
+
+
+def _keep_sticky(caps: Capabilities, previous: Capabilities | None) -> Capabilities:
+    """A re-detection that came back without a STICKY_CAPS field keeps the previous value of the same cluster."""
+    if previous is None or previous.cluster_name != caps.cluster_name:
+        return caps
+    keep = {f: getattr(previous, f) for f in STICKY_CAPS if not getattr(caps, f) and getattr(previous, f)}
+    return dataclasses.replace(caps, **keep) if keep else caps
 
 
 def section_error(r: SectionResult, now: datetime) -> HostError | None:
@@ -479,7 +490,7 @@ class HostPoller:
             ident = res.sections.get("detect.id")
             kind = ErrorKind.PARSE if ident is not None and ident.ok else ErrorKind.REMOTE
             return HostError(kind, f"detection failed: {e}"[:80], str(e), at=now)
-        self._set_caps(caps, now)
+        self._set_caps(_keep_sticky(caps, self.caps), now)
         return None
 
     def _set_caps(self, caps: Capabilities, now: datetime) -> None:
@@ -517,6 +528,8 @@ class HostPoller:
             profile.append(cls(self.cfg))
         self.profile = profile
         hs = self.store.hosts.get(self.name)
+        if hs is not None and hs.snapshot is not None and (sched := self.scheduler) is not None:
+            sched.restore_account(hs.snapshot.account)    # warm start (§5.2.11): the persisted account readings
         if hs is not None:            # a collector that left the profile must not keep the host DEGRADED
             owners = {c.name for c in profile}
             kept = {n: st for n, st in hs.status.sections.items() if n.split(".", 1)[0] in owners}

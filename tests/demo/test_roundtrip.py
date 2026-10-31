@@ -126,6 +126,8 @@ async def test_k2_jobs_nodes_and_caps_round_trip(world: DemoWorld, clock: StepCl
     assert (caps.slurm_version, caps.cluster_name, caps.remote_user) == ("25.05.8", "k2", "alice")
     assert caps.slurm_config.get("PreemptMode") == "REQUEUE" and caps.acct_gather_freq_s == 30
     assert caps.gpu_tres is True and ("k2", "lab", "", "gpu-priority,normal,labpi") in caps.associations
+    assert set(caps.qos_usage_factor.values()) == {1.0} and caps.qos_usage_factor["gpu-priority"] == 1.0
+    assert not any(p.billing_weights for p in caps.partition_charges)            # usage only
     out = await d.poll()
     jobs = out["jobs"]
     truth = own_jobs(world, "k2")
@@ -153,6 +155,12 @@ async def test_lyra_array_preemption_and_no_gpu_tres(world: DemoWorld, clock: St
     d = Driver(world, clock, "lyra")
     caps = await d.run_detect()
     assert caps.gpu_tres is False and caps.slurm_config.get("PreemptMode") == "CANCEL"
+    # charging rules (Account, §5.2.11): free and charged partitions on the same nodes, as on the real cluster
+    charges = {p.partition: p for p in caps.partition_charges}
+    assert charges["free-gpu"].allow_qos == ("low", "guest") and not charges["free-gpu"].billing_weights
+    assert charges["gpuxl"].billing_weights == "cpu=1,gres/gpu:L40S=32,gres/gpu:RTX6000=64"
+    assert caps.qos_usage_factor["low"] == 0.0 and caps.qos_usage_factor["high"] == 2.0
+    assert {"free-gpu", "free-gpuxl", "gpu", "gpuxl"} <= set(caps.gpu_partitions)
     jobs = (await d.poll())["jobs"]
     summary = jobs["32377076_[5-12%2]"]
     assert summary.state is JobState.PENDING and summary.job_id_raw == "32377076"

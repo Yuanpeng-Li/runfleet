@@ -326,6 +326,127 @@ now     time_low   lyra:5512           14m left
 | log | ≤ 24 KB | ≤ 32 KB |
 | host / gpus | ≤ 4 KB | ≤ 12 KB |
 | events（≤ 100 条） | ≤ 6 KB | ≤ 24 KB |
+| usage（§3.14） | ≤ 4 KB | ≤ 12 KB |
+| cost（§3.15） | ≤ 2 KB | ≤ 4 KB |
+
+### 3.14 `agent usage [HOST…]`：账户用量（2026-10 增补，DESIGN §5.2.11）
+
+```
+runfleet agent usage [HOST…] [--window 7d|30d|90d|period] [--by experiment|task|name|account|partition|gpu]
+                     [--scope me|account] [--limit N]          通用：--json --refresh --timeout
+```
+
+回答"实验室还剩多少 SU、我在这个窗口里用了多少 CPU-h / GPU-h、钱花在哪个实验上"。
+
+- **单位**：SU = billing × 小时 × 作业 QOS 的 UsageFactor（sshare / sbank 记的就是这个，已乘 factor）。sreport 的
+  billing-h 没乘 factor，**绝不叫 SU**。两者从不混用。
+- **缓存语义**：
+  - 不带 `--refresh`：默认窗口读 `snapshot.account`（周期摘要，`slurm.account` 每 30 min 顺带采一次）；其他窗口、
+    `--by`、`--scope account` 读 `account_reports` 表。
+  - 从没取过的窗口或 rollup：问题码 `no_data`，reason `usage_window_not_cached`，附精确的 `next`
+    （`runfleet agent usage lyra --window 90d --refresh`）。
+  - `--refresh`：先走常规的有界刷新（会顺带跑到期的 `slurm.account`）；当窗口不是默认值、或给了 `--by` /
+    `--scope account` 时，再对每个选中的 Slurm 主机调一次 `FleetAPI.account_report`，经 `source.read_usage`（和
+    `read_log` 一样：一次性的只读 FleetService，`lock_path=False`，`wait_for`；session 主机等登录时报 AUTH，不联网）。
+    结果单行 upsert 进 `account_reports`，下次纯缓存调用就能看到。10 min 内的报告直接用，不算 `stale`。
+- **文本**（≤ 4 KB）：
+
+```
+lyra  limits (sshare + sbank)  usage 2m ago · balances 2m ago · sbank 3h ago
+  pilab_02      298 / 97,885 SU used · 97,587 left · realloc 2027-01-14 · 30d me 205 CPU-h 2.9 GPU-h
+  pilab_02_gpu    0 / 97 SU · 97 left · realloc 2027-04-02 · 30d me 0 CPU-h 0 GPU-h
+  alice           0 / 1,000 SU · 1,000 left · realloc none set · 30d me 27,554 CPU-h 3,256 GPU-h
+  charged gpu (cpu=1,gres/gpu=32) · free free-gpu, free-gpuxl (qos low ×0)
+  top 30d by experiment (GPU-h): orb-swp--train--cifar-warmup--scratch 1,190 (0 SU) · orb-swp--eval--… 512 (0 SU)
+k2  usage only (no SU limits; billing = CPUs)  usage 2m ago
+  lab  recent me 5,859 · account 2,503,304 billing-h (decays, half-life 14d) · 30d me 171,881 CPU-h · 15,434 GPU-h
+labstation  workstation · no scheduler accounting
+```
+
+- **JSON** `runfleet.agent.usage/1`（≤ 12 KB）：`window`、`by`、`hosts_usage[]{host, mode, summary_at, summary_age_s,
+  sbank_at, accounts[]{account, limit_su, used_su, my_used_su, available_su, used_basis, limit_source, next_realloc,
+  realloc_known, period_start, period_inferred, me{cpu_h, gpu_h, billing_h}, account_total}, partitions{charged[], free[]}, rollup{at, jobs,
+  truncated, rows[]{key, jobs, running, cpu_h, gpu_h, gpu_h_by_model, billing_h, charged_su}}, notes[], errors[]}`。
+  未知值为 `null`；`limit_su: null` 表示"不知道有限额"，**不是**"无限"。`used_su` 是整个账户的（sshare 账户行），
+  `my_used_su` 是你自己那一行；usage only 集群上两者差几个数量级（k2：账户 2,503,304 vs 自己 5,859），文本里都带标签
+  （`recent me … · account …`），主机行的 `recent` 只用自己的。`realloc_known: true` 且 `next_realloc: null` = sbank
+  说没有设置（文本 `realloc none set`），不是"未知"。衰减集群上的限额模式不说 used：`298 SU recent (decays, half-life
+  7d) / 97,885 limit`。
+- **失败的部分**：sshare、sreport、所有 sacct 分块都失败的报告不缓存、不写库（返回上一份好的报告并附 errors）；部分失败
+  时失败的部分取自同一窗口上一份好的报告（各自带时间）；一行都没读到且没有旧数据时文本是 `rollup unknown (sacct
+  failing)`（ssh/认证/超时：`jobs not read`；分块被截断或有坏行：`incomplete`），绝不是"no jobs"。某个分块被拒绝、
+  失败、没跑到（NOT_RUN）、被截断或有读不了的行时 `rollup.truncated: true`（下界）。
+- **period 窗口**：lyra 上 = 下次 reallocation − `allocation_period`（默认 365d，按主机配置），是推断值，输出里标
+  `period_inferred: true`；有 `PriorityUsageResetPeriod` 的集群取最近一次重置；都没有则没有 period，回落到 30d。
+- **退出码**：0 正常；4 部分结果（某主机 section 失败或过期）；1 没有数据（所有主机都 `usage_window_not_cached`，
+  或没有 Slurm 主机）。
+- **隐私**：账户总量（`--scope account`）只在远端过滤出账户行，其他成员的行不出主机；sreport 的 Proper Name 列在远端
+  就被 `cut` 掉；sbank 只带 `-a` 调用（不带会列出全部成员）。
+
+### 3.15 `agent cost HOST --partition P …`：提交前估价（2026-10 增补）
+
+```
+runfleet agent cost HOST --partition P [--gpus N] [--gpu-type T] [--cpus N] [--mem 64G] [--nodes N]
+                         [--time DUR] [--qos Q] [--account A]
+```
+
+- **纯计算**：只用缓存里的 caps（`partition_charges`、`qos_usage_factor`、`PriorityFlags`）和用户缓存的 job（推断默认
+  QOS）。**不 ssh、不提交**；`--refresh` 只刷新 caps（超过 6 h 才重新 detect）；caps 超过 24 h 时加注
+  "charging rules as of 2d ago"。
+- **校验在任何 IO 之前**（`build_request`，UsageError，exit 2）：`--time` 必须是正时长；`--gpu-type` 必须是 weights 或
+  GPU 类型里见过的 typed key。分区不认识：exit 1，`not_found`，附已知分区列表。
+- **默认值**（全部写进 notes）：CPU = gpus × DefCpuPerGPU，否则每节点 1；QOS 依次取 `--qos`、分区 AllowQos 只有一个时
+  的那个、你在该分区最近一个 job 的 QOS、`normal`、未知。
+- **文本**（≤ 2 KB）：
+
+```
+lyra gpuxl · 1× L40S · 8 cpus (--cpus) · 24h · qos normal ×1 (your last job on gpuxl)
+  billing 40/h  = cpu 8×1 + gres/gpu:L40S 1×32   (TRESBillingWeights of gpuxl)
+  cost    960 SU for 24h · account pilab_02: 97,587 SU left → 1.0%
+  cheaper free-gpuxl has L40S, qos low ×0 (preemptible)
+```
+
+- **JSON** `runfleet.agent.cost/1`（≤ 4 KB）：`{host, partition, request{…}, billing_per_h, billing_terms[{tres, count,
+  weight}], billing_basis, qos, usage_factor, usage_factor_basis, hours, su, su_min, su_max, account{account, basis,
+  available_su, share_pct, exceeds, as_of}, candidate_accounts[{account, available_su, share_pct, exceeds}],
+  alternatives[], notes[], caps_age_s}`。
+- **账户**：`--account` 不区分大小写（sbank 打印大写名），输出用规范名。估价超过剩余时 `account.exceeds: true`，
+  notes 第一条 `exceeds what is left on pilab_02_gpu (97 SU)`，文本 `account pilab_02_gpu: EXCEEDS what is left (1,560 >
+  97 SU left)`。没选出账户（没给 `--account`、该分区没有你的 job、有限额的账户不止一个）而集群有 SU 限额时，
+  `candidate_accounts` 列出可以在该分区跑的每个有限额账户（剩余最少的在前），文本 `accounts pilab_02_gpu 97 left
+  (EXCEEDS) · …`。
+- **没给 `--gpu-type`** 而分区权重只有 typed GPU（gpuxl：`gres/gpu:L40S=32,gres/gpu:RTX6000=64`，Slurm 按实际分到的
+  型号计费）：给范围 `su_min` / `su_max`，`su` 取最高（文本 `cost 792-1,560 SU for 24h (L40S…RTX6000; pass
+  --gpu-type)`），绝不是只算 CPU 的数。`alternatives` 最多列 2 个有所需 GPU 型号的免费分区，作为证据交给 agent；
+  RunFleet 不替它选，也不提交。
+
+**其他 verb 的增补**：
+- `agent job`：`job_json` 增加 `cost{cpu_h, gpu_h, gpu_h_by_model, billing, billing_basis, qos, usage_factor, billing_h,
+  charged_su, projected_su, free, live, as_of}`；别人的 job 和 task 为 null；数据超过 5 min 不外推（`as_of` =
+  observed_at）。卡片多一行 `cost`，属于 `_CARD_OPTIONAL`（超预算先删）。
+- `agent jobs`：新增 `--sort su|gpuh`；文本不加 SU 列（8 KB 预算）。
+- `agent host`：一行 `account`（同 TUI 主机详情），JSON `host.account`。
+- `runfleet snapshot --json`：`hosts[].account`（增量，schema 仍是 `runfleet.snapshot/1`）。
+- MCP：`account_usage`（verb `usage`）和 `estimate_cost`（verb `cost`），都是只读工具；INSTRUCTIONS 的 verb→tool
+  对照加上 `usage|cost = account_usage, estimate_cost`。
+- skill：`metadata.runfleet-skill: "3"`；SKILL.md 仍 ≤ 80 行（合并行而不是加行）：一条命令行同时写 usage 和 cost，
+  §4 加一条"大批量提交前先 `agent cost` 和 `agent usage`；SU 不够时从 `alternatives` 里建议免费分区——选账户/分区和
+  提交仍由 hpc-run 负责"。
+
+**实现备注（2026-10，WP9）**：
+- `hosts_usage[]` 另有 `state`（`ok` / `usage_window_not_cached` / `not_read` / `off` / `no_accounting` /
+  `workstation` / `no_data`）、`next`（要跑一次的精确命令，JSON 里带 `--json`）、`report_at`、`report_age_s`、
+  `window_start`；什么都不读的主机 `mode` 为 `none`。默认窗口不带 `--by` 时，若缓存里有该窗口的报告（例如 TUI 的
+  Account 屏幕取过），也按 experiment 给出 rollup。`--limit` 是每台主机的 rollup 行数（默认 5，≤ 50）。账户 section
+  失败只输出 `{section, kind, at, age_s}`，从不输出 HostError 的原文。
+- `cost` 的 JSON 另有 `unit`（`SU` / `billing-h`）、`account.basis`、`account.share_pct`、`known_partitions`；默认账户
+  依次取 `--account`、你在该分区最近一个 job 的账户、唯一有 SU 限额的账户。`--refresh` 就是常规的有界刷新（caps 超过
+  `CAPS_MAX_AGE` 才重新 detect，不是 6 h）。`--gpu-type` 不认识时是 usage error（exit 2），但要等读完缓存才能判断。
+  默认 QOS 从不取分区 AllowQos 不允许的 QOS：`normal` 只在允许时取，否则若 AllowQos 的各 QOS factor 相同就取第一个。
+- `usage --refresh` 经 `source.read_usage`：一次性的只读 FleetService 用缓存的 snapshot 预置（`FleetService.seed_host`，
+  不在 FleetAPI 里），报告用 `core.cache.upsert_account_report` 写入（只写有数据的报告）。`--demo` 在内存里取。
+- 数组父 id 下列出的成员 `cost` 为 null（6 KB 预算要装下成员；`agent job HOST:ID_N` 有）。`agent help` 总览每个 verb
+  两行，`help VERB` 给全文。
 
 ## 4. 新鲜度与并发
 
@@ -751,6 +872,7 @@ CREATE TABLE IF NOT EXISTS pollers (host TEXT PRIMARY KEY, pid INTEGER, beat_at 
 | 5 | 改 hpc-run/ws-run | 暂不改。runfleet 独立开发，分工写在 runfleet skill 里；P1 后用 skill 评测检查触发，确实选错再回来考虑方案 B |
 | 6 | P2 events 表（FROZEN/缓存 schema 改动） | 接受 |
 | 7 | MCP | 目前没有不带 shell 的客户端；零依赖 `runfleet mcp` 成本低，就排在 P1 之后（P1.5，约 1–1.5 天） |
+| 8 | 账户用量与 job 花费（2026-10-30） | 新增 `usage`、`cost` 两个 verb 和对应 MCP 工具（§3.14、§3.15）；TUI 键 `$`（加命令面板 "Account usage"）；lyra 式集群（有 sbank）的 period = 下次 reallocation − `allocation_period`（默认 1 年，按主机，标注为推断）；rollup 默认按实验名（去掉 `--s<seed>` / `--a<attempt>`）分组，暂无配置项；`usage --refresh` 写 `account_reports`（单行 upsert）；`--scope account` 显示整个账户的总量（只在按需报告里，成员行不离开远端） |
 
 ## 10. 修订记录（v1 → v2，来自 Codex 审查）
 

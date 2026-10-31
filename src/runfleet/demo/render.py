@@ -12,6 +12,7 @@ command builders (a demo that reused them could not catch a drift between collec
 from __future__ import annotations
 
 import fnmatch
+import math
 import random
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from typing import Literal
 from runfleet.core import logs, logsearch
 from runfleet.demo.world import (MIN_JOB_AGE_S, SimCluster, SimGPU, SimHost, SimJob, SimNode, SimProc,
                                  SimWorkstation, StepUsage, compress_ranges, expand_pattern, free_gpus, gpu_type_at,
-                                 node_cpus_used, stable_hash)
+                                 next_annual, node_cpus_used, stable_hash)
 
 TimeMode = Literal["epoch", "iso"]
 
@@ -49,7 +50,7 @@ SINFO_FIELDS = ["NodeList", "Partition", "StateLong", "CPUsState", "Memory", "Al
 NVIDIA_GPU_FIELDS = ["index", "uuid", "name", "utilization.gpu", "memory.used", "memory.total", "temperature.gpu",
                      "power.draw", "power.limit", "fan.speed", "pstate", "utilization.memory"]
 DETECT_TOOLS = ["squeue", "sacct", "sinfo", "scontrol", "sstat", "scancel", "sacctmgr", "nvidia-smi", "timeout",
-                "less", "stat", "ps", "pgrep", "srun", "ssh", "sprio", "sshare"]
+                "less", "stat", "ps", "pgrep", "srun", "ssh", "sprio", "sshare", "sreport", "sbank"]
 ENV_ALLOW = ("CUDA_VISIBLE_DEVICES", "VIRTUAL_ENV", "CONDA_DEFAULT_ENV", "OMP_NUM_THREADS", "WANDB_PROJECT",
              "WANDB_RUN_ID")
 
@@ -146,19 +147,21 @@ def hostlist(names: Sequence[str]) -> str:
     return ",".join(out)
 
 
-def _tres(job: SimJob, *, typed: bool, alpha: bool) -> str:
-    """TRES string: squeue/scontrol order (`cpu,mem,node,billing,gres/gpu,gres/gpu:t`) or sacct's alphabetical."""
+def _tres(c: SimCluster, job: SimJob, *, typed: bool, alpha: bool) -> str:
+    """TRES string: squeue/scontrol order (`cpu,mem,node,billing,gres/gpu,gres/gpu:t`) or sacct's alphabetical.
+    billing = the partition's TRESBillingWeights over the job's TRES, else its CPUs (Account, §5.2.11)."""
     mem = mem_str(job.mem_mib * job.num_nodes)
     gtype = (job.gpu_type or "").lower()
+    billing = c.billing(job.partition, job.cpus, job.gpus, job.alloc_gpu_type or job.gpu_type)
     if alpha:
-        parts = [f"billing={job.cpus}", f"cpu={job.cpus}"]
+        parts = [f"billing={billing}", f"cpu={job.cpus}"]
         if job.gpus and typed and gtype:
             parts.append(f"gres/gpu:{gtype}={job.gpus}")
         if job.gpus:
             parts.append(f"gres/gpu={job.gpus}")
         parts += [f"mem={mem}", f"node={job.num_nodes}"]
         return ",".join(parts)
-    parts = [f"cpu={job.cpus}", f"mem={mem}", f"node={job.num_nodes}", f"billing={job.cpus}"]
+    parts = [f"cpu={job.cpus}", f"mem={mem}", f"node={job.num_nodes}", f"billing={billing}"]
     if job.gpus:
         parts.append(f"gres/gpu={job.gpus}")
         if typed and gtype:
@@ -242,7 +245,7 @@ def _squeue_value(c: SimCluster, job: SimJob, fieldname: str, now: float, mode: 
         case "BatchHost":
             return job.nodes[0] if running and job.nodes else "n/a"
         case "tres-alloc":
-            return _tres(job, typed=job.typed_alloc if running else job.typed_request, alpha=False)
+            return _tres(c, job, typed=job.typed_alloc if running else job.typed_request, alpha=False)
         case "tres-per-node":
             return _tres_per_node(job)
         case "tres-per-job":
@@ -334,6 +337,8 @@ def _sacct_value(c: SimCluster, job: SimJob, fieldname: str, now: float, mode: T
             return slurm_ts(job.end if job.terminal else None, c.tz, mode, "Unknown")
         case "Elapsed":
             return acct_time(job.elapsed(now))
+        case "ElapsedRaw":
+            return str(int(job.elapsed(now)))
         case "Timelimit":
             return acct_time(job.time_limit_s)
         case "AllocCPUS":
@@ -342,9 +347,9 @@ def _sacct_value(c: SimCluster, job: SimJob, fieldname: str, now: float, mode: T
             return mem_str(job.mem_mib)
         case "ReqTRES":
             typed = job.typed_request if job.typed_req_tres is None else job.typed_req_tres
-            return _tres(job, typed=typed, alpha=True)
+            return _tres(c, job, typed=typed, alpha=True)
         case "AllocTRES":
-            return _tres(job, typed=job.typed_alloc, alpha=True) if started else ""
+            return _tres(c, job, typed=job.typed_alloc, alpha=True) if started else ""
         case "NNodes":
             return str(job.num_nodes)
         case "NodeList":
@@ -530,8 +535,8 @@ def scontrol_record(c: SimCluster, job: SimJob, now: float, mode: TimeMode = "ep
     ntasks = job.step_tasks or 1
     kv += [("NumNodes", str(job.num_nodes)), ("NumCPUs", str(job.cpus)), ("NumTasks", str(ntasks)),
            ("CPUs/Task", str(job.cpus // ntasks)), ("ReqB:S:C:T", "0:0:*:*"),
-           ("ReqTRES", _tres(job, typed=job.typed_request, alpha=False)),
-           ("AllocTRES", _tres(job, typed=job.typed_alloc, alpha=False) if started else "(null)"),
+           ("ReqTRES", _tres(c, job, typed=job.typed_request, alpha=False)),
+           ("AllocTRES", _tres(c, job, typed=job.typed_alloc, alpha=False) if started else "(null)"),
            ("Socks/Node", "*"), ("NtasksPerN:B:S:C", "0:0:*:1" if v >= (26, 5) else "0:0:*:*"),
            ("CoreSpec", "*")]
     per_node: list[tuple[str, str]] = []
@@ -767,6 +772,226 @@ def sprio(c: SimCluster, now: float) -> Out:
     return Out("".join(rows) if rows else "Unable to find jobs matching user/id(s) specified\n")
 
 
+# ====================================================================================================== account usage
+# Account (§5.2.11): what slurmctld (sshare -A), slurmdbd (sreport, sacct) and the site's sbank wrapper know about the
+# user's accounts. All of it comes from one list of the user's allocations — the scenario's own jobs plus the synthetic
+# older ones (`SimCluster.history`) — so sreport, the sacct rollup and sshare agree with each other and with the jobs
+# the Jobs table shows.
+@dataclass(frozen=True, slots=True)
+class _Alloc:
+    job_id: int
+    name: str
+    account: str
+    partition: str
+    qos: str
+    state: str                     # sacct State
+    start: float
+    elapsed_s: float
+    end: float | None              # None = still running
+    tres: str                      # AllocTRES, sacct's alphabetical order
+    cpus: int
+    gpus: int
+    gpu_type: str                  # lower-case gres type ("" = none or untyped)
+    mem_mib: int
+    billing: int
+
+
+_SHARE_KEYS = ("cpu", "mem", "energy", "node", "billing", "fs/disk", "vmem", "pages", "gres/gpu")
+_SBANK_RULE = "-" * 57
+DBD_DOWN = "Problem talking to the database: Connection refused"
+
+
+def _allocs(c: SimCluster, now: float) -> list[_Alloc]:
+    """The user's allocations that ran (ElapsedRaw > 0), by job id."""
+    out: list[_Alloc] = []
+    for h in c.history():
+        gtype = (h.gpu_type or "").lower()
+        mem = mem_str(h.mem_mib)
+        gres = ((f"gres/gpu:{gtype}={h.gpus}," if gtype else "") + f"gres/gpu={h.gpus},") if h.gpus else ""
+        tres = f"billing={h.billing},cpu={h.cpus},{gres}mem={mem},node=1"
+        out.append(_Alloc(h.job_id, h.name, h.account, h.partition, h.qos, h.state, h.start, h.elapsed_s,
+                          h.start + h.elapsed_s, tres, h.cpus, h.gpus, gtype, h.mem_mib, h.billing))
+    for j in c.jobs.values():
+        if j.user != c.user or j.is_summary or not j.started or j.start is None or j.elapsed(now) <= 0:
+            continue
+        gtype = (j.alloc_gpu_type or j.gpu_type or "").lower() if j.typed_alloc else ""
+        out.append(_Alloc(j.job_id, j.name, j.account, j.partition, j.qos, _sacct_state(j), j.start, j.elapsed(now),
+                          j.end if j.terminal else None, _tres(c, j, typed=j.typed_alloc, alpha=True), j.cpus,
+                          j.gpus, gtype, j.mem_mib * j.num_nodes,
+                          c.billing(j.partition, j.cpus, j.gpus, j.alloc_gpu_type or j.gpu_type)))
+    return sorted(out, key=lambda a: a.job_id)
+
+
+def _overlap_min(a: _Alloc, lo: float | None, hi: float) -> float:
+    """Minutes of the allocation's run inside [lo, hi] (lo None: from its start)."""
+    begin = a.start if lo is None else max(a.start, lo)
+    return max(0.0, min(a.start + a.elapsed_s, hi) - begin) / 60
+
+
+def _duration_s(text: str) -> float:
+    """`[D-]HH:MM:SS` (scontrol show config) -> seconds."""
+    days, _, clock = text.rpartition("-")
+    h, m, sec = (int(x) for x in clock.split(":"))
+    return (int(days) if days else 0) * 86400 + h * 3600 + m * 60 + sec
+
+
+def reset_start(c: SimCluster, now: float) -> float | None:
+    """The last PriorityUsageResetPeriod boundary at 00:00 cluster time (WEEKLY: Sunday); None = never reset."""
+    period = c.config.get("PriorityUsageResetPeriod", "NONE").upper()
+    day = datetime.fromtimestamp(now, timezone(c.tz)).replace(hour=0, minute=0, second=0, microsecond=0)
+    starts = {"DAILY": day, "WEEKLY": day - timedelta(days=(day.weekday() + 1) % 7), "MONTHLY": day.replace(day=1),
+              "QUARTERLY": day.replace(month=(day.month - 1) // 3 * 3 + 1, day=1),
+              "YEARLY": day.replace(month=1, day=1)}
+    start = starts.get(period)
+    return start.timestamp() if start is not None else None
+
+
+def _others_share(c: SimCluster, account: str, now: float, half: float,
+                  reset: float | None) -> tuple[float, float, float]:
+    """The other members' (cpu, gres/gpu, billing) minutes in sshare: `others_share` where set (lyra: never decays,
+    never resets, a lifetime figure), else derived from `others_30d` as a steady rate under the same rules as the
+    user's own (since the reset, decayed by the half-life, ×1), so sshare and sreport agree where they must (vega:
+    no decay, every factor 1: sshare since the reset = sreport's account total since then)."""
+    if account in c.others_share:
+        return c.others_share[account]
+    rate = [m / (30 * 86400) for m in c.others_30d.get(account, (0, 0, 0))]
+    span = max(0.0, now - reset) if reset is not None else None
+    if half > 0:                                   # ∫ rate · 0.5^(age/half) over [reset, now]
+        tau = half / math.log(2)
+        seconds = tau * (1 - 0.5 ** (span / half)) if span is not None else tau
+    elif span is not None:
+        seconds = span
+    else:
+        return (0.0, 0.0, 0.0)                     # no decay, no reset, no lifetime figure: nothing known
+    return (rate[0] * seconds, rate[1] * seconds, rate[2] * seconds)
+
+
+def share_usage(c: SimCluster, now: float) -> dict[str, tuple[dict[str, float], dict[str, float]]]:
+    """account -> (the user's TRES minutes, the account's) as sshare's GrpTRESRaw counts them: after the job QOS's
+    UsageFactor (a free job adds nothing), since the last usage reset, decayed by PriorityDecayHalfLife; the other
+    members' share comes from `_others_share`."""
+    half = _duration_s(c.config.get("PriorityDecayHalfLife", "00:00:00"))
+    reset = reset_start(c, now)
+    mine: dict[str, dict[str, float]] = {}
+    for a in _allocs(c, now):
+        factor = c.factor(a.qos)
+        minutes = _overlap_min(a, reset, now)
+        if factor == 0 or minutes <= 0:
+            continue
+        if half > 0:
+            factor *= 0.5 ** ((now - min(now, a.start + a.elapsed_s)) / half)
+        w = minutes * factor
+        b = mine.setdefault(a.account, {})
+        for key, n in (("cpu", a.cpus), ("mem", a.mem_mib), ("node", 1), ("billing", a.billing),
+                       ("gres/gpu", a.gpus), (f"gres/gpu:{a.gpu_type}" if a.gpu_type else "", a.gpus)):
+            if key and n:
+                b[key] = b.get(key, 0.0) + n * w
+    out: dict[str, tuple[dict[str, float], dict[str, float]]] = {}
+    for account in sorted({a for _cl, a, _p, _q in c.associations if a}):
+        me = mine.get(account, {})
+        cpu, gpu, billing = _others_share(c, account, now, half, reset)
+        total = dict(me)
+        for key, extra in (("cpu", cpu), ("mem", cpu * 6144), ("node", cpu // 8), ("billing", billing),
+                           ("gres/gpu", gpu)):
+            total[key] = total.get(key, 0.0) + extra
+        out[account] = (me, total)
+    return out
+
+
+def _grp_tres_raw(c: SimCluster, minutes: Mapping[str, float]) -> str:
+    """GrpTRESRaw: every TRES the cluster tracks, typed GPU keys after `gres/gpu` (lower-case, sorted)."""
+    types = sorted({g.type.lower() for n in c.nodes for g in n.gres})
+    keys = [*_SHARE_KEYS, *(f"gres/gpu:{t}" for t in types), "gres/gpumem", "gres/gpuutil"]
+    return ",".join(f"{k}={int(minutes.get(k, 0.0))}" for k in keys)
+
+
+def acct_share(c: SimCluster, now: float, *, accounts: Sequence[str] = ()) -> Out:
+    """`sshare -h -P -A <accounts> -o Account,User,RawUsage,GrpTRESMins,GrpTRESRaw`: per account its row (User empty:
+    the SU limit in GrpTRESMins where set, the account's usage) and the user's own row (one leading space)."""
+    usage = share_usage(c, now)
+    rows: list[str] = []
+    for account in accounts or list(usage):
+        me, total = usage.get(account, ({}, {}))
+        limit = c.account_limits.get(account)
+        rows.append(f"{account}||{int(total.get('billing', 0.0) * 60)}|{f'billing={limit}' if limit else ''}|"
+                    f"{_grp_tres_raw(c, total)}\n")
+        rows.append(f" {account}|{c.user}|{int(me.get('billing', 0.0) * 60)}||{_grp_tres_raw(c, me)}\n")
+    return Out("".join(rows))
+
+
+def _sreport_rows(cluster: str, account: str, login: str, minutes: Sequence[float]) -> list[str]:
+    return [f"{cluster}|{account}|{login}|{tres}|{int(round(m))}\n"
+            for tres, m in zip(("cpu", "gres/gpu", "billing"), minutes, strict=True)]
+
+
+def acct_sreport(c: SimCluster, now: float, *, accounts: Sequence[str], start: float, totals: bool) -> Out:
+    """`sreport -n -P cluster AccountUtilizationByUser … start=… end=now -t Minutes --tres=cpu,gres/gpu,billing` after
+    the on-host filters (Proper Name cut): the user's rows (totals=False: every account of the user) or, per asked
+    account, its total row (Login empty) then the user's. Not scaled by UsageFactor; a zero row is not printed."""
+    mine: dict[str, list[float]] = {}
+    for a in _allocs(c, now):
+        minutes = _overlap_min(a, start, now)
+        if minutes > 0:
+            v = mine.setdefault(a.account, [0.0, 0.0, 0.0])
+            v[0] += a.cpus * minutes
+            v[1] += a.gpus * minutes
+            v[2] += a.billing * minutes
+    scale = max(0.0, now - start) / (30 * 86400)
+    rows: list[str] = []
+    for account in sorted(accounts if totals else mine):
+        me = mine.get(account, [0.0, 0.0, 0.0])
+        if totals:
+            other = c.others_30d.get(account, (0, 0, 0))
+            total = [m + o * scale for m, o in zip(me, other, strict=True)]
+            if any(round(x) for x in total):
+                rows += _sreport_rows(c.name, account, "", total)
+        if any(round(x) for x in me):
+            rows += _sreport_rows(c.name, account, c.user, me)
+    return Out("".join(rows))
+
+
+def acct_jobs(c: SimCluster, now: float, *, older_days: int, newer_days: int, sep: str = "\x1f") -> Out:
+    """`sacct -u $(id -un) -S now-<a>days -E now[-<b>days] -X -n -P --format=JobIDRaw,Account,Partition,QOS,State,
+    ElapsedRaw,Start,End,AllocTRES,JobName | awk '$6 != "0"'`: the user's allocations overlapping the range. A range
+    wider than `sacct_max_days` is refused on stderr with empty stdout and rc 0 (through the pipe), as k2 does."""
+    if c.sacct_max_days is not None and older_days - newer_days > c.sacct_max_days:
+        return Out("", 0, "sacct: error: Too wide of a date range in query")
+    lo, hi = now - older_days * 86400, now - newer_days * 86400
+    rows = []
+    for a in _allocs(c, now):
+        if a.start > hi or (a.end if a.end is not None else now) < lo:
+            continue
+        end = str(int(a.end)) if a.end is not None else "Unknown"
+        rows.append(sep.join((str(a.job_id), a.account, a.partition, a.qos, a.state, str(int(a.elapsed_s)),
+                              str(int(a.start)), end, a.tres, a.name)) + "\n")
+    return Out("".join(rows))
+
+
+def acct_sbank(c: SimCluster, now: float, *, accounts: Sequence[str], dbd_down: bool = False) -> Out:
+    """`for a in …; do echo "@@acct $a"; sbank balance statement -a "$a" 2>&1; done`: per account the balance table
+    (name upper-cased, SU with thousands separators) and the next reallocation, or `No data found.` without one."""
+    usage = share_usage(c, now)
+    out: list[str] = []
+    for account in accounts:
+        out.append(f"@@acct {account}\n")
+        limit = c.account_limits.get(account)
+        if dbd_down:
+            out.append(f"sbank: error: {DBD_DOWN}\n")
+            continue
+        if limit is None:
+            out.append("No data found.\n")
+            continue
+        used = int(round(usage.get(account, ({}, {}))[1].get("billing", 0.0) / 60))
+        su = limit // 60
+        month_day = c.realloc.get(account)
+        realloc = next_annual(month_day, now, c.tz) if month_day else "No data found."
+        out += ["Account             Usage | Account Limit Available (SUs)\n",
+                "--------------- --------- + ------------- ---------------\n",
+                f"{account.upper():<15} {used:>9,} | {su:>13,} {su - used:>15,}\n",
+                f"{_SBANK_RULE}\n", f"Next reallocation: {realloc}\n", f"{_SBANK_RULE}\n"]
+    return Out("".join(out))
+
+
 def sshare(c: SimCluster) -> Out:
     """`sshare -h -U -u <me> -P -o Account,User,RawShares,NormShares,RawUsage,EffectvUsage,FairShare,LevelFS`."""
     return Out("".join(f"{a}|{c.user}|{raw}|{norm}|{usage}|{eff}|{fs}|{lfs}\n"
@@ -779,7 +1004,8 @@ def sinfo_version(c: SimCluster) -> Out:
 
 
 def scontrol_partitions(c: SimCluster) -> Out:
-    """`printf 'groups=…'; scontrol show partition -o`: open to every account and QOS, TRES from the nodes."""
+    """`printf 'groups=…'; scontrol show partition -o`: open to every account and QOS unless `partition_fields` says
+    otherwise (AllowQos, the partition QoS, TRESBillingWeights: Account, §5.2.11), TRES from the nodes."""
     parts: dict[str, list[SimNode]] = {}
     for node in c.nodes:
         for p in node.partitions:
@@ -788,9 +1014,17 @@ def scontrol_partitions(c: SimCluster) -> Out:
     for name, nodes in parts.items():
         gpus = sum(n.gpu_total for n in nodes)
         tres = f"cpu={sum(n.cpus for n in nodes)},mem={sum(n.mem_mib for n in nodes)}M,node={len(nodes)}"
-        rows.append(f"PartitionName={name} AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL Hidden=NO State=UP "
-                    f"TotalNodes={len(nodes)} TRES={tres}{f',gres/gpu={gpus}' if gpus else ''}\n")
+        extra = c.partition_fields.get(name, {})
+        weights = f" TRESBillingWeights={extra['TRESBillingWeights']}" if "TRESBillingWeights" in extra else ""
+        rows.append(f"PartitionName={name} AllowGroups=ALL AllowAccounts=ALL AllowQos={extra.get('AllowQos', 'ALL')} "
+                    f"QoS={extra.get('QoS', 'N/A')} Hidden=NO State=UP TotalNodes={len(nodes)} "
+                    f"TRES={tres}{f',gres/gpu={gpus}' if gpus else ''}{weights}\n")
     return Out("".join(rows))
+
+
+def sacctmgr_qos(c: SimCluster) -> Out:
+    """`sacctmgr -n -P show qos format=Name,UsageFactor` (Account, §5.2.11)."""
+    return Out("".join(f"{name}|{factor:.6f}\n" for name, factor in c.qos))
 
 
 def slurm_config(c: SimCluster) -> Out:

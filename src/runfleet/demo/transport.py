@@ -14,7 +14,7 @@ import logging
 import random
 import sys
 from collections.abc import AsyncIterator, Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timezone
 from typing import Literal
 
 from runfleet.config import HostConfig
@@ -30,6 +30,8 @@ log = logging.getLogger("runfleet.demo.transport")
 STDERR_CAP = 4096
 CHUNK = 65536
 _DBD_SECTIONS = frozenset({"slurm.sacct", "slurm.sacct_ids", "slurm.steps", "slurm.gputres", "slurm.assoc"})
+# account report sections that ask slurmdbd (Account, §5.2.11); piped on the host, so a refusal exits 0 with stderr
+_DBD_PREFIXES = ("slurm.acct_sreport", "slurm.acct_jobs.")
 _SHELL_SCRIPT = (
     "import sys\n"
     "cmd = ' '.join(a for a in sys.argv[2:] if a)\n"
@@ -258,6 +260,42 @@ def _h_attach_audit(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out
     return c if isinstance(c, Out) else render.attach_audit(c, now, s.meta)
 
 
+def _h_acct_share(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
+    c = _cluster(h, "sshare")
+    return c if isinstance(c, Out) else render.acct_share(c, now, accounts=meta_list(s.meta, "accounts"))
+
+
+def _h_acct_sreport(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
+    """`slurm.acct_sreport` (start `now-<days>days`) and `slurm.acct_sreport.p<i>` (start `YYYY-MM-DD`, 00:00 cluster
+    time)."""
+    c = _cluster(h, "sreport")
+    if isinstance(c, Out):
+        return c
+    day = _meta_str(s.meta, "start", "")
+    if day:
+        start = datetime.fromisoformat(day).replace(tzinfo=timezone(c.tz)).timestamp()
+    else:
+        start = now - _meta_int(s.meta, "days", 30) * 86400
+    return render.acct_sreport(c, now, accounts=meta_list(s.meta, "accounts"), start=start,
+                               totals=bool(s.meta.get("totals")))
+
+
+def _h_acct_jobs(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
+    c = _cluster(h, "sacct")
+    if isinstance(c, Out):
+        return c
+    return render.acct_jobs(c, now, older_days=_meta_int(s.meta, "older_days", 30),
+                            newer_days=_meta_int(s.meta, "newer_days", 0), sep=_meta_str(s.meta, "sep", "\x1f"))
+
+
+def _h_acct_sbank(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
+    c = _cluster(h, "sbank")
+    if isinstance(c, Out):
+        return c
+    return render.acct_sbank(c, now, accounts=meta_list(s.meta, "accounts"),
+                             dbd_down=t.world.has_fault(t.host, "slurmdbd_down"))
+
+
 def _simple(fn: Callable[[SimCluster], Out], tool: str) -> Handler:
     def handler(t: DemoTransport, h: SimHost, s: Section, now: float) -> Out:
         c = _cluster(h, tool)
@@ -282,6 +320,7 @@ HANDLERS: dict[str, Handler] = {
     "slurm.config": _simple(render.slurm_config, "scontrol"),
     "slurm.assoc": _simple(render.sacctmgr_assoc, "sacctmgr"),
     "slurm.parts": _simple(render.scontrol_partitions, "scontrol"),
+    "slurm.qos": _simple(render.sacctmgr_qos, "sacctmgr"),
     "slurm.sacctfmt": _simple(render.sacct_helpformat, "sacct"),
     "slurm.gputres": _h_gputres,
     "nvidia.version": _h_nvidia_version,
@@ -297,6 +336,8 @@ HANDLERS: dict[str, Handler] = {
     "slurm.names": _h_names,
     "slurm.sprio": _h_sprio,
     "slurm.sshare": _simple(render.sshare, "sshare"),
+    "slurm.acct_share": _h_acct_share,
+    "slurm.acct_sbank": _h_acct_sbank,
     "slurm.act.cancel": _h_slurm_act("cancel"),
     "slurm.act.hold": _h_slurm_act("hold"),
     "slurm.act.release": _h_slurm_act("release"),
@@ -323,6 +364,10 @@ def handler_for(name: str) -> Handler | None:
         return _h_kill
     if name.startswith("slurm.attach.node"):
         return _h_attach_node
+    if name.startswith("slurm.acct_sreport"):
+        return _h_acct_sreport
+    if name.startswith("slurm.acct_jobs."):
+        return _h_acct_jobs
     return HANDLERS.get(name)
 
 
@@ -432,7 +477,10 @@ class DemoTransport:
         world = self.world
         if world.has_fault(self.host, "slurmdbd_down") and name in _DBD_SECTIONS:
             tool = "sacctmgr" if name == "slurm.assoc" else "sacct"
-            return Out("", 1, f"{tool}: error: Problem talking to the database: Connection refused")
+            return Out("", 1, f"{tool}: error: {render.DBD_DOWN}")
+        if world.has_fault(self.host, "slurmdbd_down") and name.startswith(_DBD_PREFIXES):
+            tool = "sreport" if name.startswith("slurm.acct_sreport") else "sacct"
+            return Out("", 0, f"{tool}: error: {render.DBD_DOWN}")
         if world.has_fault(self.host, "nvidia_hang") and name in ("nvidia.gpu", "nvidia.apps"):
             hangs = world.nvidia_hangs.get(self.host, 0)
             world.nvidia_hangs[self.host] = hangs + 1

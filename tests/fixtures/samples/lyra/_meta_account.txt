@@ -1,0 +1,27 @@
+## sacctmgr_qos
+cmd: sacctmgr -n -P show qos format=Name,UsageFactor (account field probe; columns trimmed from a wider format)
+rc=0 ms=30
+
+## scontrol_partitions_charges
+cmd: PARTS_CMD (as scontrol_partitions, plus the QoS and TRESBillingWeights fields of the account field probe)
+rc=0 ms=21
+
+## acct_share
+cmd: sshare -h -P -A pilab_02,pilab_02_gpu,pilab_03,alice07 -o Account,User,RawUsage,GrpTRESMins,GrpTRESRaw (account field probe V2; complete lines)
+rc=0
+
+## acct_sreport
+cmd: sreport -n -P cluster AccountUtilizationByUser user="$(id -un)" start=now-30days end=now -t Minutes --tres=cpu,gres/gpu,billing | cut -d'|' -f1-3,5- (account field probe V3; Proper Name cut as the command does)
+rc=0 ms=197
+
+## acct_sreport_totals
+cmd: sreport -n -P cluster AccountUtilizationByUser accounts=pilab_02,pilab_02_gpu,pilab_03,alice07 start=now-30days end=now -t Minutes --tres=cpu,gres/gpu,billing | awk -F'|' -v me="$(id -un)" '$3 == "" || $3 == me' | cut -d'|' -f1-3,5- (account field probe V3c: the real combined output, -t Minutes)
+rc=0 ms=197
+
+## acct_jobs
+cmd: sacct -u "$(id -un)" -S now-30days -E now -X -n -P --delimiter=$'\037' --format=JobIDRaw,Account,Partition,QOS,State,ElapsedRaw,Start,End,AllocTRES,JobName | awk -F$'\037' '$6 != "0"' (projected from sacct_window_m3: the same jobs and fields, ElapsedRaw from Elapsed)
+rc=0 ms=40
+
+## acct_sbank
+cmd: for a in pilab_02 pilab_02_gpu pilab_03 alice07; do echo "@@acct $a"; sbank balance statement -a "$a" 2>&1; done; true (account field probe, one block per account)
+rc=0 ms=724

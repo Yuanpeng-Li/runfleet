@@ -32,7 +32,7 @@ def test_document_shape_and_order() -> None:
     assert list(doc) == ["schema", "generated_at", "hosts"] and doc["schema"] == "runfleet.snapshot/1"
     assert [h["name"] for h in doc["hosts"]] == ["k2", "lyra", "lynx"]
     k2 = doc["hosts"][0]
-    assert list(k2) == ["name", "status", "caps", "jobs", "gpus", "procs", "nodes", "partitions"]
+    assert list(k2) == ["name", "status", "caps", "jobs", "gpus", "procs", "nodes", "partitions", "account"]
     assert len(k2["jobs"]) == 2
     lyra = doc["hosts"][1]
     assert lyra["caps"] is None and lyra["jobs"] == [] and lyra["nodes"] == []

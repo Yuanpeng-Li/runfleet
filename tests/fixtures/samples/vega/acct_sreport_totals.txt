@@ -1,0 +1,6 @@
+vega|pilab||cpu|643589
+vega|pilab||gres/gpu|56976
+vega|pilab||billing|643589
+vega|pilab|alice0001|cpu|643325
+vega|pilab|alice0001|gres/gpu|56976
+vega|pilab|alice0001|billing|643325

@@ -237,7 +237,9 @@ PROBLEM = ["action", "code", "hint", "message", "since"]
 ERROR = ["action", "code", "hint", "host", "job", "message", "since"]
 JOB = sorted("""id key host kind name user mine state group state_text reason reason_text held hints submitted_at started_at
 start_is_estimate ended_at elapsed_s limit_s left_s partition qos account gpus gpu_type cpus mem_bytes nodes gpu_use exit
-workdir logs array restarts observed_at""".split())
+workdir logs array restarts observed_at cost""".split())
+COST = sorted("""cpu_h gpu_h gpu_h_by_model billing billing_basis qos usage_factor billing_h charged_su projected_su free live
+as_of""".split())
 GPU_USE = ["mean_pct", "mem_used_mib", "peak_pct", "sampled_at", "source"]
 EXIT = ["cause", "code", "signal"]
 LOGS = ["merged", "stderr", "stderr_size", "stdout", "stdout_size"]
@@ -273,10 +275,12 @@ def test_brief_keys(demo: FleetView) -> None:
 def test_job_projection_keys(demo: FleetView) -> None:
     d = view.jobs(demo, view.JobFilter(states=view.parse_states("all")), limit=400).data
     assert keys(d) == sorted([*ENVELOPE, "filter", "jobs"])
-    assert keys(d["filter"]) == ["all_users", "attention", "name", "partition", "since", "states", "workdir"]
+    assert keys(d["filter"]) == ["all_users", "attention", "name", "partition", "since", "sort", "states", "workdir"]
     assert d["jobs"]
     for j in d["jobs"]:
         assert keys(j) == JOB
+        assert j["cost"] is None or keys(j["cost"]) == COST
+        assert (j["cost"] is None) == (not j["mine"] or j["kind"] != "slurm")
         assert j["exit"] is None or keys(j["exit"]) == EXIT
         assert j["logs"] is None or keys(j["logs"]) == LOGS
         assert j["array"] is None or keys(j["array"]) == ARRAY
@@ -299,9 +303,9 @@ def test_job_verb_keys(demo: FleetView) -> None:
 def test_host_gpus_events_log_help_keys(demo: FleetView) -> None:
     h = view.host(demo, "k2").data
     assert keys(h) == sorted([*ENVELOPE, "host"])
-    assert keys(h["host"]) == ["data", "enabled", "gpus", "health", "kind", "metrics", "my_jobs", "my_jobs_lower_bound",
-                               "name", "partitions", "problems", "sacct_window_s", "sections", "source", "state",
-                               "state_since"]
+    assert keys(h["host"]) == ["account", "data", "enabled", "gpus", "health", "kind", "metrics", "my_jobs",
+                               "my_jobs_lower_bound", "name", "partitions", "problems", "sacct_window_s", "sections",
+                               "source", "state", "state_since"]
     assert keys(h["host"]["data"]) == ["history_at", "jobs_at", "metrics_at", "nodes_at"]
     assert keys(h["host"]["health"]) == ["consecutive_failures", "controller_slowdown", "last_ok", "latency_s",
                                          "tick_interval_s"]
@@ -1982,11 +1986,11 @@ def test_no_command_advice_states_the_concrete_change() -> None:
     assert tr["advice"] == ("no command printed: a value you gave (--name) holds text RunFleet redacts or escapes; "
                             "repeat your command with --limit 3")
     # text cut but JSON holds everything: "add --json"
-    many = [mk_job("k2", str(1000 + i), name="订单-実験-🚀" * 12) for i in range(36)]
+    many = [mk_job("k2", str(1000 + i), name="订单実験" * 21) for i in range(30)]   # with job cost (~250 B each)
     doc = view.jobs(fleet(mk_host("k2", many), config_path=secret_c), view.JobFilter(), limit=80)
     footer = next(ln for ln in doc.text.splitlines() if ln.startswith("# +"))
     assert doc.data["truncated"] is None and footer == (
-        "# +5 more not shown (output budget): no command printed: the -c path holds text RunFleet redacts or escapes; "
+        "# +3 more not shown (output budget): no command printed: the -c path holds text RunFleet redacts or escapes; "
         "repeat your command with --json; or narrow: --name / --workdir / --partition / --state")
     # another verb's command: what to run after your own -c option
     b = view.brief(replace(fv, hosts=(mk_host("k2", jobs + [mk_job("k2", "7", JobState.FAILED,

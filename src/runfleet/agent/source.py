@@ -28,12 +28,14 @@ from typing import Any, Literal
 from runfleet.agent.data import (REFRESH_FLOOR, STALE_AFTER, FleetView, HostHealth, HostView, Problem,
                                  ProblemCode, Source, dest_hash)
 from runfleet.config import FleetConfig, HostConfig
-from runfleet.core.cache import ENDED_TASKS_RETENTION, Cache, health_from_json, health_json
+from runfleet.core.cache import ENDED_TASKS_RETENTION, Cache, health_from_json, health_json, upsert_account_report
 from runfleet.core.clock import Clock
 from runfleet.core.logs import LogFiles, LogRead, find_window
 from runfleet.core.service import (FleetService, TransportFactory, claim_instance_lock, instance_lock_file,
-                                   lock_attempt_at, lock_holder, release_instance_lock, try_instance_lock_at)
-from runfleet.models import ConnState, ErrorKind, HostError, HostSnapshot, HostStatus, Job, LogRef, from_json
+                                   lock_attempt_at, lock_holder, merged_report, release_instance_lock,
+                                   report_read_nothing, try_instance_lock_at)
+from runfleet.models import (AccountReport, AccountSummary, ConnState, ErrorKind, HostError, HostSnapshot, HostStatus, Job, LogRef,
+                             UsageWindow, from_json)
 from runfleet.transport.base import Transport
 
 log = logging.getLogger("runfleet.agent.source")
@@ -57,17 +59,21 @@ class NoData(Exception):
 class CacheRows:
     """Raw rows of one read-only read (one transaction): host -> (taken_at, snapshot json), host -> (at,
     state, error kind, error), host -> (at, health json), host -> ended task jsons (newest first), host ->
-    caps profile."""
+    caps profile, host -> caps detected_at, host -> window -> account report json (Account, `usage` only)."""
     snapshots: Mapping[str, tuple[float, str]] = field(default_factory=dict)
     status: Mapping[str, tuple[float, str, str | None, str | None]] = field(default_factory=dict)
     health: Mapping[str, tuple[float, str]] = field(default_factory=dict)
     ended: Mapping[str, Sequence[str]] = field(default_factory=dict)
     profiles: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    caps_at: Mapping[str, float] = field(default_factory=dict)
+    reports: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
 
-def read_rows(path: Path, hosts: Sequence[str] | None = None, *, ended_since: float | None = None) -> CacheRows:
+def read_rows(path: Path, hosts: Sequence[str] | None = None, *, ended_since: float | None = None,
+              reports: bool = False) -> CacheRows:
     """Every table `runfleet agent` reads, from the same moment: only the rows of `hosts` (None: all) and the
-    ended tasks since `ended_since` (POSIX time; None: all), both filtered in SQL. Raises NoData (the messages
+    ended tasks since `ended_since` (POSIX time; None: all), both filtered in SQL; `reports`: the on-demand account
+    reports too (`agent usage`; a cache without the table has none). Raises NoData (the messages
     of `runfleet status`) for a missing, locked, damaged or foreign file; a missing newer table (older cache)
     reads as empty and a row that does not decode is dropped on its own."""
     if not path.is_file():
@@ -111,12 +117,20 @@ def read_rows(path: Path, hosts: Sequence[str] | None = None, *, ended_since: fl
                 if h is not None and isinstance(j, str):
                     ended.setdefault(str(h), []).append(j)
         profiles: dict[str, tuple[str, ...]] = {}
+        caps_at: dict[str, float] = {}
         if "caps" in tables:
-            for h, j in db.execute(f"SELECT host, json FROM caps{where}", args):
+            for h, at, j in db.execute(f"SELECT host, detected_at, json FROM caps{where}", args):
                 prof = _profile(j)
                 if h is not None and prof is not None:
                     profiles[str(h)] = prof
-        return CacheRows(snaps, status, health, ended, profiles)
+                if h is not None and isinstance(at, (int, float)):
+                    caps_at[str(h)] = float(at)
+        stored: dict[str, dict[str, str]] = {}
+        if reports and "account_reports" in tables:              # RunFleet <= 0.8.0 lacks it
+            for h, w, j in db.execute(f"SELECT host, window, json FROM account_reports{where}", args):
+                if h is not None and w is not None and isinstance(j, str):
+                    stored.setdefault(str(h), {})[str(w)] = j
+        return CacheRows(snaps, status, health, ended, profiles, caps_at, stored)
     except sqlite3.OperationalError as exc:
         text = str(exc)
         busy = "locked" in text or "busy" in text
@@ -181,6 +195,16 @@ def _health(row: tuple[float, str] | None) -> HostHealth | None:
         return health_from_json(data, at)
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError):    # e.g. a count of 1e309
         return None
+
+
+def _reports(texts: Mapping[str, str]) -> dict[str, AccountReport]:
+    out: dict[str, AccountReport] = {}
+    for window, text in texts.items():
+        try:
+            out[window] = from_json(AccountReport, json.loads(text))
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError) as e:   # drift
+            log.info("agent: dropping unreadable account report (%s)", e)
+    return out
 
 
 def _jobs(texts: Sequence[str]) -> tuple[Job, ...]:
@@ -281,6 +305,8 @@ def host_view(cfg: HostConfig, rows: CacheRows, now: datetime, *, lock_base: Pat
     since: datetime | None = None
     error_kind: str | None = None
     profile: tuple[str, ...] | None = None
+    reports: dict[str, AccountReport] = {}
+    caps_at: float | None = None
     if not identity_ok(health, cfg.ssh):
         health = None
         problems.append(Problem(ProblemCode.CONFIG_MISMATCH, host=name))
@@ -299,11 +325,15 @@ def host_view(cfg: HostConfig, rows: CacheRows, now: datetime, *, lock_base: Pat
             profile = snapshot.caps.profile
         else:
             profile = rows.profiles.get(name)
+        reports = _reports(rows.reports.get(name, {}))
+        caps_at = rows.caps_at.get(name)
     kind = decide_kind(profile, cfg.backend)
     view = HostView(name=name, kind=kind, enabled=cfg.enabled, state=state, state_since=since,
                     error_kind=error_kind, snapshot=snapshot, health=health, ended_tasks=ended,
                     session_transport=is_session_host(cfg),
-                    sacct_window_s=cfg.slurm.sacct_window if kind == "slurm" else None)
+                    sacct_window_s=cfg.slurm.sacct_window if kind == "slurm" else None,
+                    account_usage=cfg.slurm.account_usage, allocation_period_s=cfg.slurm.allocation_period,
+                    caps_at=_ts(caps_at) if caps_at is not None else None, account_reports=reports)
     age = job_age(view, now)
     holder = lock_holder(instance_lock_file(lock_base, cfg.ssh)) if lock_base is not None else None
     source = Source.LIVE if outcome == "refreshed" else decide_source(
@@ -341,15 +371,15 @@ def build_view(config: FleetConfig, hosts: Sequence[HostConfig], rows: CacheRows
 
 
 def load_view(config: FleetConfig, names: Sequence[str] | None, *, cache_path: Path, now: datetime,
-              lock_base: Path | None, outcomes: Mapping[str, str] | None = None) -> FleetView:
+              lock_base: Path | None, outcomes: Mapping[str, str] | None = None, reports: bool = False) -> FleetView:
     """The fleet as the cache has it, hosts in config order (enabled ones, or exactly `names`; ValueError
     for an unknown name). No ssh, no write. An unreadable cache sets FleetView.error (exit 1; CACHE_BUSY
     when locked) and lists the hosts without data. `lock_base` None (demo, no mux dir): nobody can be
     polling, never Source.TUI. `outcomes`: what :func:`refresh` just did (refreshed hosts become
-    Source.LIVE, failures become problems)."""
+    Source.LIVE, failures become problems). `reports`: with the cached account reports (`agent usage`)."""
     hosts = select_hosts(config, names)
     try:
-        rows = read_rows(cache_path, [h.name for h in hosts], ended_since=_ended_since(now))
+        rows = read_rows(cache_path, [h.name for h in hosts], ended_since=_ended_since(now), reports=reports)
     except NoData as exc:
         return build_view(config, hosts, CacheRows(), now, lock_base=lock_base, outcomes=outcomes,
                           error=str(exc))
@@ -631,14 +661,23 @@ def _close_then_unlock(cache: Cache, fds: Sequence[int]) -> None:
 
 # ====================================================================================================== demo
 async def demo_view(config: FleetConfig, transports: TransportFactory, clock: Clock,
-                    names: Sequence[str] | None = None, *, timeout: float = 30) -> FleetView:
+                    names: Sequence[str] | None = None, *, timeout: float = 30,
+                    usage_window: UsageWindow | None = None) -> FleetView:
     """`--demo`: no cache. One read-only collect_once of the simulated fleet in memory (no instance lock);
-    health is synthesised from each live HostStatus, source DEMO."""
+    health is synthesised from each live HostStatus, source DEMO. `usage_window` (`agent usage` asking for a
+    report): that window's account report of every Slurm host, fetched in memory too (instant probes)."""
     hosts = select_hosts(config, names)
     service = FleetService(_readonly(config), transports, clock, None)
     service.lock_path = False
+    reports: dict[str, dict[str, AccountReport]] = {}
     try:
         await service.collect_once([h.name for h in hosts if h.enabled], timeout=timeout)
+        for cfg in hosts if usage_window is not None else ():
+            snap = service.store.hosts[cfg.name].snapshot
+            if cfg.enabled and snap is not None and snap.caps is not None and "slurm" in snap.caps.profile:
+                assert usage_window is not None
+                report = await service.account_report(cfg.name, usage_window)
+                reports[cfg.name] = {usage_window: report, report.window: report}
     finally:
         with contextlib.suppress(Exception):
             await service.stop()
@@ -656,7 +695,9 @@ async def demo_view(config: FleetConfig, transports: TransportFactory, clock: Cl
             name=cfg.name, kind=kind, enabled=cfg.enabled, state=st.state,
             state_since=st.last_attempt or st.last_ok, error_kind=st.error.kind.value if st.error else None,
             snapshot=snap, health=health, source=Source.DEMO,
-            sacct_window_s=cfg.slurm.sacct_window if kind == "slurm" else None))
+            sacct_window_s=cfg.slurm.sacct_window if kind == "slurm" else None,
+            account_usage=cfg.slurm.account_usage, allocation_period_s=cfg.slurm.allocation_period,
+            caps_at=st.last_ok if caps is not None else None, account_reports=reports.get(cfg.name, {})))
     return FleetView(generated_at=now, hosts=tuple(views), recent_window=config.general.recent_window,
                      demo=True, stall_after=config.general.stall_after)
 
@@ -751,3 +792,67 @@ async def find_logs(config: FleetConfig, host: HostView, job: Job, *, clock: Clo
     finally:
         with contextlib.suppress(Exception):
             await service.stop()
+
+
+# ===================================================================================================== usage
+REPORT_MAX_AGE = 600.0               # s: a cached account report this young is used as is (FleetAPI.account_report)
+
+
+async def read_usage(config: FleetConfig, host: HostView, window: UsageWindow, *, clock: Clock, timeout: float,
+                     cache_path: Path | None, transports: TransportFactory | None = None) -> AccountReport | None:
+    """`agent usage --refresh` (§8.7): ONE on-demand account report of `window` (FleetAPI.account_report) in a
+    throwaway read-only service seeded with the host's cached snapshot, under one deadline; a cached report of that
+    window younger than REPORT_MAX_AGE is used as is (no probe). A fetched report is upserted into the cache's
+    `account_reports` (`cache_path` None: not stored). None without anything to ask (no snapshot or capabilities).
+    A session-transport host waiting for a login gets an AUTH error without any network, a deadline that passes a
+    TIMEOUT error: on the cached report when there is one (its age shows), else on an empty one."""
+    snap = host.snapshot
+    if snap is None or snap.caps is None:
+        return None
+    cached = host.account_reports.get(window)
+    if cached is not None and (clock.now() - cached.fetched_at).total_seconds() < REPORT_MAX_AGE:
+        return cached
+
+    def failed(kind: ErrorKind, text: str) -> AccountReport:
+        error = HostError(kind, text, at=clock.now())
+        if cached is not None:
+            return dataclasses.replace(cached, errors=(error,))
+        summary = snap.account or AccountSummary(window="30d" if window == "period" else window,
+                                                 read_at=clock.now(), mode="usage_only")
+        return AccountReport(host=host.name, window=summary.window, fetched_at=clock.now(), summary=summary,
+                             errors=(error,))
+
+    if host.session_transport and host.state in AUTH_STATES:
+        return failed(ErrorKind.HOSTKEY if host.state is ConnState.HOSTKEY else ErrorKind.AUTH,
+                      "login needed (session transport)")
+    cfg = next((h for h in config.hosts if h.name == host.name), None)
+    if cfg is None:
+        raise ValueError(f"unknown host {host.name!r}")
+    from runfleet.transport import make_transport
+
+    service = FleetService(_readonly(config), transports or make_transport, clock, None)
+    service.lock_path = False
+    try:
+        service.seed_host(host.name, snap, host.caps_at)
+        report = await asyncio.wait_for(service.account_report(host.name, window, max_age_s=0), timeout)
+    except TimeoutError:
+        return failed(ErrorKind.TIMEOUT, f"account report timed out after {timeout:.0f} s")
+    finally:
+        with contextlib.suppress(Exception):
+            await service.stop()
+    transport_error = next((e for e in report.errors if e.section is None), None)
+    if transport_error is not None:                        # nothing read: the cached report with the error
+        return failed(transport_error.kind, transport_error.summary) if cached is not None else report
+    if report_read_nothing(report):                       # every section failed: the cached report with the errors
+        return dataclasses.replace(cached, errors=report.errors) if cached is not None else report
+    report = merged_report(report, cached)                # failed parts from the cached report, with their times
+    read = (report.cells or report.account_totals or report.summary.usage
+            or any(b.read_at is not None for b in report.summary.balances))   # something was read, not just named
+    if cache_path is not None and read:
+        try:
+            await asyncio.to_thread(upsert_account_report, cache_path, report)
+            if window != report.window:            # "period" answered as "30d": its cache-only lookup finds it too
+                await asyncio.to_thread(upsert_account_report, cache_path, report, window=window)
+        except sqlite3.Error as e:            # read-only fs, locked: the answer stands, the next call fetches again
+            log.warning("agent: account report of %s not stored: %s", host.name, e)
+    return report

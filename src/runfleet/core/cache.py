@@ -5,6 +5,7 @@ exit) on a worker thread via `asyncio.to_thread`. A corrupt or unreadable databa
 `cache.sqlite.corrupt-<ts>` and replaced by a fresh one (§9 row 27); `Cache(None)` is an in-memory cache.
 `host_status` (each host's connection state) is written for `runfleet status`, which reads the file without this class
 (read-only, `runfleet.status`); `host_health` (per-section freshness, the ssh destination's hash) for `runfleet agent`.
+`account_reports` (Account, §5.2.11) keeps the last on-demand `AccountReport` per (host, window).
 """
 
 from __future__ import annotations
@@ -24,14 +25,15 @@ from typing import Any
 
 from runfleet import paths
 from runfleet.agent.data import HostHealth, SectionHealth
-from runfleet.models import (DETECT_REV, Capabilities, ConnState, HostSnapshot, HostStatus, Job, JobKind, LogRef,
-                             NodeAlloc, from_json, to_json)
+from runfleet.models import (DETECT_REV, AccountReport, Capabilities, ConnState, HostSnapshot, HostStatus, Job,
+                             JobKind, LogRef, NodeAlloc, from_json, to_json)
 
 log = logging.getLogger("runfleet.core.cache")
 
 CAPS_MAX_AGE = 24 * 3600.0
 JOBMETA_RETENTION = 30 * 86400.0
 ENDED_TASKS_RETENTION = 7 * 86400.0
+ACCOUNT_REPORTS_RETENTION = 30 * 86400.0
 OPEN_RETRIES = 3
 
 SCHEMA = """
@@ -44,8 +46,12 @@ CREATE TABLE IF NOT EXISTS jobmeta     (host TEXT, job_id TEXT, job_id_raw TEXT,
 CREATE TABLE IF NOT EXISTS ended_tasks (host TEXT, job_id TEXT, ended_at REAL, json TEXT, PRIMARY KEY (host, job_id));
 CREATE TABLE IF NOT EXISTS host_status (host TEXT PRIMARY KEY, at REAL, state TEXT, error_kind TEXT, error TEXT);
 CREATE TABLE IF NOT EXISTS host_health (host TEXT PRIMARY KEY, at REAL, json TEXT);
+CREATE TABLE IF NOT EXISTS account_reports (host TEXT, window TEXT, at REAL, json TEXT, PRIMARY KEY (host, window));
 """
 HEALTH_V = 1
+# one account report row (§5.2.11): the newest `at` of a (host, window) wins, whoever writes it (Cache, `agent usage`)
+UPSERT_REPORT = ("INSERT INTO account_reports VALUES (?, ?, ?, ?) ON CONFLICT (host, window) DO UPDATE SET "
+                 "at = excluded.at, json = excluded.json WHERE excluded.at >= account_reports.at")
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -134,6 +140,23 @@ def _stored_health(at: Any, text: Any) -> HostHealth | None:
     return health_from_json(data, when)
 
 
+def upsert_account_report(path: Path, report: AccountReport, *, window: str | None = None,
+                          timeout: float = 2.0) -> None:
+    """`runfleet agent usage --refresh` (§5.5, §8.7): one row of `account_reports` written straight into an existing
+    cache file, without this class (no create, migrate or repair); a TUI writing the same key next to it is
+    harmless (newest `at` wins). `window`: the key when it is not the report's own ("period" answered as "30d").
+    Raises sqlite3.Error (a missing file: OperationalError)."""
+    db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=rw", uri=True, timeout=timeout)
+    try:
+        with db:
+            db.execute("CREATE TABLE IF NOT EXISTS account_reports (host TEXT, window TEXT, at REAL, json TEXT, "
+                       "PRIMARY KEY (host, window))")              # a cache of 0.8.0 and older lacks it
+            db.execute(UPSERT_REPORT, (report.host, window or report.window, report.fetched_at.timestamp(),
+                                       json.dumps(to_json(report))))
+    finally:
+        db.close()
+
+
 @dataclass(frozen=True, slots=True)
 class JobMeta:
     """What a Slurm job looked like while it was live (scontrol forgets it MinJobAge after it ends, §5.2.4)."""
@@ -205,6 +228,7 @@ class Cache:
         self._pending_ended: dict[tuple[str, str], tuple[Job, float]] = {}
         self._pending_status: dict[str, tuple[float, str, str | None, str | None]] = {}
         self._pending_health: dict[str, tuple[float, str]] = {}
+        self._pending_reports: dict[tuple[str, str], AccountReport] = {}
         self._db = self._open()
 
     # ------------------------------------------------------------ connection
@@ -317,17 +341,33 @@ class Cache:
                 unreadable.add(host)
         return out
 
+    def load_account_reports(self, host: str) -> dict[str, AccountReport]:
+        """The host's last on-demand account report per window (§5.5; unreadable rows left out), any age."""
+        with self._db_lock:
+            rows = self._db.execute("SELECT window, json FROM account_reports WHERE host = ?", (host,)).fetchall()
+        out: dict[str, AccountReport] = {}
+        for window, text in rows:
+            try:
+                out[window] = from_json(AccountReport, json.loads(text))
+            except (ValueError, TypeError, KeyError) as e:      # schema drift: ignore that row
+                log.info("cache: dropping unreadable account report of %s (%s)", host, e)
+        with self._lock:                                         # queued, not yet written: newer
+            out.update({w: r for (h, w), r in self._pending_reports.items() if h == host})
+        return out
+
     def prune(self, now: datetime) -> None:
         t = now.timestamp()
         with self._db_lock, self._db:
             self._db.execute("DELETE FROM jobmeta WHERE last_seen < ?", (t - JOBMETA_RETENTION,))
             self._db.execute("DELETE FROM ended_tasks WHERE ended_at < ?", (t - ENDED_TASKS_RETENTION,))
             self._db.execute("DELETE FROM caps WHERE detected_at < ?", (t - CAPS_MAX_AGE,))
+            self._db.execute("DELETE FROM account_reports WHERE at < ?", (t - ACCOUNT_REPORTS_RETENTION,))
             # a host's health is its rows' identity (which ssh destination wrote them): it goes only with the last
             # of them, never before (a name reused for another machine after a week would pass for the same one)
             self._db.execute("DELETE FROM host_health WHERE at < ? AND host NOT IN (SELECT host FROM snapshots "
                              "UNION SELECT host FROM caps UNION SELECT host FROM jobmeta "
-                             "UNION SELECT host FROM ended_tasks)", (t - ENDED_TASKS_RETENTION,))
+                             "UNION SELECT host FROM ended_tasks UNION SELECT host FROM account_reports)",
+                             (t - ENDED_TASKS_RETENTION,))
 
     # ------------------------------------------------------------ queued writes
     def put_snapshot(self, host: str, snap: HostSnapshot) -> None:
@@ -365,10 +405,16 @@ class Cache:
         with self._lock:
             self._pending_health[host] = (at.timestamp(), text)
 
+    def put_account_report(self, report: AccountReport, window: str | None = None) -> None:
+        """The last on-demand account report of (host, window) (§5.2.11), written with the next batch; `window`: the
+        key when it is not the report's own ("period" answered as "30d")."""
+        with self._lock:
+            self._pending_reports[(report.host, window or report.window)] = report
+
     def has_pending(self) -> bool:
         with self._lock:
             return bool(self._pending_snapshots or self._pending_caps or self._pending_meta or self._pending_ended
-                        or self._pending_status or self._pending_health)
+                        or self._pending_status or self._pending_health or self._pending_reports)
 
     def flush_sync(self) -> bool:
         """Write the queued batch in one transaction. True when there was nothing to write or it committed; False
@@ -383,11 +429,12 @@ class Cache:
                 ended, self._pending_ended = self._pending_ended, {}
                 status, self._pending_status = self._pending_status, {}
                 health, self._pending_health = self._pending_health, {}
-            if not (snaps or caps or metas or ended or status or health):
+                reports, self._pending_reports = self._pending_reports, {}
+            if not (snaps or caps or metas or ended or status or health or reports):
                 return True
             try:
                 with self._db:
-                    self._write(snaps, caps, metas, ended, status, health)
+                    self._write(snaps, caps, metas, ended, status, health, reports)
             except sqlite3.Error as e:
                 # Keep the batch for the next flush (disk full, read-only fs, a locked db): ended workstation tasks
                 # and job log paths are queued only on change, so dropping them would lose them for good. Newer
@@ -400,13 +447,15 @@ class Cache:
                     self._pending_ended = {**ended, **self._pending_ended}
                     self._pending_status = {**status, **self._pending_status}
                     self._pending_health = {**health, **self._pending_health}
+                    self._pending_reports = {**reports, **self._pending_reports}
                 return False
             return True
 
     def _write(self, snaps: Mapping[str, HostSnapshot], caps: Mapping[str, tuple[Capabilities, float]],
                metas: Mapping[tuple[str, str], JobMeta], ended: Mapping[tuple[str, str], tuple[Job, float]],
                status: Mapping[str, tuple[float, str, str | None, str | None]],
-               health: Mapping[str, tuple[float, str]]) -> None:
+               health: Mapping[str, tuple[float, str]],
+               reports: Mapping[tuple[str, str], AccountReport] | None = None) -> None:
         db = self._db
         self._forget_other_destinations(health)
         db.executemany("INSERT OR REPLACE INTO snapshots VALUES (?, ?, ?)",
@@ -421,6 +470,9 @@ class Cache:
                        [(h, j.key.id, t, json.dumps(to_json(j))) for (h, _), (j, t) in ended.items()])
         db.executemany("INSERT OR REPLACE INTO host_status VALUES (?, ?, ?, ?, ?)",
                        [(h, *row) for h, row in status.items()])
+        # newest `at` wins: `agent usage --refresh` may have upserted a newer row of the same key meanwhile
+        for (h, w), r in (reports or {}).items():
+            db.execute(UPSERT_REPORT, (h, w, r.fetched_at.timestamp(), json.dumps(to_json(r))))
         if health:
             db.executemany("INSERT OR REPLACE INTO host_health (host, at, json) VALUES (?, ?, ?)",
                            [(h, t, self._merged_health(h, text)) for h, (t, text) in health.items()])
@@ -428,7 +480,7 @@ class Cache:
     def _forget_other_destinations(self, health: Mapping[str, tuple[float, str]]) -> None:
         """Inside the write transaction, before this batch's rows: a host whose stored health names another ssh
         destination than the one written now (a second config reusing the display name took it over) loses that
-        destination's capabilities, job metadata and ended tasks, which would otherwise pass for the new one's
+        destination's capabilities, job metadata, ended tasks and account reports, which would otherwise pass for the new one's
         as soon as its health is stored (§8.7). A stored row strict loading cannot read (damaged JSON or time,
         another version, a bad field: the same :func:`_stored_health` check) counts as another destination
         (`strict` loads rejected its rows already); a readable one without `dest_hash` (no identity recorded)
@@ -449,6 +501,7 @@ class Cache:
                 self._db.execute("DELETE FROM caps WHERE host = ?", (host,))
                 self._db.execute("DELETE FROM jobmeta WHERE host = ?", (host,))
                 self._db.execute("DELETE FROM ended_tasks WHERE host = ?", (host,))
+                self._db.execute("DELETE FROM account_reports WHERE host = ?", (host,))
                 log.info("cache: %s now names another ssh destination; its old metadata dropped", host)
 
     def _merged_health(self, host: str, text: str) -> str:
