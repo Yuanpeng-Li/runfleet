@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "runfleet"
-version = "0.8.0"
+version = "0.9.0"
 description = "All your Slurm jobs and GPU machines in one terminal: queues, GPUs, logs and failures over plain SSH"
 readme = "README.md"
 license = "MIT"
