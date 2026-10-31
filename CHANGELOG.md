@@ -5,6 +5,65 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Find other log files of a job.** When a job's stdout holds only a launcher's few lines (`Popen(stdout=fh)` into
+  `runs/<task>/<run>/train.log`), RunFleet can now list the log-like files written under the job's workdir while it
+  ran and follow the one you pick. One bounded probe on the login node or workstation, on demand only: files named
+  `*.log *.out *.err *.stdout *.stderr` (wandb's `output.log` included) at most 5 directories below the workdir
+  (`a/b/c/d/e/train.log`), written since the job started and, for a job that ended, no later than 5 minutes after its
+  end (what later jobs wrote in a shared workdir is theirs; an ended job with no known start: the 24 h before its end), newest first, at most 30; `.git`, virtualenvs, `node_modules`, caches and `site-packages` are skipped,
+  and symlinks are never followed out of the workdir. A search that could not finish says so and why (timed out after
+  12 s, output cut, sort or find failed); a timeout or an output cap keeps what it found, a dropped connection is an
+  error. Unreadable subdirectories are named as such (the files found elsewhere are listed). A failed search is never
+  shown as "no log files". The job's own stdout/stderr are listed and marked, and so are other jobs' logs in the same workdir
+  (`job 3370736 stdout`); neither is ever the suggested file. In the TUI, `f` in the job detail or the log viewer opens
+  the list (your own jobs with a known workdir; the Logs tab of a running job whose stdout went quiet points to it),
+  starting on the file shown or the newest file that is not a job's stdout/stderr (never on another job's log while
+  something else is listed); `enter` follows it in the Logs tab like stdout, `r`
+  looks again, and later `f` switches back to the picked file (on it: pick another), `o`/`e` back to stdout/stderr.
+  For agents, `runfleet agent job` adds a `next` line when the stdout is quiet (the same rule as the TUI),
+  `runfleet agent log JOB --files` lists the files with a `next:` command for the suggested one, and `--file PATH`
+  reads one of the listed files (relative to the workdir or absolute; anything else is refused); MCP `read_log` takes
+  `list_files` / `file`. Needs GNU find (Linux login nodes and workstations); elsewhere the list says "unsupported".
+  Works with `--demo` (k2 job 3372131).
+- **Account usage and job cost (Slurm).** How much your lab has spent, how much is left, what a job costs and which
+  experiment used the GPU-hours, from Slurm's own accounting, read-only and cheapest first. Detection now also reads
+  the charging rules: each QOS's UsageFactor (`sacctmgr show qos`) and each partition's `TRESBillingWeights`, QOS,
+  AllowQos and CPU/memory defaults (cached hosts are detected again once). SU are counted the way sshare and sbank
+  charge them, billing × hours × the UsageFactor of the job's QOS; billing-hours (sreport) are never called SU, a QOS
+  with factor 0 is free, an unknown factor counts ×1 and shows as `×1?`, and on clusters without limits or weights
+  ("usage only") amounts are billing-h. **Job cost** costs no remote command: a `cost` line in the job detail (CPU-h,
+  GPU-h by model, the billing rate and where it comes from, the QOS factor, SU so far and at the time limit), a Cost
+  box on the GPU tab that shows the arithmetic and the account's balance, `su` and `gpuh` columns and sort keys in the
+  Jobs view, and filter terms `su:>10`, `gpuh:>=5`, `acct:`, `part:`. A **periodic summary** (sshare and sreport every
+  30 min, sbank at most every 6 h; `[slurm] account_usage`, `poll_account`) keeps each account's used / limit / left
+  SU, the next reallocation and your CPU-h / GPU-h; it survives restarts and shows as an `account` line in the cluster
+  host detail. **`$` opens the Account screen**: one box per cluster with the balances and a usage bar, what "used"
+  means there (since the last reset, or "recent (decays)"), the charged and free partitions, and **where it went**,
+  grouped by experiment (the job name without its `--s<seed>--a<attempt>` tail), task, name, account, partition or
+  GPU model (`z`), sorted with `o`/`O`; `u` shows the whole account instead of you, `enter` opens the matching jobs.
+  Windows `7d`, `30d`, `90d` and `period` (since the inferred reallocation or the usage reset) switch with `[`/`]`
+  (`[general] usage_window`, `[slurm] allocation_period`); each is one on-demand report (sshare, sreport and ≤ 30-day
+  sacct chunks), cached for 10 minutes and in the cache file, `r` reads again. A failing section shows its last values
+  with a fixed red line, never zeros. **For agents**, `runfleet agent usage [HOST…] [--window] [--by] [--scope
+  me|account]` answers from the cache (another window or grouping says `usage_window_not_cached` with the exact
+  `--refresh` command, which fetches one report and stores it), and `runfleet agent cost HOST --partition P [--gpus N]
+  [--gpu-type T] [--time 24h] …` estimates a job before it is submitted from the cached rules: billing per hour and
+  its terms, SU for the time, the share of the account's SU left and up to two free partitions with that GPU type,
+  every assumption as a note (it never runs ssh and never submits). `agent job` gains a `cost` line and JSON `cost{}`,
+  `agent jobs` `--sort su|gpuh`, `agent host` an `account` line, `runfleet snapshot --json` `hosts[].account`; MCP
+  adds the tools `account_usage` and `estimate_cost`, and the skill (revision 3) asks for `agent cost` and `agent
+  usage` before a large launch and offers a free partition when SU run low, while hpc-run still chooses and submits.
+  The cost says `EXCEEDS` (`account.exceeds`) when a job needs more SU than are left, lists every limited account
+  that may run there when none was picked (`candidate_accounts`), gives a range (`su_min` / `su_max`) when the
+  partition charges by GPU model and no `--gpu-type` was given, and matches `--account` ignoring case. On usage-only
+  clusters "recent" is your own decaying usage, the whole account's labelled beside it; a decaying balance is never
+  called "used". A report whose every part failed never replaces the last good one, a failed part keeps its last
+  good values, a missing job chunk marks the rollup a lower bound, and a restart or `agent --refresh` reuses a fresh
+  cached summary instead of reading sshare / sreport / sbank again. When the screen is short, a cluster with SU
+  limits keeps its room before usage-only ones.
+  Works with `--demo` (lyra: limits and sbank; k2 and vega: usage only).
+
 ## [0.8.0] - 2026-10-18
 
 ### Added

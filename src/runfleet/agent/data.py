@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from runfleet.models import ConnState, HostSnapshot, Job
+from runfleet.models import AccountReport, ConnState, HostSnapshot, Job
 
 # Probe sections whose last success dates one kind of data (HostHealth.data_at). Jobs: the listing that would show a
 # job (`wait.JOB_SECTIONS`); history: accounting; nodes: partitions / free GPUs (sinfo) or workstation GPUs — each
@@ -64,6 +64,8 @@ class ProblemCode(StrEnum):
     NO_LOG_PATH = "no_log_path"
     NO_LOG_YET = "no_log_yet"         # the job has not started / its log file does not exist yet
     NOT_ALLOWED = "not_allowed"       # another user's log
+    NOT_LISTED = "not_listed"         # `log --file`: not a log file found under the job's workdir (outside it, the
+                                      # workdir itself, a directory, or not among the files the find of this call listed)
     PARTIAL = "partial"
     CACHE_BUSY = "cache_busy"
     CONFIG_MISMATCH = "config_mismatch"
@@ -142,6 +144,12 @@ class HostView:
     session_transport: bool = False            # auth recovery is "open the TUI and press c", not `runfleet connect`
     sacct_window_s: float | None = None        # Slurm accounting window (config), None for workstations
     problems: tuple[Problem, ...] = ()         # raised by agent.source (config_mismatch, refresh outcome, …)
+    # Account (§5.2.11; `agent usage` / `cost`): the host's config for it, when its charging rules were detected
+    # (the caps row; None = unknown), and its cached on-demand reports by window (read only for `usage`)
+    account_usage: bool = True                 # [slurm] account_usage
+    allocation_period_s: float = 365 * 86400.0 # [slurm] allocation_period: the "period" window (sbank)
+    caps_at: datetime | None = None
+    account_reports: Mapping[str, AccountReport] = field(default_factory=dict)
 
     def data_at(self, group: str = "jobs") -> datetime | None:
         """When this kind of data was last observed: the section's last success, else (older caches, demo stubs)
@@ -163,6 +171,7 @@ class FleetView:
     hosts: tuple[HostView, ...]                # config order
     recent_window: float                       # general.recent_window (s)
     demo: bool = False
+    stall_after: float = 1800.0                # general.stall_after (s): a running job's stdout this quiet is "quiet"
     error: str | None = None                   # no data at all (missing / busy / unreadable cache): exit 1
     problems: tuple[Problem, ...] = ()         # fleet-level (cache_busy, no_ssh, …)
     # how the call was made, repeated in every command the output suggests (runnable as printed): `-c PATH` (None:

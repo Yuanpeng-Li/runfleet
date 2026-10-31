@@ -14,7 +14,8 @@ from runfleet.config import HostConfig
 from runfleet.core.cache import Cache, JobMeta, enrich_from_meta
 from runfleet.core.store import ChangeSet, FleetStore, HostState, job_material_eq
 from runfleet.models import (DETECT_REV, Capabilities, ConnState, ErrorKind, HostError, HostMetrics, HostSnapshot,
-                             HostStatus, Job, JobKey, JobKind, JobState, LogRef, NodeAlloc, ResourceAlloc, StateGroup)
+                             HostStatus, Job, JobKey, JobKind, JobState, LogRef, NodeAlloc, PartitionCharge,
+                             ResourceAlloc, StateGroup)
 
 T0 = datetime(2026, 9, 7, 10, 42, 37, tzinfo=UTC)
 CAPS = Capabilities(remote_user="me", uid=1, login_host="l", tz_offset=timedelta(0), clock_skew=timedelta(0),
@@ -125,8 +126,15 @@ def test_cache_round_trip(tmp_path: Path) -> None:
     assert c2.load_caps("k2", T0 + timedelta(hours=1)) == (CAPS, T0)
     assert c2.load_caps("k2", T0 + timedelta(hours=25)) is None        # 24 h
     c2.put_caps("vega", replace(CAPS, detect_rev=0), T0)   # detected by an older version: detect again
+    c2.put_caps("lyra", replace(CAPS, detect_rev=2), T0)   # before the charging rules (Account, §5.2.11)
+    rules = replace(CAPS, qos_usage_factor={"low": 0.0, "high": 2.0},
+                    partition_charges=(PartitionCharge("gpu", "cpu=1,gres/gpu=32", "gpu-part", ("normal", "high")),
+                                       PartitionCharge("free", allow_qos=("low",), def_cpu_per_gpu=8)))
+    c2.put_caps("lyra2", rules, T0)
     c2.flush_sync()
     assert c2.load_caps("vega", T0 + timedelta(minutes=1)) is None
+    assert c2.load_caps("lyra", T0 + timedelta(minutes=1)) is None
+    assert c2.load_caps("lyra2", T0 + timedelta(minutes=1)) == (rules, T0)
     assert c2.load_jobmeta("k2") == {"1": meta}
     assert c2.load_ended_tasks("lynx", T0 - timedelta(hours=1)) == {"p1-2": ended}
     c2.prune(T0 + timedelta(days=8))

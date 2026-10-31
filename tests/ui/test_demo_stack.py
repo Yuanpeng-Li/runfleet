@@ -195,3 +195,44 @@ async def test_real_stack_forward_the_demo_tensorboard(stack: Any, monkeypatch: 
     fwd = service.forwards()
     assert len(fwd) == 1 and fwd[0].node == "n-38-01" and fwd[0].remote_port == 6006
     assert copied == [fwd[0].url] and any("demo forward" in e for e in world.events)
+
+
+async def test_real_stack_find_other_log_files(stack: Any) -> None:
+    """The field report on the real stack (§4.7.2): the demo launcher job's stdout is 6 lines from 13 h ago; the Logs
+    tab says so, `f` lists what `log.find` found under its workdir (train.log first), `enter` follows train.log."""
+    from runfleet.demo.world import LAUNCHER_JOB, LAUNCHER_TRAIN_LOG, LAUNCHER_WORKDIR
+    from runfleet.ui.screens.found_logs import FoundLogsScreen
+    from runfleet.ui.screens.job_detail import JobDetailScreen
+
+    app, service, _world, _clock, pilot = stack
+    key = JobKey("k2", str(LAUNCHER_JOB))
+    assert service.store.job(key) is not None
+    app.open_job(key)
+    for _ in range(40):
+        await pilot.pause(0.05)
+    detail = app.screen
+    assert isinstance(detail, JobDetailScreen)
+    hint = detail.query_one("#logs-hint")
+    assert hint.display and str(hint.render()).startswith("stdout quiet for 13h; f finds other log files")
+    await pilot.press("f")
+    for _ in range(60):
+        await pilot.pause(0.05)
+        if isinstance(app.screen, FoundLogsScreen) and app.screen.result is not None:
+            break
+    picker = app.screen
+    assert isinstance(picker, FoundLogsScreen) and picker.result is not None
+    paths = [f.path for f in picker.result.files]
+    assert paths[0] == LAUNCHER_TRAIN_LOG and all(p.startswith(LAUNCHER_WORKDIR + "/") for p in paths)
+    assert any(p.endswith("/eval.err") for p in paths) and any(p.endswith("/files/output.log") for p in paths)
+    assert not any("/.venv" in p or p.endswith(".jsonl") for p in paths)
+    rows = [str(picker.query_one("#fl-list").get_option_at_index(i).prompt) for i in range(len(paths))]
+    assert rows[0].startswith("runs/in1k-b16/r0412/s42/train.log")
+    await pilot.press("enter")
+    for _ in range(60):
+        await pilot.pause(0.05)
+        if app.screen is detail and detail.query_one("#logs-log", LogView).count > 0:
+            break
+    assert app.screen is detail and detail.stream == "file" and not hint.display
+    assert detail.follower is not None and detail.follower.ref is not None
+    assert detail.follower.ref.path == LAUNCHER_TRAIN_LOG and detail.follower.ref.source == "found"
+    assert detail.query_one("#logs-log", LogView).count > 0

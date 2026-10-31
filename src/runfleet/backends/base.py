@@ -11,8 +11,8 @@ from typing import ClassVar, Literal
 
 from runfleet.config import GeneralSettings, HostConfig
 from runfleet.errors import AttachBlocked
-from runfleet.models import (GPU, ActionResult, AttachMode, Capabilities, HostError, HostMetrics, Job, JobDetail,
-                             JobKey, JobLive, Node, PartitionSummary, Proc)
+from runfleet.models import (GPU, AccountReport, AccountSummary, ActionResult, AttachMode, Capabilities, HostError,
+                             HostMetrics, Job, JobDetail, JobKey, JobLive, Node, PartitionSummary, Proc, UsageWindow)
 from runfleet.probe.section import ProbeScript, Section, SectionResult
 
 class Role(StrEnum):
@@ -68,6 +68,7 @@ class CollectorOutput:
     followups: frozenset[str] = frozenset()        # cadence groups (event or interval) to run at the next tick
     handled: frozenset[str] = frozenset()          # sections whose non-zero exit the collector read as an answer
                                                    # (sprio: no job pending / not multifactor): ok, no backoff
+    account: AccountSummary | None = None          # Account (§5.2.11): scheduler only; None = unchanged
 # Merge rule (poller, one tick): EVERY collector of the profile has ingest() called on EVERY tick, with an empty
 # results map when none of its sections ran. Outputs are applied monitors first (profile order), scheduler last; for
 # every Optional field the last non-None value wins; errors are concatenated; followups and handled are unioned.
@@ -178,6 +179,27 @@ class SchedulerCollector(Collector):
         remote failures: they become JobLive.errors / NodeInspect.errors. May update the collector's own state (the
         GPU model from nvidia-smi becomes the job's alloc.gpu_type, gpu_type_source="nvidia-smi", on later ticks)."""
         raise NotImplementedError(f"{self.name}: attach is not supported")
+
+    # ---- Account (§5.2.11). Not abstract: the defaults mean "no scheduler accounting" (workstations, third-party
+    # collectors). Core calls these only for FleetAPI.account_report; both are sans-IO.
+    def account_sections(self, window: UsageWindow, ctx: HostContext) -> list[Section]:
+        """Sections of one on-demand account report for `window`, rendered as ONE probe (purpose="account");
+        [] = nothing to read (no accounting, disabled in config, no account). A "period" without a known start is
+        planned as "30d" (the report's `window` says so)."""
+        return []
+
+    def ingest_account(self, window: UsageWindow, results: Mapping[str, SectionResult],
+                       ctx: HostContext) -> AccountReport | None:
+        """Parse one report. Never raises for remote failures (they become AccountReport.errors); None only when
+        account_sections gave []. May refresh the collector's own summary state (balances, sbank dates), so the next
+        tick publishes them in CollectorOutput.account."""
+        return None
+
+    def restore_account(self, summary: AccountSummary | None) -> None:
+        """Warm start: the persisted `HostSnapshot.account`, handed over before every on-demand report. A collector
+        may take from it what it otherwise keeps in memory only (Slurm: the sbank reallocation dates the "period"
+        window starts from, until its own first sbank reading of this run). Default: nothing."""
+        return None
 
     @abstractmethod
     def actions(self, jobs: Sequence[Job], ctx: HostContext) -> list[ActionSpec]: ...

@@ -47,7 +47,7 @@ _KEY_NAMES = {
     "question_mark": "?", "colon": ":", "slash": "/", "plus": "+", "minus": "-", "left_square_bracket": "[",
     "right_square_bracket": "]", "space": "space", "enter": "↵", "escape": "esc", "up": "↑", "down": "↓",
     "left": "←", "right": "→", "pageup": "pgup", "pagedown": "pgdn", "shift+tab": "S-tab", "comma": ",",
-    "shift+up": "S-↑", "shift+down": "S-↓",
+    "shift+up": "S-↑", "shift+down": "S-↓", "dollar_sign": "$",
 }
 
 
@@ -63,12 +63,16 @@ def display_key(key: str) -> str:
 _DIGITS = tuple(str(i) for i in range(1, 10))
 COPY_MENU = ("copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle "
              "· Y again = stdout path")
+FIND_LOGS = ("other log files: pick one written under the job's workdir and follow it (one picked already: switch "
+             "to it; on it: pick another)")
 
 KEYMAP: dict[str, tuple[Key, ...]] = {
     "global": (
         Key(("question_mark", "f1"), "app.help", "help (this view)", "view", "?/F1", hint="help"),
         Key(("ctrl+p", "colon"), "app.command_palette", "command palette", "view", "^p :", hint="cmd"),
         Key(("comma",), "app.settings", "settings (hosts, defaults)", "view", ","),
+        Key(("dollar_sign",), "app.account", "account usage: balances, usage per window, where it went (Slurm)",
+            "view", "$"),
         Key(("q",), "app.back_or_quit", "back · quit on the main screen", "nav", hint="quit"),
         Key(("ctrl+c",), "app.quit", "quit now", "nav", priority=True),
         Key(("escape",), "app.escape", "close / clear filter, marks / back", "nav", "esc"),
@@ -154,6 +158,7 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("o",), "stream('stdout')", "stdout", "view", "o/e", hint="stream", summary="stdout / stderr",
             hint_key="o/e"),
         Key(("e",), "stream('stderr')", "stderr", "view", in_help=False),
+        Key(("f",), "find_logs", FIND_LOGS, "view", hint="other logs"),
         Key(("F",), "toggle_follow", "follow on / off", "view", hint="follow"),
         Key(("l",), "app.log_viewer", "full log viewer", "nav", hint="full log"),
         Key(("L",), "open_cause", "log viewer at the failure line (cause chip)", "nav"),
@@ -217,6 +222,7 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("o",), "stream('stdout')", "stdout", "view", "o/e", hint="stream", summary="stdout / stderr",
             hint_key="o/e"),
         Key(("e",), "stream('stderr')", "stderr", "view", in_help=False),
+        Key(("f",), "find_logs", FIND_LOGS, "view", hint="other logs"),
         Key(("slash",), "search", "search the buffer", "nav", "/", hint="search"),
         Key(("n",), "search_next", "next match", "nav", "n/N", summary="next / previous match"),
         Key(("N",), "search_prev", "previous match", "nav", in_help=False),
@@ -225,7 +231,8 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("right_square_bracket",), "next_error", "next error / warning line", "nav", in_help=False),
         Key(("p",), "app.pager", "log in $PAGER", "nav", hint="pager"),
         Key(("R",), "reconnect", "reopen the log stream", "view"),
-        Key(("y",), "copy_path", "copy the path of the shown stream (stdout / stderr)", "act", hint="copy path"),
+        Key(("y",), "copy_path", "copy the path of the shown log (stdout / stderr / found file)", "act",
+            hint="copy path"),
         Key(("c",), "app.connect_host", "connect host", "act"),
     ),
     "attach_confirm": (
@@ -316,6 +323,15 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("escape", "q"), "close", "close", "nav", "esc"),
         Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
     ),
+    "found_logs": (
+        Key(("j",), "cursor_down", "move down", "nav", "j/k", summary="move"),
+        Key(("k",), "cursor_up", "move up", "nav", in_help=False),
+        Key(("enter",), "noop", "follow this file in the log view (o / e go back to stdout / stderr)", "nav", "↵",
+            bind=False),
+        Key(("r",), "rescan", "look again (one more probe)", "act"),
+        Key(("escape", "q"), "close", "close", "nav", "esc"),
+        Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
+    ),
     "prompt": (
         Key(("enter",), "noop", "use this value", "act", "↵", bind=False),
         Key(("escape",), "close", "cancel", "nav", "esc"),
@@ -324,6 +340,32 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
     "modal": (
         Key(("escape", "q"), "close", "close", "nav", "esc"),
         Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
+    ),
+    # Account usage (§7.17): the boxes of the Slurm clusters in scope; `$` on this screen does nothing
+    "account": (
+        Key(("escape", "q"), "app.escape", "back", "nav", "esc/q", hint="back", bind=False),
+        Key(("left_square_bracket",), "window(-1)", "previous window (7d · 30d · 90d · period; unavailable ones "
+            "skipped; remembered)", "view", "[ ]", hint="window", summary="previous / next window", hint_key="[/]"),
+        Key(("right_square_bracket",), "window(1)", "next window", "view", in_help=False),
+        Key(("z",), "next_group", "where it went: group by experiment → task → name → account → partition → GPU "
+            "model", "view", hint="group"),
+        Key(("o",), "next_sort", "where it went: sort by GPU-h → SU → CPU-h → jobs → name", "view", "o/O",
+            hint="sort", summary="sort where it went / reverse"),
+        Key(("O",), "reverse_sort", "reverse the sort", "view", in_help=False),
+        Key(("u",), "toggle_scope", "account columns: my usage ↔ the whole account", "view", hint="me/account"),
+        Key(("enter",), "open", "Jobs view filtered to this row (account or group, state preset all)", "nav", "↵",
+            hint="jobs"),
+        Key(("r",), "refresh", "read the focused cluster again (>= 60 s apart)", "view", "r ^r", hint="refresh",
+            summary="read the focused cluster / all again"),
+        Key(("ctrl+r",), "refresh_all", "read every cluster again", "view", in_help=False),
+        Key(("j", "down"), "cursor(1)", "next row of the focused box (accounts, then where it went; on to the next "
+            "box)", "nav", "j/k ↑/↓", summary="move"),
+        Key(("k", "up"), "cursor(-1)", "previous row", "nav", in_help=False),
+        Key(("g", "home"), "edge(-1)", "first row of the box", "nav", "g/G", summary="first / last row of the box"),
+        Key(("G", "end"), "edge(1)", "last row of the box", "nav", in_help=False),
+        Key(("tab",), "box(1)", "next cluster box (a collapsed one opens)", "nav", "tab/S-tab",
+            summary="next / previous cluster box"),
+        Key(("shift+tab",), "box(-1)", "previous cluster box", "nav", in_help=False),
     ),
     "settings": (
         Key(("tab", "right"), "section(1)", "next section (Hosts → General → About)", "nav", "tab/→",
@@ -356,7 +398,7 @@ CONTEXT_TITLES: dict[str, str] = {
     "settings": "Settings", "notifications": "Notifications", "digest": "Since you were away",
     "attention": "Needs you (Fleet a)", "watches": "GPU watches",
     "forwards": "Port forwards", "prompt": "Prompt", "search_prompt": "Search logs (prompt)",
-    "log_hits": "Search logs (results)",
+    "log_hits": "Search logs (results)", "found_logs": "Other log files (f)", "account": "Account usage ($)",
 }
 
 

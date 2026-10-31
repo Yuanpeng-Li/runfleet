@@ -1,0 +1,2 @@
+pilab||20709942||cpu=345165,mem=2543308725,energy=0,node=22937,billing=345165,fs/disk=0,vmem=0,pages=0,gres/gpu=26534,gres/gpu:nvidia_a30=0,gres/gpu:nvidia_a30_1g.6gb=0,gres/gpu:nvidia_a30_2g.12gb=0,gres/gpu:nvidia_h100_80gb_hbm3=148
+ pilab|alice0001|20696750||cpu=344945,mem=2543248903,energy=0,node=22717,billing=344945,fs/disk=0,vmem=0,pages=0,gres/gpu=26534,gres/gpu:nvidia_a30=0,gres/gpu:nvidia_a30_1g.6gb=0,gres/gpu:nvidia_a30_2g.12gb=0,gres/gpu:nvidia_h100_80gb_hbm3=148

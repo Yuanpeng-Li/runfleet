@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SAMPLES_DIR = REPO_ROOT / "tests" / "fixtures" / "samples"
 
 # Meta files in the order that decides "last entry wins" (§10.2).
-META_FILES = ("_meta.txt", "_meta_followup.txt", "_meta_followup2.txt")
+META_FILES = ("_meta.txt", "_meta_followup.txt", "_meta_followup2.txt", "_meta_account.txt")
 
 DEFAULT_NONCE = "0123456789ab"
 
@@ -97,7 +97,7 @@ def meta(host: str, probe: str) -> dict[str, Any]:
     """{"cmd", "rc", "ms", "stderr"} of `probe` on `host` from the _meta*.txt files.
 
     When a probe appears in several meta files, the last entry in file order (_meta, _meta_followup,
-    _meta_followup2) wins (§10.2).
+    _meta_followup2, _meta_account) wins (§10.2).
     """
     found: dict[str, Any] | None = None
     for fname in META_FILES:

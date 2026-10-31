@@ -8,7 +8,7 @@
     runfleet wait HOST:JOBID ... [--timeout SEC] [--json]
     runfleet status [HOST ...] [--short | --json]
     runfleet update [--check] [--force]
-    runfleet agent brief|jobs|job|log|gpus|host|events|help … [--json] [--refresh] [--timeout SEC] [--limit N]
+    runfleet agent brief|jobs|job|log|gpus|host|events|usage|cost|help … [--json] [--refresh] [--timeout SEC]
     runfleet skill install [--agent auto|all|IDS] [--print] [--force] [--no-auto-update]
     runfleet skill update [--if-installed] [--quiet] | uninstall [--dry-run] | status [--json]
     runfleet mcp
@@ -313,10 +313,13 @@ AGENT_HELP = {
     "brief": "entry point: hosts, my R/PD/failed counts, attention items, free GPUs (≤2 KB)",
     "jobs": "one row per job, filtered",
     "job": "one card per job: times, placement, pending reason, exit cause, log paths (≤10 ids)",
-    "log": "bounded, scrubbed log tail of one job (the one verb that runs ssh: 1 probe)",
+    "log": "bounded, scrubbed log tail of one job (the one verb that runs ssh: 1 probe); --files / --file PATH: "
+           "the other log files under its workdir",
     "gpus": "free GPUs: Slurm per partition and type, workstations per GPU",
     "host": "one host's health: login, failing probes, data ages, partitions, load",
     "events": "submitted / started / ended / time low / host problems since a time",
+    "usage": "SU balances, my / the account's usage in a window, where it went (Slurm accounting, cache first)",
+    "cost": "pre-submit cost estimate from the cached charging rules (never ssh, never submits)",
     "help": "every flag, JSON field, exit and problem code of this version",
 }
 
@@ -369,7 +372,12 @@ def _agent_parsers(sub: Any) -> None:
             v.add_argument("--head", action="store_true", help="the start of the file instead")
             v.add_argument("--grep", metavar="'A|B'", help="literal, case-insensitive alternatives; ≤50 hits")
             v.add_argument("--path-only", action="store_true", help="only the path (no ssh)")
-        elif verb == "host":
+            v.add_argument("--files", dest="list_files", action="store_true",
+                           help="list the log files written under the job's workdir while it ran (launchers "
+                           "write the real output there, not to stdout); other jobs' logs are marked")
+            v.add_argument("--file", metavar="PATH", help="read that file instead (relative to the workdir, or "
+                           "absolute): only one the --files search lists")
+        elif verb in ("host", "cost"):
             v.add_argument("host", metavar="HOST")
         else:
             v.add_argument("hosts", nargs="*", metavar="HOST")
@@ -384,11 +392,33 @@ def _agent_parsers(sub: Any) -> None:
             v.add_argument("--attention", action="store_true", help="only jobs that need a look")
             v.add_argument("--all-users", action="store_true",
                            help="add other users' rows (user, id, state, GPUs, partition only)")
+            v.add_argument("--sort", choices=("su", "gpuh"), default=None,
+                           help="largest charged SU / GPU-hours first (job cost from the cached charging rules)")
         elif verb == "gpus":
             v.add_argument("--type", metavar="T", help="GPU type, e.g. h100, a6000")
             v.add_argument("--min", type=_count, default=0, metavar="N", help="at least N free")
         elif verb == "events":
             v.add_argument("--since", required=True, metavar="DUR|ISO", help="2h, 90m, 1d or an ISO time")
+        elif verb == "usage":
+            v.add_argument("--window", choices=("7d", "30d", "90d", "period"), default=None,
+                           help="usage window (default: [general] usage_window, 30d); period = since the last "
+                           "reallocation or usage reset")
+            v.add_argument("--by", choices=("experiment", "task", "name", "account", "partition", "gpu"),
+                           default=None, help="where it went, grouped (default experiment, when a report is cached)")
+            v.add_argument("--scope", choices=("me", "account"), default=None,
+                           help="me (default) or the whole account's totals too")
+        elif verb == "cost":
+            v.add_argument("--partition", required=True, metavar="P")
+            v.add_argument("--gpus", type=_count, default=None, metavar="N", help="GPUs in all (default 0)")
+            v.add_argument("--gpu-type", metavar="T", help="GPU type, e.g. l40s (the typed billing weight)")
+            v.add_argument("--cpus", type=_positive_int, default=None, metavar="N",
+                           help="default: GPUs × DefCpuPerGPU, else 1 per node")
+            v.add_argument("--mem", metavar="SIZE", help="e.g. 64G (only where memory is weighted)")
+            v.add_argument("--nodes", type=_positive_int, default=None, metavar="N", help="default 1")
+            v.add_argument("--time", metavar="DUR", help="24h, 90m, 1d12h or 2-00:00:00 (without: per hour)")
+            v.add_argument("--qos", metavar="Q", help="default: the partition's only QOS, your last job's there, "
+                           "normal")
+            v.add_argument("--account", metavar="A", help="the account to weigh the cost against (SU left)")
 
 
 # allow_abbrev=False everywhere: find_command() skips the values of exactly these option spellings (`--conf x.toml
@@ -1166,7 +1196,8 @@ def cmd_status(args: argparse.Namespace, clock: Clock, out: Callable[[str], None
 # ====================================================================================================== agent
 _AGENT_KEYS = ("hosts", "ids", "id", "host", "topic", "refresh", "timeout", "limit", "state", "name", "workdir",
                "partition", "since", "attention", "all_users", "stream", "lines", "bytes", "head", "grep",
-               "path_only", "type", "min")
+               "path_only", "list_files", "file", "type", "min", "sort", "window", "by", "scope", "gpus",
+               "gpu_type", "cpus", "mem", "nodes", "time", "qos", "account")
 
 
 def cmd_agent(args: argparse.Namespace, clock: Clock, out: Callable[[str], None]) -> int:

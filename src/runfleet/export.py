@@ -1,7 +1,9 @@
 """[WP4] Snapshot -> JSON export (schema "runfleet.snapshot/1", DESIGN.md §8.5).
 
 Shape: `{"schema", "generated_at", "hosts": [{"name", "status", "caps", "jobs", "gpus", "procs", "nodes",
-"partitions"}]}`; every value is `models.to_json` of the §3.3 type. Hosts keep config order; jobs are sorted by id.
+"partitions", "account"}]}`; every value is `models.to_json` of the §3.3 type. Hosts keep config order; jobs are sorted
+by id. `account` (the periodic account summary, §5.2.11; null = never read or not applicable) was added after 0.8.0
+within the same schema.
 """
 
 from __future__ import annotations
@@ -51,6 +53,7 @@ def host_document(name: str, state: HostState, encode: Encoder) -> dict[str, Any
         "procs": [encode(proc) for proc in snap.procs] if snap else [],
         "nodes": [encode(node) for node in snap.nodes] if snap else [],
         "partitions": [encode(part) for part in snap.partitions] if snap else [],
+        "account": encode(snap.account) if snap is not None and snap.account is not None else None,
     }
 
 

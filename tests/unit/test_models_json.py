@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -76,6 +77,54 @@ def test_datetimes_are_utc_and_naive_is_assumed_utc() -> None:
     assert m.to_json(est) == "2026-09-07T10:42:37+00:00"
     assert m.to_json(datetime(2026, 1, 1)) == "2026-01-01T00:00:00+00:00"
     assert m.from_json(datetime, "2026-01-01T00:00:00") == datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def test_account_models_round_trip_with_dates() -> None:
+    from datetime import date
+    bal = m.AccountBalance(account="pilab_02", limit_su=97885.0, used_su=298.12, used_basis="since_reset",
+                           limit_source="sshare", used_source="sshare", other_limits={"gres/gpu": 2000.0},
+                           next_realloc=date(2027, 1, 14), realloc_known=True, read_at=T0)
+    out = m.to_json(bal)
+    assert out["next_realloc"] == "2027-01-14" and out["read_at"] == "2026-09-07T10:42:37+00:00"
+    assert m.from_json(m.AccountBalance, json.loads(json.dumps(out))) == bal
+    assert bal.available_su == pytest.approx(97586.88)
+    use = m.AccountUse(account="pilab_02", scope="account", cpu_h=1316.0, gpu_h=None, billing_h=1316.0, start=T0,
+                       start_inferred=True)
+    assert m.from_json(m.AccountUse, json.loads(json.dumps(m.to_json(use)))) == use
+    with pytest.raises((TypeError, ValueError)):
+        m.from_json(m.AccountBalance, {**out, "next_realloc": "2027-01-14T00:00:00"})
+
+
+def test_snapshot_with_account_summary_round_trips_and_old_rows_decode() -> None:
+    """Account (§5.2.11): `HostSnapshot.account` rides the snapshots JSON; a row of 0.8.0 (no key) decodes to None."""
+    from datetime import date
+    bal = m.AccountBalance(account="pilab_02", limit_su=97885.0, used_su=298.12, used_basis="since_reset",
+                           limit_source="sshare", used_source="sshare", next_realloc=date(2027, 1, 14),
+                           realloc_known=True, read_at=T0)
+    use = m.AccountUse(account="pilab_02", scope="me", cpu_h=298.1, gpu_h=0.0, billing_h=298.1, start=T0)
+    err = m.HostError(m.ErrorKind.REMOTE, "slurmdbd unreachable", "x", section="slurm.acct_sreport", at=T0)
+    summary = m.AccountSummary(window="30d", read_at=T0, mode="limits", balances=(bal,), usage=(use,), usage_at=T0,
+                               sbank_at=T0, half_life_s=0.0, reset_period=None, notes=("sreport not installed",),
+                               errors=(err,))
+    snap = replace(_snapshot(), account=summary)
+    back = m.from_json(m.HostSnapshot, json.loads(json.dumps(m.to_json(snap))))
+    assert back == snap and back.account is not None and back.account.balances[0].next_realloc == date(2027, 1, 14)
+    old = m.to_json(_snapshot())
+    del old["account"]
+    assert m.from_json(m.HostSnapshot, old).account is None
+
+
+def test_account_report_round_trips() -> None:
+    """Account (§5.2.11): `AccountReport` as the `account_reports` cache stores it (to_json)."""
+    use = m.AccountUse(account="pilab_02", scope="account", cpu_h=1316.0, gpu_h=171.0, billing_h=1316.0, start=T0,
+                       start_inferred=True)
+    cell = m.UsageCell(name="lmft--train--s0--a01", account="pilab_02", partition="gpu", qos="normal",
+                       gpu_model="v100", jobs=3, running=0, cpu_h=23.2, gpu_h=2.9, billing_h=116.0, charged_su=None)
+    summary = m.AccountSummary(window="period", read_at=T0, mode="usage_only", usage=(replace(use, scope="me"),))
+    err = m.HostError(m.ErrorKind.REMOTE, "sacct refused the date range", "x", section="slurm.acct_jobs.c0", at=T0)
+    report = m.AccountReport(host="lyra", window="period", fetched_at=T0, summary=summary, window_start=T0,
+                             account_totals=(use,), cells=(cell,), jobs_seen=3, truncated=True, errors=(err,))
+    assert m.from_json(m.AccountReport, json.loads(json.dumps(m.to_json(report)))) == report
 
 
 def test_missing_keys_take_defaults_and_unknown_keys_are_ignored() -> None:

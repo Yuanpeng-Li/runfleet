@@ -9,7 +9,8 @@ Default scenario (mirrors the shapes of the field-probe fixtures in tests/fixtur
 - ``k2``: Slurm 25.05, GPU TRES, PreemptMode REQUEUE, the PI's protected ``lab`` partition, a multi-node job, a
   stalled job, a pending job with an estimated start, history with a failed (Traceback) job, TIMEOUT, OOM, CANCELLED.
 - ``vega``: Slurm 25.11, 4-running-job QOS cap, 2-GPU H200 jobs, ``mixed-`` nodes, a DependencyNeverSatisfied job.
-- ``lyra``: Slurm 26.05, no GPU TRES, PreemptMode CANCEL, a throttled pending array, ProxyJump-shaped latency.
+- ``lyra``: Slurm 26.05, no GPU TRES, PreemptMode CANCEL, a throttled pending array, ProxyJump-shaped latency; SU
+  limits, sbank and a charged ``gpu`` partition beside the free ones (account usage, §5.2.11; k2 and vega: usage only).
 - ``labstation``: 4x RTX A6000, a queue-runner task, another user's GPU process, a task that crashes with a Traceback.
 - ``lynx``: 2x RTX PRO 6000 Blackwell, a queue-runner task that starts its next item; starts NEEDS_AUTH until connect.
 """
@@ -17,6 +18,7 @@ Default scenario (mirrors the shapes of the field-probe fixtures in tests/fixtur
 from __future__ import annotations
 
 import logging
+import posixpath
 import random
 import zlib
 from collections.abc import Callable, Iterable, Sequence
@@ -41,6 +43,8 @@ Fault = Literal["unreachable", "auth", "nvidia_hang", "garbage", "slurmdbd_down"
 TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "TIMEOUT", "OUT_OF_MEMORY", "PREEMPTED", "CANCELLED",
                              "NODE_FAIL", "BOOT_FAIL", "DEADLINE"})
 MIN_JOB_AGE_S = 300              # scontrol forgets a job this long after it ended (field probes: MinJobAge=300)
+HISTORY_GAP_S = 4 * 86400        # the synthetic account history ends this long before t0: outside the default 3-day
+                                 # sacct window, so the Jobs table never lists it (Account, §5.2.11)
 
 
 def stable_hash(text: str) -> int:
@@ -350,6 +354,8 @@ class SimJob:
     idle_gpus: dict[int, int] = field(default_factory=dict)   # Attach: position in the job's GPU list on a node ->
                                      # MiB that GPU holds at 0 % (vega: GPU1 idle holding 85 GB, §7.16.8)
     shmem_mib: int = 0               # Attach: shared memory in the job's cgroup (vLLM, DataLoader workers)
+    train_log: str | None = None     # a launcher job (Popen(stdout=fh)): the program writes this file under the
+                                     # workdir; stdout holds the launcher's few lines (log.find, §4.7.2)
 
     @property
     def is_summary(self) -> bool:
@@ -380,6 +386,51 @@ class SimJob:
         if not self.started or self.start is None:
             return 0.0
         return max(0.0, (self.end if self.end is not None else now) - self.start)
+
+
+@dataclass(frozen=True, slots=True)
+class HistTemplate:
+    """One kind of the user's older jobs (Account, §5.2.11). `name` follows the run skills' convention without its
+    `--s<seed>--a<attempt>` tail, which the generator adds, so the report's experiment rollup groups the seeds."""
+
+    name: str
+    account: str
+    partition: str
+    qos: str
+    cpus: int
+    gpus: int
+    gpu_types: tuple[str, ...]       # configured gres types, one picked per job; () = CPU only
+    hours: tuple[float, float]       # run time range
+    weight: float
+
+
+@dataclass(frozen=True, slots=True)
+class HistorySpec:
+    templates: tuple[HistTemplate, ...]
+    per_day: float                   # mean allocations per day
+    days: int                        # how far back the history reaches
+    id_top: int                      # the newest synthetic job id (below every scenario id)
+    id_step: int                     # mean id gap between consecutive allocations
+
+
+@dataclass(frozen=True, slots=True)
+class HistJob:
+    """A synthetic allocation of the user's that ended before the scenario: sacct's account rollup and sreport see it,
+    the regular sacct window does not (it ended before that window)."""
+
+    job_id: int
+    name: str
+    account: str
+    partition: str
+    qos: str
+    state: str                       # sacct State ("CANCELLED by <uid>" included)
+    start: float
+    elapsed_s: int
+    cpus: int
+    gpus: int
+    gpu_type: str | None
+    mem_mib: int
+    billing: int
 
 
 @dataclass
@@ -419,10 +470,57 @@ class SimCluster:
     # FairShare, LevelFS) and the normalized partition factor sprio weights by PriorityWeightPartition
     shares: tuple[tuple[str, str, str, str, str, str, str], ...] = ()
     partition_tier: dict[str, float] = field(default_factory=dict)
+    # charging rules (Account, §5.2.11): `sacctmgr show qos` (name, UsageFactor) and per-partition `scontrol show
+    # partition` fields (AllowQos, QoS, TRESBillingWeights) that differ from the open, unweighted default
+    qos: tuple[tuple[str, float], ...] = (("normal", 1.0),)
+    partition_fields: dict[str, dict[str, str]] = field(default_factory=dict)
+    # account usage (Account, §5.2.11): the account rows' SU limits (GrpTRESMins billing minutes; lyra only), sbank's
+    # next reallocation as a fixed month-day (None = "No data found."), the other members' usage (cpu, gres/gpu,
+    # billing minutes) as sshare counts it (after UsageFactor, already decayed; unset: derived from others_30d under
+    # the cluster's reset and decay rules) and as sreport counts it per 30 days (scaled linearly to the window), the
+    # user's synthetic older allocations, and sacct's widest accepted range
+    account_limits: dict[str, int] = field(default_factory=dict)
+    realloc: dict[str, str | None] = field(default_factory=dict)
+    others_share: dict[str, tuple[int, int, int]] = field(default_factory=dict)
+    others_30d: dict[str, tuple[int, int, int]] = field(default_factory=dict)
+    history_spec: HistorySpec | None = None
+    history_seed: int = 0
+    history_end: float = 0.0                                     # the synthetic history ends here (before the scenario)
+    sacct_max_days: int | None = None                            # k2: "Too wide of a date range in query" beyond this
+    _history: list[HistJob] | None = field(default=None, repr=False)
 
     @property
     def preempt_mode(self) -> str:
         return self.config.get("PreemptMode", "OFF")
+
+    def factor(self, qos: str) -> float:
+        """UsageFactor of a QOS (`sacctmgr show qos`); an unknown QOS charges ×1, as Slurm's default."""
+        return dict(self.qos).get(qos, 1.0)
+
+    def billing(self, partition: str, cpus: int, gpus: int, gpu_type: str | None) -> int:
+        """The job's billing TRES: the partition's TRESBillingWeights over its CPUs and GPUs (typed GPU keys compare
+        ignoring case), else its CPUs (Slurm's default without weights)."""
+        weights = self.partition_fields.get(partition, {}).get("TRESBillingWeights")
+        if not weights:
+            return cpus
+        total = 0.0
+        for item in weights.split(","):
+            key, _, raw = item.partition("=")
+            weight = float(raw)
+            key = key.strip().lower()
+            if key == "cpu":
+                total += weight * cpus
+            elif key == "gres/gpu" or (key.startswith("gres/gpu:") and gpu_type is not None
+                                        and key[len("gres/gpu:"):] == gpu_type.lower()):
+                total += weight * gpus
+        return int(round(total))
+
+    def history(self) -> list[HistJob]:
+        """The user's synthetic allocations before the scenario, generated once on first use (only the account report
+        and sreport read them, so a world that is never asked pays nothing)."""
+        if self._history is None:
+            self._history = _gen_history(self) if self.history_spec is not None else []
+        return self._history
 
     def node(self, name: str) -> SimNode | None:
         return next((n for n in self.nodes if n.name == name), None)
@@ -784,6 +882,31 @@ def _write_job_log(c: SimCluster, job: SimJob, text: str, at: float) -> None:
         lg.write(text, at)
 
 
+def _write_program_log(c: SimCluster, job: SimJob, text: str, at: float) -> None:
+    """What the program prints: its own log file for a launcher job, else the job's stdout."""
+    if job.train_log is None:
+        _write_job_log(c, job, text, at)
+        return
+    lg = c.logs.get(job.train_log)
+    if lg is None:
+        lg = c.logs[job.train_log] = SimLog(job.train_log, at)
+    lg.write(text, at)
+
+
+def _launcher_header(c: SimCluster, job: SimJob, at: float) -> str:
+    """A launcher's stdout: a few lines, then silence while its child writes `train_log` (the field report)."""
+    stamp = local_ts(at, c.tz)
+    rel = (job.train_log or "").removeprefix(job.workdir.rstrip("/") + "/")
+    lines = (f"host {job.nodes[0] if job.nodes else '?'}  CUDA_VISIBLE_DEVICES="
+             f"{','.join(str(i) for i in range(job.gpus_per_node)) or 'none'}  python 3.12.7",
+             f"job {job.job_id} · {job.name} · workdir {job.workdir}",
+             f"run dir {posixpath.dirname(rel)}",
+             f"exec python -m vitfm.train --config configs/{job.name.split('--')[1]}.yaml --seed 42",
+             f"training output -> {rel} (Popen stdout=fh, stderr=STDOUT)",
+             "child started; waiting for it to exit")
+    return "".join(f"[{stamp}] launcher: {line}\n" for line in lines)
+
+
 def expand_pattern(pattern: str, job: SimJob, user: str) -> str:
     """Slurm filename pattern expansion (%x %j %A %a %u %N %%) as the controller does for scontrol StdOut."""
     out: list[str] = []
@@ -882,7 +1005,9 @@ def _start_job(world: DemoWorld, c: SimCluster, job: SimJob, now: float) -> bool
     job.batch = StepUsage()
     job.step0 = StepUsage(ntasks=job.step_tasks) if job.step_tasks else None
     job.trainer = Trainer(epochs=300, epoch_s=max(30.0, job.duration_s / 300), iters=4500)
-    _write_job_log(c, job, _job_header(c, job, now), now)
+    if job.train_log is not None:
+        _write_job_log(c, job, _launcher_header(c, job, now), now)
+    _write_program_log(c, job, _job_header(c, job, now), now)
     world.note(f"{c.name}: {job.display_id} started on {','.join(job.nodes)}")
     return True
 
@@ -915,10 +1040,13 @@ def _finish_job(world: DemoWorld, c: SimCluster, job: SimJob, state: str, now: f
         _write_job_log(c, job, f"slurmstepd: error: Detected 1 oom_kill event in StepId={job.job_id}.batch. "
                                "Some of the step tasks have been OOM Killed.\n", now)
     elif state == "FAILED":
-        _write_job_log(c, job, "\n" + traceback_text(job.failure, job.workdir), now)
+        _write_program_log(c, job, "\n" + traceback_text(job.failure, job.workdir), now)
     elif state == "COMPLETED":
-        _write_job_log(c, job, f"\n[{local_ts(now, c.tz)}] done · best vs_base -3.12% · saved "  # tqdm closes its bar
-                               f"{job.workdir}/runs/{job.name}/final.pt\n", now)
+        _write_program_log(c, job, f"\n[{local_ts(now, c.tz)}] done · best vs_base -3.12% · saved "  # tqdm: bar
+                                   f"{job.workdir}/runs/{job.name}/final.pt\n", now)
+    if job.train_log is not None and state in ("FAILED", "COMPLETED"):
+        _write_job_log(c, job, f"[{local_ts(now, c.tz)}] launcher: child exited with status "
+                               f"{0 if state == 'COMPLETED' else job.exit_code or 1}\n", now)
     exit_codes = {"COMPLETED": (0, 0), "FAILED": (job.exit_code or 1, 0), "TIMEOUT": (0, 0),
                   "OUT_OF_MEMORY": (0, 125), "PREEMPTED": (0, 0), "CANCELLED": (0, 0)}
     job.exit_code, job.exit_signal = exit_codes.get(state, (job.exit_code, job.exit_signal))
@@ -1038,7 +1166,7 @@ def _step_running(world: DemoWorld, c: SimCluster, job: SimJob, now: float, dt: 
     assert job.start is not None
     _update_usage(job, dt, rng)
     if job.trainer is not None and not job.stalled:
-        _write_job_log(c, job, job.trainer.advance(dt, now, c.tz, rng), now)
+        _write_program_log(c, job, job.trainer.advance(dt, now, c.tz, rng), now)
     limit_end = job.start + job.time_limit_s if job.time_limit_s else None
     planned_end = job.start + job.duration_s
     if limit_end is not None and now >= limit_end and planned_end > limit_end:
@@ -1246,10 +1374,11 @@ def _priority(half_life: str, reset: str, **weights: str) -> dict[str, str]:
 
 
 # what `command -v` finds; detect.tools reports the subset it asks for (render.DETECT_TOOLS)
-BASE_TOOLS = frozenset({"sh", "awk", "cat", "cut", "date", "getent", "grep", "head", "id", "kill", "nproc", "paste",
-                        "readlink", "sleep", "sort", "tail", "tr", "wc", "timeout", "less", "stat", "ps", "pgrep"})
+BASE_TOOLS = frozenset({"sh", "awk", "cat", "cut", "date", "find", "getent", "grep", "head", "id", "kill", "nproc",
+                        "paste", "readlink", "sleep", "sort", "tail", "tr", "wc", "timeout", "less", "stat", "ps",
+                        "pgrep"})
 SLURM_TOOLS = BASE_TOOLS | {"squeue", "sacct", "sinfo", "scontrol", "sstat", "scancel", "sacctmgr", "srun", "ssh",
-                           "sprio", "sshare"}
+                           "sprio", "sshare", "sreport"}
 WS_TOOLS = BASE_TOOLS | {"nvidia-smi"}
 
 
@@ -1281,9 +1410,15 @@ def _run(world: DemoWorld, c: SimCluster, job: SimJob, *, started_ago: float, no
     job.trainer = Trainer(epochs=300, epoch_s=max(30.0, job.duration_s / 300), iters=4500)
     hist_end = now - log_idle
     text = _job_header(c, job, job.start) + job.trainer.history(job.start, hist_end, c.tz, rng)
-    lg = SimLog(job.log_paths[0], job.start)
+    if job.train_log is not None:        # the launcher wrote its lines at start; the program writes train_log
+        out = SimLog(job.log_paths[0], job.start)
+        out.write(_launcher_header(c, job, job.start), job.start + 3)
+        c.logs[job.log_paths[0]] = out
+        c.logs[job.train_log] = lg = SimLog(job.train_log, job.start + 3)
+    else:
+        lg = SimLog(job.log_paths[0], job.start)
+        c.logs[job.log_paths[0]] = lg
     lg.write(text, hist_end)
-    c.logs[job.log_paths[0]] = lg
     job.batch = StepUsage(ntasks=1, ave_cpu_s=started_ago * 1.05, ave_rss_kb=10_398_988, max_rss_kb=11_506_244,
                           disk_bytes=int(started_ago * 640_000), pages=3652)
     gpu_step = job.batch
@@ -1323,12 +1458,62 @@ def _ended(world: DemoWorld, c: SimCluster, job: SimJob, *, state: str, started_
                               gpumem_ave_mib=4756 if job.gpus else 0, gpumem_max_mib=4756 if job.gpus else 0)
 
 
+def _gen_history(c: SimCluster) -> list[HistJob]:
+    """The user's older allocations (Account, §5.2.11), newest first: Poisson arrivals at `per_day` walking back from
+    `history_end`, templates by weight, ids counting down from `id_top`. Seeded per cluster, so the same seed and
+    start time always give the same history (sreport and the sacct rollup agree with each other)."""
+    spec = c.history_spec
+    if spec is None:
+        return []
+    rng = random.Random(c.history_seed)
+    weights = [t.weight for t in spec.templates]
+    oldest = c.history_end - spec.days * 86400
+    out: list[HistJob] = []
+    t, job_id = c.history_end, spec.id_top
+    while True:
+        t -= rng.expovariate(spec.per_day / 86400)
+        if t < oldest:
+            return out
+        tpl = rng.choices(spec.templates, weights)[0]
+        gpu_type = rng.choice(tpl.gpu_types) if tpl.gpu_types else None
+        ran = int(rng.uniform(*tpl.hours) * 3600)
+        roll = rng.random()
+        state = ("COMPLETED" if roll < 0.85 else "FAILED" if roll < 0.91 else "TIMEOUT" if roll < 0.96
+                 else f"CANCELLED by {c.uid}")
+        if state == "FAILED":
+            ran = max(60, ran // 7)
+        name = tpl.name
+        if "--" in name:
+            name += f"--s{rng.randrange(42, 50)}--a{1 + (rng.random() < 0.15):02d}"
+        out.append(HistJob(job_id=job_id, name=name, account=tpl.account, partition=tpl.partition, qos=tpl.qos,
+                           state=state, start=t - ran, elapsed_s=ran, cpus=tpl.cpus, gpus=tpl.gpus,
+                           gpu_type=gpu_type, mem_mib=tpl.cpus * 6 * 1024,
+                           billing=c.billing(tpl.partition, tpl.cpus, tpl.gpus, gpu_type)))
+        job_id -= rng.randint(1, 2 * spec.id_step - 1)
+
+
+def next_annual(month_day: str, after: float, tz: timedelta) -> str:
+    """The first `MM-DD` strictly after `after` (cluster-local date) as YYYY-MM-DD: sbank's "Next reallocation"
+    stays in the future whenever the demo runs (DESIGN.md §10.6's dates for a world started in 2026)."""
+    today = datetime.fromtimestamp(after, timezone(tz)).date()
+    month, day = (int(x) for x in month_day.split("-"))
+    for year in (today.year, today.year + 1):
+        when = today.replace(year=year, month=month, day=day)
+        if when > today:
+            return when.isoformat()
+    raise ValueError(month_day)                  # unreachable: next year's date is always after today
+
+
 def _build_default(world: DemoWorld) -> None:
     for build in (_build_k2, _build_vega, _build_lyra, _build_labstation, _build_lynx):
         build(world)
     _build_transitions(world)
+    _build_launcher(world)
     world.faults["lynx"] = {"auth"}          # ws-duo shape: needs a login until `connect`
     for host in world.hosts.values():
+        if isinstance(host, SimCluster):
+            host.history_seed = world.seed + stable_hash(f"{host.name}:history")
+            host.history_end = world.t0 - HISTORY_GAP_S
         if not any(host.cpu_jiffies):        # /proc/stat counters since boot, ~busy as the current load
             ticks = int(host.ncpu * 100 * (world.t0 - host.boot))
             busy = min(0.9, host.load / host.ncpu)
@@ -1350,6 +1535,23 @@ def _build_k2(world: DemoWorld) -> None:
                                         _priority("14-00:00:00", "NONE", Age="1000", FairShare="100000",
                                                   JobSize="1000", Partition="1000")),
                    associations=(("k2", "lab", "", "gpu-priority,normal,labpi"),), tools=SLURM_TOOLS,
+                   qos=(("normal", 1.0), ("gpu-preempt", 1.0), ("cpu-preempt", 1.0), ("labpi", 1.0),
+                        ("gpu-priority", 1.0)),                  # usage only: every factor 1, no weights
+                   partition_fields={"gpu-preempt": {"QoS": "gpu-preempt"}, "labpi": {"AllowQos": "labpi"}},
+                   # account usage: decaying sshare (half-life 14 days), sreport, no sbank, no limits; sacct refuses
+                   # ranges over 45 days (the report reads 30-day chunks)
+                   others_share={"lab": (318_000, 27_400, 318_000)},
+                   others_30d={"lab": (2_480_000, 212_000, 2_480_000)},
+                   history_spec=HistorySpec((
+                       HistTemplate("orb-swp--train--cifar-warmup--scratch", "lab", "gpu-preempt", "gpu-priority", 8,
+                                    1, ("nvidia_geforce_rtx_3090", "nvidia_a100-sxm4-40gb"), (3.0, 10.0), 6),
+                       HistTemplate("orb-swp--eval--cifar--fork-warmup", "lab", "gpu-preempt", "gpu-priority", 4, 1,
+                                    ("nvidia_geforce_rtx_3090",), (0.3, 1.2), 3),
+                       HistTemplate("lmft-x0--train--lr1e-5--finetune-base", "lab", "gpu-preempt", "normal", 16, 2,
+                                    ("nvidia_h200_nvl",), (4.0, 20.0), 1),
+                       HistTemplate("jupyter", "lab", "gpu-preempt", "normal", 4, 0, (), (2.0, 8.0), 0.5)),
+                       per_day=30, days=95, id_top=3368000, id_step=7),
+                   sacct_max_days=45,
                    shares=(("lab", "1", "1.000000", "8123456", "0.833333", "0.030000", "1.200000"),),
                    partition_tier={"lab": 1.0, "gpu-preempt": 0.0},
                    gpu_tres=True, merged_stderr="repeat", stat_verb="stat", latency=(0.05, 0.12), ncpu=32,
@@ -1491,6 +1693,19 @@ def _build_vega(world: DemoWorld) -> None:
                                         _priority("00:00:00", "MONTHLY", Age="10000", FairShare="10000",
                                                   QOS="10000")),
                    associations=(("vega", "lab", "", "normal"), ("vega", "dept", "", "normal")),
+                   qos=(("normal", 1.0), ("vega", 1.0), ("vega-dev", 1.0)),     # usage only, as on k2
+                   partition_fields={p: {"QoS": "vega"} for p in ("a30", "h100", "h200")},
+                   # account usage: sshare never decays and resets monthly (the period window is the month), sreport,
+                   # no sbank, no limits
+                   others_30d={"lab": (96_000, 11_800, 96_000), "dept": (18_600, 0, 18_600)},   # sshare follows
+                   history_spec=HistorySpec((
+                       HistTemplate("orb-swp--train--voc-cosinewarm--scratch", "lab", "h200", "normal", 8, 1,
+                                    ("nvidia_h200_nvl",), (6.0, 14.0), 4),
+                       HistTemplate("lmft-x07--train--sampler--finetune-base", "lab", "h200", "normal", 16, 2,
+                                    ("nvidia_h200_nvl",), (8.0, 36.0), 2),
+                       HistTemplate("orb-swp--eval--voc--fork-cosinewarm", "lab", "a30", "normal", 4, 1,
+                                    ("nvidia_a30",), (0.5, 2.0), 2)),
+                       per_day=10, days=95, id_top=823000, id_step=4),
                    shares=(("lab", "1", "0.500000", "123456", "0.010000", "1.000000", "50.000000"),
                            ("dept", "1", "0.032258", "0", "0.000000", "0.950000", "inf")),
                    tools=SLURM_TOOLS, gpu_tres=True, merged_stderr="empty", stat_verb="statx", qos_max_running=4,
@@ -1573,24 +1788,50 @@ def _build_lyra(world: DemoWorld) -> None:
     c = SimCluster(name="lyra", slurm_version="26.05.3", login_host="login-a02", user="alice", uid=20001,
                    group="alice", gid=20001, tz=timedelta(hours=-7),
                    config=_slurm_config("lyra", "CANCEL", "use_interactive_step", "Alloc,Contain,X11",
-                                        _priority("7-00:00:00", "NONE")),    # every weight 0: submit order
+                                        _priority("00:00:00", "NONE")),    # every weight 0: submit order; usage
+                                                                           # never decays (sshare = sbank)
                    associations=(("lyra", "alice", "", "high,low,normal,standard-mem"),
                                  ("lyra", "pilab_02", "", "high,low,normal,standard-mem"),
                                  ("lyra", "pilab_02_gpu", "", "gpu-highmem,high,low,normal")),
-                   tools=SLURM_TOOLS, gpu_tres=False, merged_stderr="empty", stat_verb="statx",
+                   tools=SLURM_TOOLS | {"sbank"}, gpu_tres=False, merged_stderr="empty", stat_verb="statx",
                    latency=(0.2, 0.3), ncpu=48, mem_total_kb=395_000_000, load=11.4, next_job_id=32378161,
-                   boot=t0 - 64 * 86400, node_ssh="denied", gpu_buses=("71", "01", "e1", "a1"))
-    nodes = [SimNode(f"lyra-gpu-36-{k:02d}", ("free-gpu",), 40, 192000, (GresDef("V100", 4),),
+                   boot=t0 - 64 * 86400, node_ssh="denied", gpu_buses=("71", "01", "e1", "a1"),
+                   # charged and free partitions on the same nodes, as on the real cluster (§5.2.11): the free ones
+                   # admit only QOS low/guest (×0), the charged ones weight GPUs; the partition QOS factor never decides
+                   qos=(("normal", 1.0), ("low", 0.0), ("high", 2.0), ("guest", 0.0), ("free-gpu-part", 0.0),
+                        ("gpu-part", 1.0), ("gpu-highmem", 1.0), ("standard-mem", 1.0), ("gpuxl-part", 1.0),
+                        ("free-gpuxl-part", 1.0)),
+                   partition_fields={
+                       "free-gpu": {"AllowQos": "low,guest", "QoS": "free-gpu-part"},
+                       "free-gpuxl": {"AllowQos": "low,guest", "QoS": "free-gpuxl-part"},
+                       "gpu": {"AllowQos": "normal,high", "QoS": "gpu-part",
+                               "TRESBillingWeights": "cpu=1,gres/gpu=32"},
+                       "gpuxl": {"AllowQos": "normal,high", "QoS": "gpuxl-part",
+                                 "TRESBillingWeights": "cpu=1,gres/gpu:L40S=32,gres/gpu:RTX6000=64"}},
+                   # account usage as on the field-probed cluster: SU limits on the account rows, sbank with the next
+                   # reallocation, sreport; the user's own work runs free (qos low) under `alice`
+                   account_limits={"pilab_02": 5_873_100, "pilab_02_gpu": 5_820, "alice": 60_000},
+                   realloc={"pilab_02": "01-14", "pilab_02_gpu": "04-02", "alice": None},
+                   others_share={"pilab_02": (2_400, 1_150, 9_300)},
+                   others_30d={"pilab_02": (61_100, 10_279, 61_100), "pilab_02_gpu": (0, 0, 0)},
+                   history_spec=HistorySpec((
+                       HistTemplate("orb-swp--train--cifar-warmup--scratch", "alice", "free-gpuxl", "low", 8, 1,
+                                    ("RTX6000", "L40S"), (6.0, 14.0), 5),
+                       HistTemplate("orb-swp--eval--cifar--fork-warmup", "alice", "free-gpu", "low", 4, 1,
+                                    ("A30", "V100"), (0.5, 2.0), 3),
+                       HistTemplate("jupyter", "pilab_02", "gpu", "normal", 2, 0, (), (2.0, 6.0), 0.1)),
+                       per_day=7, days=390, id_top=32300000, id_step=24))
+    nodes = [SimNode(f"lyra-gpu-36-{k:02d}", ("free-gpu", "gpu"), 40, 192000, (GresDef("V100", 4),),
                      bg_cpus=40 if k % 3 else 37, bg_mem_mib=143360, bg_gpu_idx={0, 1, 2, 3} if k % 4 else {0, 1, 2},
                      flag="-" if k == 5 else "", free_mem_mib=24485 - 1000 * k) for k in range(8)]
-    nodes += [SimNode(f"lyra-gpu-q71-{k:02d}", ("free-gpu",), 32, 256000, (GresDef("A30", 4),),
+    nodes += [SimNode(f"lyra-gpu-q71-{k:02d}", ("free-gpu", "gpu"), 32, 256000, (GresDef("A30", 4),),
                       bg_cpus=20, bg_mem_mib=98304, bg_gpu_idx={1, 2} if k != 1 else {2, 3},
                       free_mem_mib=88000 + 3000 * k) for k in range(4)]
-    nodes += [SimNode(f"lyra-gpu-s71-{k:02d}", ("free-gpuxl",), 32, 256000, (GresDef("RTX6000", 4),),
+    nodes += [SimNode(f"lyra-gpu-s71-{k:02d}", ("free-gpuxl", "gpuxl"), 32, 256000, (GresDef("RTX6000", 4),),
                       bg_cpus=24, bg_mem_mib=147456, bg_gpu_idx={0, 1, 2}, free_mem_mib=41000) for k in range(4)]
-    nodes += [SimNode(f"lyra-gpu-r71-{k:02d}", ("free-gpuxl",), 32, 256000, (GresDef("RTX6000", 4),),
+    nodes += [SimNode(f"lyra-gpu-r71-{k:02d}", ("free-gpuxl", "gpuxl"), 32, 256000, (GresDef("RTX6000", 4),),
                       bg_cpus=8, bg_mem_mib=49152, bg_gpu_idx={0}, free_mem_mib=161000) for k in range(3)]
-    nodes.append(SimNode("lyra-gpu-p71-08", ("free-gpuxl",), 48, 1031000, (GresDef("L40S", 4),),
+    nodes.append(SimNode("lyra-gpu-p71-08", ("free-gpuxl", "gpuxl"), 48, 1031000, (GresDef("L40S", 4),),
                          free_mem_mib=315712))
     c.nodes = nodes
     world.hosts["lyra"] = c
@@ -1636,6 +1877,12 @@ def _build_lyra(world: DemoWorld) -> None:
     job = _job(c, 32301780, "orb-swp--train--adam--s43--a02", submit=t0 - 62 * 3600, **rtx)
     _ended(world, c, job, state="CANCELLED", started_ago=None, ran=1030)
     job.cancelled_by = c.uid
+    # the one charged job (Account, §5.2.11): qos normal on the weighted `gpu` partition, billing cpu + 32/GPU
+    job = _job(c, 32371502, "orb-swp--eval--places-warmup--v100--s45--a01", account="pilab_02", partition="gpu",
+               qos="normal", submit=t0 - 30 * 3600, time_limit_s=6 * 3600, gpus_per_node=1, gpu_type="V100",
+               typed_request=False, stderr_pattern=None)
+    _ended(world, c, job, state="COMPLETED", started_ago=29 * 3600, ran=2 * 3600 + 41 * 60, nodes=["lyra-gpu-36-02"],
+           log="done · eval places-warmup s45\n")
     _add_config(world, HostConfig(name="lyra", ssh="lyra", group="clusters"))
 
 
@@ -1776,6 +2023,43 @@ def _build_lynx(world: DemoWorld) -> None:
 # ---------------------------------------------------------------- notifications showcase (§7.14)
 DEMO_WATCHED = "k2:3371232"          # the eval job that completes ~2 min in: a watched job's end notifies
 DEMO_AWAY_S = 8 * 3600               # "since you were away": the last visit, 8 h before the demo starts
+
+
+LAUNCHER_JOB = 3372131                   # k2: stdout = a launcher's few lines; the training writes train.log
+LAUNCHER_WORKDIR = "/shared/lab/alice/vitfm"
+LAUNCHER_TRAIN_LOG = f"{LAUNCHER_WORKDIR}/runs/in1k-b16/r0412/s42/train.log"
+# wandb's run directory is run-<start>-<id>; a fixed name here, since every CLI process re-anchors the world to its own
+# now: `agent log --files` then `--file wandb/…/output.log` (two processes) must name the same file
+LAUNCHER_WANDB_LOG = f"{LAUNCHER_WORKDIR}/wandb/run-in1k-b16-r0412kq7/files/output.log"
+
+
+def _build_launcher(world: DemoWorld) -> None:
+    """The field report behind "find other log files" (§4.7.2): a k2 job whose stdout is a launcher's 6 lines from
+    13 h ago, while the run's train.log under its workdir keeps growing. Around it, what `log.find` must list (an
+    eval.err, wandb's output.log) and must not (a run from 3 days ago, a .venv build log, a file 7 levels down,
+    metrics.jsonl)."""
+    t0 = world.t0
+    c = world.cluster("k2")
+    wd = LAUNCHER_WORKDIR
+    job = _job(c, LAUNCHER_JOB, "vitfm--in1k-b16--s42", partition="gpu-preempt", qos="gpu-priority",
+               submit=t0 - 13 * 3600 - 9 * 60, cpus=8, mem_mib=96 * 1024, gpus_per_node=1,
+               gpu_type="nvidia_h200_nvl", duration_s=40 * 3600, util_target=93.0, mem_target_mib=61000,
+               workdir=wd, command=f"{wd}/jobs/launch.sbatch", stdout_pattern=f"{wd}/logs/%x_%j.out",
+               train_log=LAUNCHER_TRAIN_LOG)
+    _run(world, c, job, started_ago=13 * 3600 + 4 * 60, nodes=["n-38-02"], gpu_idx=[[1]], cpu_ids=["8-15"])
+    start = job.start if job.start is not None else t0
+    run = posixpath.dirname(LAUNCHER_TRAIN_LOG)
+    side = ((f"{run}/eval.err", start + 95, "UserWarning: torch.utils.checkpoint: use_reentrant=None is deprecated;"
+                                             " pass it explicitly\n"),
+            (LAUNCHER_WANDB_LOG, start + 60,
+             "wandb: Tracking run with wandb version 0.22.2\nwandb: Run data is saved locally in wandb/\n"),
+            (f"{wd}/runs/in1k-b16/r0398/s42/train.log", t0 - 3 * 86400, "[old run] epoch 300/300 done\n"),
+            (f"{wd}/.venv/build.log", start + 30, "Successfully installed vitfm-0.4.1\n"),
+            (f"{wd}/data/cache/in1k/shards/a/b/prep.log", start + 20, "prepared 1281 shards\n"),
+            (f"{run}/metrics.jsonl", t0 - 30, '{"epoch": 97, "train_loss": 0.4312}\n'))
+    for path, at, text in side:
+        lg = c.logs[path] = SimLog(path, at)
+        lg.write(text, at)
 
 
 def demo_ui_state(now: datetime) -> dict[str, Any]:

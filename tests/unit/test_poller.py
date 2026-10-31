@@ -12,7 +12,7 @@ import pytest
 
 from runfleet.config import GeneralSettings, HostConfig, SlurmSettings
 from runfleet.core.clock import ManualClock
-from runfleet.core.poller import HostLanes, HostPoller, merge_outputs, update_monitor_view
+from runfleet.core.poller import HostLanes, HostPoller, _keep_sticky, merge_outputs, update_monitor_view
 from runfleet.core.store import FleetStore
 from runfleet.backends.base import CollectorOutput, MonitorView
 from runfleet.models import ConnState, ErrorKind, HostError, Visibility
@@ -495,6 +495,24 @@ async def test_cached_profile_polls_first_and_redetects_in_background(rig_factor
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_redetect_keeps_known_usage_factors() -> None:
+    """§5.1 / §5.2.11: a re-detection whose `slurm.qos` came back unreadable keeps the UsageFactors of the same
+    cluster (job cost would otherwise show `×1?` until the next detection); another cluster's never carry over."""
+    rig = Rig(SLURM, cached=True)
+    rig.p.caps = replace(rig.p.caps, qos_usage_factor={"low": 0.0})   # type: ignore[arg-type]
+    rig.p.caps_at = CLOCK_START - timedelta(hours=7)
+    task = asyncio.ensure_future(rig.p.run())
+    await run_for(rig.clock, 20)
+    assert rig.t.count("detect") == 1
+    assert rig.p.caps is not None and rig.p.caps.qos_usage_factor == {"low": 0.0}
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    new, old = stub_caps(SLURM), stub_caps(SLURM, qos_usage_factor={"low": 0.0})
+    assert _keep_sticky(new, None) is new and _keep_sticky(new, replace(old, cluster_name="other")) is new
+    assert _keep_sticky(replace(new, qos_usage_factor={"normal": 1.0}), old).qos_usage_factor == {"normal": 1.0}
 
 
 async def test_idle_pause_stops_all_polling(rig_factory: Callable[..., Rig]) -> None:

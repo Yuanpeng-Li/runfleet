@@ -18,7 +18,8 @@ log = logging.getLogger("runfleet.backends.detect")
 
 DETECT_TOOLS = ("squeue", "sacct", "sinfo", "scontrol", "sstat", "scancel", "sacctmgr", "nvidia-smi", "timeout",
                 "less", "stat", "ps", "pgrep", "srun", "ssh",   # srun/ssh: Attach's login-side tools (§7.16)
-                "sprio", "sshare")                              # pending priority evidence (§5.2.10)
+                "sprio", "sshare",                              # pending priority evidence (§5.2.10)
+                "sreport", "sbank")                             # Account usage (§5.2.11; sbank: a site wrapper)
 
 ID_CMD = ("printf 'user=%s\\nuid=%s\\nhost=%s\\ntz=%s\\nepoch=%s\\n' \"$(id -un)\" \"$(id -u)\" \"$(hostname)\" "
           "\"$(date +%z)\" \"$(date +%s)\"")
@@ -29,7 +30,8 @@ _TZ = re.compile(r"^([+-])(\d{2}):?(\d{2})$")
 
 # Capabilities fields a collector may set through ingest_capabilities (anything else is ignored with a warning).
 _CAP_FIELDS = frozenset({"slurm_version", "cluster_name", "slurm_config", "acct_gather_freq_s", "gpu_tres",
-                         "sacct_fields", "associations", "gpu_partitions", "driver_version"})
+                         "sacct_fields", "associations", "gpu_partitions", "driver_version",
+                         "qos_usage_factor", "partition_charges"})        # Account: charging rules (§5.2.11)
 
 
 def detect_sections(host: HostConfig, collectors: Mapping[str, type[Collector]]) -> list[Section]:
@@ -113,6 +115,7 @@ def _check_types(caps: Capabilities) -> None:
         "slurm_version": (str, type(None)), "cluster_name": (str, type(None)), "slurm_config": (Mapping,),
         "acct_gather_freq_s": (int, type(None)), "gpu_tres": (bool, type(None)), "sacct_fields": (frozenset,),
         "associations": (tuple,), "gpu_partitions": (tuple,), "driver_version": (str, type(None)),
+        "qos_usage_factor": (Mapping,), "partition_charges": (tuple,),
     }
     for name, types in expected.items():
         if not isinstance(getattr(caps, name), types):

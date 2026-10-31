@@ -1,0 +1,9 @@
+normal|1.000000
+vega|1.000000
+staff|1.000000
+large|1.000000
+fio-bench|1.000000
+vega-dev|1.000000
+vega-pri|1.000000
+education|1.000000
+vega-dev-a30|1.000000

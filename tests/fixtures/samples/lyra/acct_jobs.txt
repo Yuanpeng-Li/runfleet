@@ -1,0 +1,7 @@
+31303059alice07free-gpuxllowCOMPLETED4891117884895541788538465billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1orb-swp--train--warmup--s43--a02
+31303060alice07free-gpuxllowCOMPLETED5082817884900961788540924billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1orb-swp--train--const--s43--a02
+31303090alice07free-gpuxllowCOMPLETED5162317884921941788543817billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1orb-swp--train--onecycle--s43--a02
+31303091alice07free-gpuxllowCOMPLETED4374717885120071788555754billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1orb-swp--train--adam--s43--a02
+31327454alice07free-gpuxllowFAILED15017885739521788574102billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1orb-swp--train--warmup--s49--a01
+31327455alice07free-gpuxllowFAILED14817885739541788574102billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1orb-swp--train--const--s49--a01
+31327456alice07free-gpuxllowFAILED4217885740601788574102billing=8,cpu=8,gres/gpu:rtx6000=1,gres/gpu=1,mem=48G,node=1orb-swp--train--warmup--s50--a01

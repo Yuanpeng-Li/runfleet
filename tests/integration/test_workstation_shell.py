@@ -7,6 +7,7 @@ import getpass
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -104,14 +105,14 @@ def test_hung_nvidia_smi_is_abandoned(lynx: MockEnv) -> None:
 def _fake_nvidia_smi(tmp_path: Path) -> Path:
     fake = tmp_path / "fakebin" / "nvidia-smi"
     fake.parent.mkdir()
-    fake.symlink_to(subprocess.run(["sh", "-c", "command -v sleep"], capture_output=True, text=True).stdout.strip())
+    fake.symlink_to(sys.executable)        # not sleep: a multi-call coreutils (uutils) refuses to run under another name
     return fake
 
 
 def test_guard_refuses_to_stack(lynx: MockEnv, tmp_path: Path) -> None:
     fake = _fake_nvidia_smi(tmp_path)
     # two "hung" queries of earlier probes, still waited for by their abandoned wrapper subshells (`rf_nv`)
-    stuck = [subprocess.Popen(["sh", "-c", f"rf_nv() {{ {fake} 30; }}; rf_nv; true"]) for _ in range(2)]
+    stuck = [subprocess.Popen(["sh", "-c", f"rf_nv() {{ {fake} -c 'import time; time.sleep(30)'; }}; rf_nv; true"]) for _ in range(2)]
     time.sleep(0.2)
     try:
         cx = ws_ctx()
@@ -130,7 +131,7 @@ def test_guard_refuses_to_stack(lynx: MockEnv, tmp_path: Path) -> None:
 def test_guard_ignores_healthy_nvidia_smi_of_the_user(lynx: MockEnv, tmp_path: Path) -> None:
     """Two `nvidia-smi -l` the user runs in a terminal (not stuck, not RunFleet's) never block GPU polling."""
     fake = _fake_nvidia_smi(tmp_path)
-    healthy = [subprocess.Popen([str(fake), "30"]) for _ in range(2)]
+    healthy = [subprocess.Popen([str(fake), "-c", "import time; time.sleep(30)"]) for _ in range(2)]
     try:
         cx = ws_ctx()
         nv, _, _, secs = all_sections(cx)

@@ -36,6 +36,10 @@ failed, cancelled and ended; `ended` alone is only a workstation task gone with 
   `<log>.pid`. RunFleet's id for that run is `HOST:p<pid>` (e.g. `labstation:p642229`): the pid printed at launch
   or stored in `<log>.pid`. RunFleet finds the log from the process's open stdout, so `agent log` works while
   the process lives; after it ends, use ws-run's `status.sh` with the log path.
+- A run whose program writes its own log under the run dir (`runs/<task>/<run>/s42/train.log`, wandb's
+  `output.log`) leaves that stdout with a launcher's few lines: `runfleet agent log ID --files` lists the files
+  written under the job's workdir while it ran (other jobs' logs marked), `--file PATH` reads one of them the same
+  bounded way.
   JSON also carries `key` (`labstation:p642229-1788696459`, pid plus start time); either form is accepted.
 - Array task: `HOST:<parent>_<index>`; a whole array: `HOST:<parent>`. Tasks that have not started are one pending
   range row (`k2:31270818_[8-24%2]`): a task id inside it (`k2:31270818_12`) resolves to that range until the task
@@ -49,6 +53,26 @@ runfleet agent brief                               # logins expired? my jobs alr
 ```
 Then let hpc-run / ws-run launch: the launch checks availability live (submit.sh / idlest-GPU pick) — RunFleet's
 answer only narrows the choice. Free ≠ schedulable for you (QOS / association limits).
+
+## Budget before a launch (Slurm)
+RunFleet observes and estimates; hpc-run (or the user) chooses the account and partition and submits. Before a large
+launch (many jobs, many GPU-hours) on a cluster that charges SU:
+```sh
+runfleet agent cost lyra --partition gpuxl --gpus 1 --gpu-type l40s --time 24h --account pilab_02   # SU, share left
+runfleet agent usage lyra                          # SU used / limit / left per account, my GPU-h this window
+```
+- Multiply the per-job `su` by the number of jobs yourself; say it is an estimate (the `notes` list every
+  assumption: CPUs from DefCpuPerGPU, the QOS taken, memory not counted, …).
+- Pass `--account` when the run skill's config names one; without it `account` may be null and
+  `candidate_accounts[]` lists every limited account that may run there, tightest first.
+- `account.exceeds: true` (or `share_pct` ≥ 100, or any `candidate_accounts[].exceeds`): the job cannot finish on
+  that account — tell the user before launching. SU low (`share_pct` high, or `available_su` small): tell the user,
+  and offer a partition from `alternatives` (free: every QOS that may run there has UsageFactor 0; jobs there may be
+  preempted). Never switch on your own: the run skill's config names the account / partition, and the user decides.
+- No `--gpu-type` on a partition that weights typed GPUs only: `su_min` … `su_max` (`su` is the highest); pass the
+  type for one figure.
+- `usage --by experiment` (once with `--refresh`: one report probe) shows which experiments used the GPU-hours.
+- k2-like clusters print "usage only": no SU limits, nothing to budget; the amounts are billing-h (= CPU-h there).
 
 After a launch (job id or pid known):
 ```sh

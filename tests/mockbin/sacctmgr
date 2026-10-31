@@ -1,5 +1,12 @@
 #!/bin/sh
-# mock sacctmgr: the user's associations (Cluster|Account|Partition|QOS)
+# mock sacctmgr: `show qos` → the QOS usage factors (Name|UsageFactor, Account §5.2.11); anything else → the user's
+# associations (Cluster|Account|Partition|QOS)
 . "$RF_MOCK_BIN/_lib.sh"
 mock_log sacctmgr "$@"
+for a in "$@"; do
+  if [ "$a" = qos ]; then
+    [ -f "$S/sacctmgr_qos.txt" ] && cat "$S/sacctmgr_qos.txt"
+    exit 0
+  fi
+done
 cut -d'|' -f1-4 "$S/sacctmgr_assoc.txt"

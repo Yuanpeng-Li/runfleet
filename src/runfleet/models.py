@@ -9,7 +9,7 @@ import types
 import typing
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import Enum, StrEnum
 from typing import Any, Literal, TypeVar
 
@@ -68,7 +68,19 @@ class SectionStatus:
     last_ok: datetime | None
     error: HostError | None = None
 
-DETECT_REV = 2      # bump when detection learns something new: cached capabilities of an older revision are re-detected
+DETECT_REV = 3      # bump when detection learns something new: cached capabilities of an older revision are re-detected
+                    # (2: priority settings, §5.2.10; 3: Account — QOS UsageFactor and partition charges, §5.2.11)
+
+
+@dataclass(frozen=True, slots=True)
+class PartitionCharge:                       # Account (§5.2.11): how one partition charges, from `slurm.parts` (§5.1)
+    partition: str
+    billing_weights: str = ""                # raw TRESBillingWeights ("cpu=1,gres/gpu:L40S=32"); "" = none (billing
+                                             # = CPUs, Slurm's default)
+    qos: str | None = None                   # the partition QOS (`QoS=`; `N/A` -> None)
+    allow_qos: tuple[str, ...] | None = None # AllowQos; None = ALL
+    def_cpu_per_gpu: int | None = None       # DefCpuPerGPU (None: not set; lyra prints none)
+    def_mem_per_cpu_mb: int | None = None    # DefMemPerCPU (None: not set or DefMemPerNode)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +105,9 @@ class Capabilities:
     node_ssh: Literal["adopt", "denied"] | None = None   # Attach (§7.16), learned via caps_patch by the first node
                                              # ssh: "adopt" = login→node ssh lands in a job (pam_slurm_adopt);
                                              # "denied" = refused before/at auth (lyra). None = not tried yet
+    qos_usage_factor: Mapping[str, float] = field(default_factory=dict)   # Account (§5.2.11): QOS name -> UsageFactor
+                                             # (`slurm.qos`); {} = not known (job cost shows the factor as `×1?`)
+    partition_charges: tuple[PartitionCharge, ...] = ()   # Account: every partition line of `slurm.parts`
 
 @dataclass(frozen=True, slots=True)
 class HostMetrics:
@@ -215,11 +230,11 @@ class ResourceAlloc:
 
 @dataclass(frozen=True, slots=True)
 class LogRef:
-    stream: Literal["stdout", "stderr"]
+    stream: Literal["stdout", "stderr", "file"]   # "file": another log under the workdir (log.find, §4.7.2)
     path: str | None             # absolute, expanded; None if unknown
     pattern: str | None = None   # raw Slurm pattern ("…/logs/%x_%j.out") if that is all we have
     merged: bool = False         # stderr goes to the stdout file
-    source: Literal["scontrol", "squeue", "sacct", "template", "procfd", "cache", "demo"] = "squeue"
+    source: Literal["scontrol", "squeue", "sacct", "template", "procfd", "cache", "demo", "found"] = "squeue"
     size: int | None = None      # from the last stat
     mtime: datetime | None = None
     error: str | None = None     # "No such file", "Permission denied"
@@ -576,6 +591,89 @@ class AttachState:                       # FleetAPI.attach_state; one per job at
     node: str | None = None              # node pinned by attach_start(node=...); None = backend default
     failures: int = 0                    # consecutive failed samples (auto-refresh stops at 3)
 
+# ---------- account usage (§5.2.11; Account, additive after 0.8.0) ----------
+UsageWindow = Literal["7d", "30d", "90d", "period"]
+USAGE_WINDOWS: tuple[UsageWindow, ...] = ("7d", "30d", "90d", "period")   # `[`/`]` order
+WINDOW_DAYS: Mapping[str, int] = {"7d": 7, "30d": 30, "90d": 90}         # "period": per account (§5.2.11)
+
+@dataclass(frozen=True, slots=True)
+class AccountBalance:                    # one Slurm account's budget
+    account: str
+    limit_su: float | None = None        # account row GrpTRESMins billing / 60 (sshare), else sbank "Account Limit";
+                                         # None = no SU limit known — never "unlimited"
+    used_su: float | None = None         # account row GrpTRESRaw billing / 60 (sshare), else sbank "Usage"; scaled by
+                                         # UsageFactor (charged), so never comparable with sreport billing-h
+    used_basis: Literal["since_reset", "decayed", "unknown"] = "unknown"   # PriorityDecayHalfLife 0 / > 0 / unknown
+    limit_source: Literal["sshare", "sbank"] | None = None
+    used_source: Literal["sshare", "sbank"] | None = None
+    other_limits: Mapping[str, float] = field(default_factory=dict)   # GrpTRESMins keys other than billing, in hours
+                                         # ("gres/gpu" -> 2000.0): own units, never SU
+    next_realloc: date | None = None     # sbank "Next reallocation" (cluster-local date)
+    realloc_known: bool = False          # True with next_realloc None: sbank answered "No data found."
+    read_at: datetime | None = None      # when used_su was read
+    my_used_su: float | None = None      # the user's own sshare row(s) GrpTRESRaw billing / 60, same basis as used_su
+                                         # (usage only: the "recent … (decays)" next to the user's other numbers)
+
+    @property
+    def available_su(self) -> float | None:
+        """limit_su - used_su when both are known, else None."""
+        if self.limit_su is None or self.used_su is None:
+            return None
+        return self.limit_su - self.used_su
+
+@dataclass(frozen=True, slots=True)
+class AccountUse:                        # one account over one window: CPU-h / GPU-h / billing-h, NOT charged
+    account: str
+    scope: Literal["me", "account"]      # "account": the whole account's total (on-demand report only)
+    cpu_h: float | None
+    gpu_h: float | None
+    billing_h: float | None              # sreport billing is not scaled by UsageFactor: never "SU"
+    source: Literal["sreport", "sacct"] = "sreport"   # "sacct": no sreport, summed from the job rollup
+    start: datetime | None = None        # this account's window start (the period window differs per account)
+    start_inferred: bool = False         # period start = next_realloc - allocation_period (an assumption, labelled)
+
+@dataclass(frozen=True, slots=True)
+class AccountSummary:                    # HostSnapshot.account (periodic `slurm.account`) and AccountReport.summary
+    window: UsageWindow                  # of `usage` ("period" only in an on-demand report)
+    read_at: datetime                    # the last sshare reading that produced `balances`
+    mode: Literal["limits", "usage_only"]   # "limits": >= 1 account has an SU limit
+    balances: tuple[AccountBalance, ...] = ()   # one per account, sorted by name
+    usage: tuple[AccountUse, ...] = ()   # scope "me", one per account
+    usage_at: datetime | None = None     # the last sreport reading that produced `usage`
+    sbank_at: datetime | None = None     # the last sbank reading (None: never / no sbank)
+    half_life_s: float | None = None     # PriorityDecayHalfLife (0 = usage does not decay; None = unknown)
+    reset_period: str | None = None      # PriorityUsageResetPeriod unless NONE: "MONTHLY", "WEEKLY", …
+    notes: tuple[str, ...] = ()          # fixed texts: "sreport not installed: totals from your job records", …
+    errors: tuple[HostError, ...] = ()   # failing sections; the last good values above are kept (with their ages)
+
+@dataclass(frozen=True, slots=True)
+class UsageCell:                         # rollup atom: my jobs of one (name, account, partition, qos, GPU model)
+    name: str                            # job name (grouping keys are derived from it, util/usage.py)
+    account: str
+    partition: str
+    qos: str
+    gpu_model: str                       # normalised gres type ("rtx6000", "nvidia_a100-sxm4-40gb"); "" = no GPU or
+                                         # untyped
+    jobs: int
+    running: int                         # of them running at report time (their hours so far are included)
+    cpu_h: float
+    gpu_h: float
+    billing_h: float
+    charged_su: float | None             # billing_h × UsageFactor(qos); None when that QOS's factor is unknown
+
+@dataclass(frozen=True, slots=True)
+class AccountReport:                     # FleetAPI.account_report: one host, one window, fetched on demand
+    host: str
+    window: UsageWindow                  # the window answered ("period" without a known start -> "30d")
+    fetched_at: datetime
+    summary: AccountSummary              # balances + my usage for this window (fresh, so `r` really refreshes)
+    window_start: datetime | None = None # earliest start over the accounts (None: no usage window, e.g. no period)
+    account_totals: tuple[AccountUse, ...] = ()   # scope "account" (sreport account rows)
+    cells: tuple[UsageCell, ...] = ()
+    jobs_seen: int = 0                   # distinct allocations in the rollup
+    truncated: bool = False              # a sacct chunk was cut, refused or had bad rows: the rollup is a lower bound
+    errors: tuple[HostError, ...] = ()   # failing report sections (classified, never raw stderr in the UI)
+
 # ---------- snapshot ----------
 @dataclass(frozen=True, slots=True)
 class HostSnapshot:
@@ -588,6 +686,7 @@ class HostSnapshot:
     nodes: tuple[Node, ...]
     partitions: tuple[PartitionSummary, ...]
     metrics: HostMetrics | None
+    account: AccountSummary | None = None   # Account (§5.2.11): periodic summary; None = never read / not applicable
 
 # ---------- actions, import, doctor ----------
 @dataclass(frozen=True, slots=True)
@@ -626,7 +725,8 @@ class DoctorReport:
     warnings: tuple[str, ...] = ()
 
 def to_json(obj: Any) -> Any:
-    """Dataclass/enum/datetime/timedelta/frozenset -> JSON-compatible value (datetimes ISO 8601 UTC)."""
+    """Dataclass/enum/datetime/date/timedelta/frozenset -> JSON-compatible value (datetimes ISO 8601 UTC, dates
+    "YYYY-MM-DD")."""
     if obj is None or isinstance(obj, (bool, int, float, str)):
         return obj.value if isinstance(obj, Enum) else obj
     if isinstance(obj, Enum):
@@ -634,6 +734,8 @@ def to_json(obj: Any) -> Any:
     if isinstance(obj, datetime):
         aware = obj if obj.tzinfo is not None else obj.replace(tzinfo=UTC)
         return aware.astimezone(UTC).isoformat()
+    if isinstance(obj, date):                      # after datetime (a subclass): a calendar date, "YYYY-MM-DD"
+        return obj.isoformat()
     if isinstance(obj, timedelta):
         return obj.total_seconds()
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
@@ -708,6 +810,10 @@ def _decode(tp: Any, data: Any) -> Any:
                 raise TypeError(f"expected an ISO timestamp, got {data!r}")
             dt = datetime.fromisoformat(data)
             return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+        if tp is date:
+            if not isinstance(data, str):
+                raise TypeError(f"expected a YYYY-MM-DD date, got {data!r}")
+            return date.fromisoformat(data)
         if tp is timedelta:
             try:
                 return timedelta(seconds=float(data))

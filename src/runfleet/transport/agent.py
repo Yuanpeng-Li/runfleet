@@ -89,8 +89,8 @@ rfa_victims() {
   rfa_k="$RA/$1"
   [ -f "$rfa_k.job" ] && [ -s "$rfa_k.pg" ] || return 0
   rfa_g=$(cat "$rfa_k.pg" 2>/dev/null)
-  rfa_tree "$rfa_g"
   if [ -n "$RFA_SS" ]; then echo "-$rfa_g"; else echo "$rfa_g"; fi
+  rfa_tree "$rfa_g"
 }
 rfa_kill() {
   rfa_v=$(rfa_victims "$1")

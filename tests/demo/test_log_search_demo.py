@@ -59,13 +59,13 @@ async def test_demo_search_round_trip_on_clusters_and_workstations() -> None:
     svc, world, _clock, transports = _service()
     await svc.collect_once()
     r = await svc.search_logs("k2", LogQuery("cuda OUT of memory"))
-    assert r.error is None and len(r.files) == 15 and [h.key.id for h in r.hits] == ["3368404"]
+    assert r.error is None and len(r.files) == 16 and [h.key.id for h in r.hits] == ["3368404"]
     hit = r.hits[0]
     data = bytes(world.cluster("k2").logs[hit.file.path].read_from(0))
     assert data[hit.offset:].startswith(hit.excerpt.encode()) and hit.needle.startswith("torch.OutOfMemoryError")
     assert hit.needle in data[hit.start:].split(b"\n")[hit.line - 1].decode()
     assert "missing" in [f.status for f in r.files]                        # logs the demo never wrote: said so
-    assert transports["k2"].sections.count("log.search") == 1             # one probe for the host's 15 files
+    assert transports["k2"].sections.count("log.search") == 1             # one probe for the host's 16 files
     ws = await svc.search_logs("labstation", LogQuery(r"epoch [0-9]+/200", regex=True), max_matches=3)
     assert len(ws.hits) == 3 and ws.match_capped and ws.hits[0].key.id.startswith("p")
     bad = await svc.search_logs("vega", LogQuery("loss=[0", regex=True))

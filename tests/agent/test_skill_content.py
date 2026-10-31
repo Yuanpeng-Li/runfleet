@@ -153,7 +153,7 @@ def test_frontmatter_is_strict_yaml_and_spec_compliant() -> None:
 def test_metadata_is_a_string_map_with_the_skill_revision() -> None:
     meta = _front()[0]["metadata"]
     assert isinstance(meta, dict) and meta and all(isinstance(k, str) and isinstance(v, str) for k, v in meta.items())
-    assert meta["runfleet-skill"] == "2"
+    assert meta["runfleet-skill"] == "3"
 
 
 def test_allowed_tools_is_a_list_of_narrow_patterns() -> None:
@@ -210,6 +210,19 @@ def test_waiting_has_a_foreground_fallback() -> None:
     assert "--timeout 540" in body and "runfleet agent events --since" in body
     runs = _read("references/with-run-skills.md")
     assert "if your agent supports background commands" in runs and "--timeout 540" in runs
+
+
+def test_budget_advice_names_the_real_cost_fields() -> None:
+    """Review: the reference said `share` while `agent cost --json` emits `account.share_pct`; and it had no rule for
+    an estimate above what is left."""
+    runs = _read("references/with-run-skills.md")
+    assert "`share`" not in runs and "`share_pct`" in runs and "`account.exceeds: true`" in runs
+    assert "`candidate_accounts[]`" in runs and "`su_min` … `su_max`" in runs
+    from runfleet.agent import view
+    from tests.agent.test_usage_cost import creq, fleet, lyra, summary
+    data = view.cost(fleet(lyra(account=summary())), "lyra", creq(account="pilab_02")).data
+    assert {"share_pct", "exceeds", "available_su"} <= set(data["account"]) and "candidate_accounts" in data
+    assert {"su_min", "su_max"} <= set(data)
 
 
 def test_connect_is_left_to_the_user_in_their_own_terminal() -> None:

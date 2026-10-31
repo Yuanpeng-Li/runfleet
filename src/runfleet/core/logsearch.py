@@ -173,6 +173,9 @@ def plan(host: str, jobs: Iterable[Job], now: datetime, window_s: float, *, max_
             no_path += 1
             continue
         for ref in sorted(refs, key=lambda r: r.stream != "stdout"):
+            stream = ref.stream
+            if stream == "file":            # a found file (§4.7.2) is never in Job.logs
+                continue
             path = ref.path or ""
             try:
                 shell.path(path)
@@ -181,7 +184,7 @@ def plan(host: str, jobs: Iterable[Job], now: datetime, window_s: float, *, max_
             seen = files.get(path)
             if seen is None:
                 merged = ref.stream == "stdout" and any(r.merged for r in job.logs if r.stream == "stderr")
-                files[path] = SearchFile(path, job.key, job.name, ref.stream, merged)
+                files[path] = SearchFile(path, job.key, job.name, stream, merged)
             elif seen.key != job.key:
                 files[path] = SearchFile(seen.path, seen.key, seen.name, seen.stream, seen.merged, seen.others + 1)
     ordered = list(files.values())

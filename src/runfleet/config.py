@@ -37,6 +37,10 @@ class SlurmSettings:
     protected_qos: tuple[str, ...] = ()
     attach: AttachSetting = "ssh+srun"   # Attach (§7.16): how JobDetail's GPU/Procs tab may read a running job's node
     attach_refresh: float = 15       # floor 10; ssh auto-refresh period (srun never auto-refreshes)
+    account_usage: bool = True       # Account (§5.2.11): False = no `slurm.account` group and no on-demand report
+    poll_account: float = 1800       # floor 900; the account summary period (×2 hidden)
+    allocation_period: float = 365 * 86400   # the "period" window starts at next reallocation minus this (sbank);
+                                             # 0 = unknown: no period window from sbank dates
 
 @dataclass(frozen=True, slots=True)
 class WorkstationSettings:
@@ -78,6 +82,8 @@ class GeneralSettings:
     pager: str = ""                  # "" -> $PAGER, else "less -R +G"
     remember_hosts: bool = True      # hosts named on the command line are saved here once they answer (§8.4)
     update_check: bool = True        # once a day, ask GitHub for the newest RunFleet version (§8.6)
+    usage_window: Literal["7d", "30d", "90d", "period"] = "30d"   # Account (§5.2.11): default window of the Account
+                                     # screen, the periodic summary ("period" -> 30d there) and `agent usage`
 
 @dataclass(frozen=True, slots=True)
 class UISettings:
@@ -132,7 +138,7 @@ _SQUEUE_ARG_RE = re.compile(r"^[A-Za-z0-9_.=,:%/+\-]+$")
 LOCAL_NAMES = frozenset({"local", "localhost"})
 
 SLURM_FLOORS: Mapping[str, float] = {"poll_jobs": 10, "poll_history": 60, "poll_nodes": 60, "poll_usage": 30,
-                                     "poll_logstat": 60, "attach_refresh": 10}
+                                     "poll_logstat": 60, "attach_refresh": 10, "poll_account": 900}
 WORKSTATION_FLOORS: Mapping[str, float] = {"poll_gpu": 2, "poll_procs": 5, "poll_logstat": 30}
 
 
@@ -142,6 +148,16 @@ def parse_duration(value: object, key: str) -> float:
     if m is None:
         raise ConfigError(key, f'expected duration like "15s", got {_show(value)}')
     return float(m.group(1)) * _UNIT_S[m.group(2)]
+
+
+def parse_period(value: object, key: str) -> float:
+    """A duration that may also be "0" (unknown / off): `allocation_period` (Account, §5.2.11)."""
+    if value in ("0", 0) and not isinstance(value, bool):
+        return 0.0
+    try:
+        return parse_duration(value, key)
+    except ConfigError:
+        raise ConfigError(key, f'expected duration like "365d" or "0", got {_show(value)}') from None
 
 
 def format_duration(seconds: float) -> str:
@@ -266,7 +282,7 @@ GENERAL_SCHEMA: Mapping[str, Reader] = {
     "recent_window": parse_duration, "stall_after": parse_duration, "idle_after": parse_duration,
     "idle_pause_after": parse_duration, "max_parallel_ssh": _int(1),
     "refresh_multiplier": _float(0.0, exclusive=True), "pager": _str, "remember_hosts": _bool,
-    "update_check": _bool,
+    "update_check": _bool, "usage_window": _choice("7d", "30d", "90d", "period"),
 }
 UI_SCHEMA: Mapping[str, Reader] = {
     "gpu_util_thresholds": _pair, "gpu_mem_thresholds": _pair, "jobs_columns": _str_list(),
@@ -294,6 +310,7 @@ SLURM_SCHEMA: Mapping[str, Reader] = {
     "users": _names, "partitions": _names, "squeue_args": _str_list(_matching(_SQUEUE_ARG_RE, "squeue argument")),
     "log_templates": _str_list(), "protected_partitions": _names, "protected_qos": _names,
     "attach": _choice(*ATTACH_SETTINGS), "attach_refresh": parse_duration,
+    "account_usage": _bool, "poll_account": parse_duration, "allocation_period": parse_period,
 }
 WORKSTATION_SCHEMA: Mapping[str, Reader] = {
     "poll_gpu": parse_duration, "poll_procs": parse_duration, "poll_logstat": parse_duration,
@@ -483,7 +500,9 @@ def _toml_str(s: str) -> str:
 
 
 def _emit(key: str, value: object, reader: Reader) -> str:
-    if reader is parse_duration and isinstance(value, (int, float)) and not isinstance(value, bool):
+    if reader is parse_period and value == 0:
+        return f'{key} = "0"'
+    if reader in (parse_duration, parse_period) and isinstance(value, (int, float)) and not isinstance(value, bool):
         return f"{key} = {_toml_str(format_duration(value))}"
     return f"{key} = {toml_value(value)}"
 

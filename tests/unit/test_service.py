@@ -548,6 +548,26 @@ async def test_warm_start_from_cache(tmp_path: Path, world: Callable[..., World]
     assert set(again["k2"].jobs) == {"101", "102"}
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_warm_start_keeps_the_account_summary_unless_turned_off(tmp_path: Path, world: Callable[..., World],
+                                                                      enabled: bool) -> None:
+    """Account (§5.2.11, §5.5): the periodic summary rides the snapshots row; `account_usage = false` drops it."""
+    from runfleet.config import SlurmSettings
+    from runfleet.models import AccountBalance, AccountSummary
+    summary = AccountSummary(window="30d", read_at=CLOCK_START - timedelta(hours=1), mode="limits",
+                             balances=(AccountBalance("pilab_02", limit_su=97_885.0, used_su=298.0),))
+    cache = Cache(tmp_path / "cache.sqlite")
+    snap = HostSnapshot("k2", CLOCK_START - timedelta(hours=1), stub_caps(K2), {}, (), (), (), (), None,
+                        account=summary)
+    cache.put_snapshot("k2", snap)
+    cache.flush_sync()
+    host = replace(K2, slurm=SlurmSettings(account_usage=enabled))
+    w = world(host, cache=Cache(tmp_path / "cache.sqlite"))
+    await w.svc._load_cache()
+    got = w.svc.store.hosts["k2"].snapshot
+    assert got is not None and got.account == (summary if enabled else None)
+
+
 async def test_connection_states_reach_the_cache_for_runfleet_status(tmp_path: Path,
                                                                      world: Callable[..., World]) -> None:
     """`runfleet status` shows `lynx:auth` from the cache: the service writes each host's state when it changes

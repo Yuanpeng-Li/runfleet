@@ -4,12 +4,14 @@ Full-screen log of one job: header with the path, stream tabs (``o``/``e``) with
 body (``RichLog``, 20 000 lines) and the live ``\\r`` line. ``/`` searches the buffer (``n``/``N`` next/previous);
 ``]``/``[`` jump between error and warning lines (highlighted); ``p`` opens the whole file in ``$PAGER``.
 Opened from a log search hit (§4.7.1) it streams from the hit's search window (an absolute byte offset) and lands on
-the hit's line, paused.
+the hit's line, paused. ``f`` picks another file written under the job's workdir (``found_logs``) and follows it as the
+third stream (``file``); ``o`` / ``e`` go back.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from rich.text import Text
@@ -18,10 +20,12 @@ from textual.widgets import Input, Static
 
 from runfleet.core.logsearch import LogHit, LogQuery
 from runfleet.core.service import LogUpdate
-from runfleet.models import Job, JobKey, Visibility
+from runfleet.models import Job, JobKey, LogRef, Visibility
 from runfleet.ui import keymap, theme
 from runfleet.ui.messages import FleetChanged
 from runfleet.ui.screens import FleetScreen
+from runfleet.ui.screens.found_logs import (file_label, find_problem, fresher_ref, own_paths, picker, quiet_hint,
+                                             remember_pick)
 from runfleet.ui.widgets.header import FleetHeader
 from runfleet.ui.widgets.hintbar import HintBar
 from runfleet.ui.widgets.log_view import RECONNECT_DELAYS, LogFollower, LogView
@@ -38,23 +42,45 @@ class LogScreen(FleetScreen):
     HELP_CONTEXTS = ("log", "global")
     HELP_TITLE = "Log viewer"
 
-    def __init__(self, key: JobKey, stream: str = "stdout") -> None:
+    def __init__(self, key: JobKey, stream: str = "stdout", detail_logs: Iterable[LogRef] = ()) -> None:
         super().__init__()
         self.key = key
         self.stream = stream
+        # the stdout / stderr refs the job detail's probe resolved (a polled ref may hold only a pattern): `f` marks
+        # those rows as the job's own, as the detail's picker does
+        self.detail_logs = tuple(detail_logs)
         self.loaded = 0
         self.ended = False
         self.follower: LogFollower | None = None
 
     def _crumbs(self, label: str) -> list[Any]:
-        """Jobs › <job> (back to its detail) › <stream>."""
-        return [("Jobs", ("view", "jobs")), (label, ("job", self.key.host, self.key.id)), self.stream]
+        """Jobs › <job> (back to its detail) › <stream> (a picked file: its name)."""
+        last = file_label(self._ref(self.job)) if self.stream == "file" else self.stream
+        return [("Jobs", ("view", "jobs")), (label, ("job", self.key.host, self.key.id)), last]
+
+    def shown_ref(self) -> LogRef | None:
+        """The log this view shows (the pager opens the same one)."""
+        ref = self._ref(self.job)
+        return ref if isinstance(ref, LogRef) else None
+
+    def _ref(self, job: Job | None) -> Any:
+        """The shown log's ref: stdout / stderr as polled (its path known: it follows requeues), else as job detail
+        resolved it (``detail_logs``; a polled ref may hold only a pattern), or the file picked with `f`."""
+        if job is None:
+            return None
+        ref = self.rf.stream_ref(job, self.stream)
+        if self.stream != "file" and (ref is None or ref.path is None):
+            ref = next((r for r in self.detail_logs if r.stream == self.stream and r.path), None) or ref
+        return ref
 
     def compose(self) -> ComposeResult:
         job = self.rf.store.job(self.key)
         label = job.key.label if job is not None else self.key.id
         yield FleetHeader(crumbs=self._crumbs(label), host=self.key.host, id="header")
         yield Static("", id="streams", classes="title-line")
+        hint = Static("", id="find-hint", classes="title-line")      # "stdout quiet for 13h; f finds …"
+        hint.display = False
+        yield hint
         yield LogView(id="log-view")
         search = Input(placeholder="search the buffer (enter: find · esc: cancel)", id="log-search", compact=True)
         search.display = False
@@ -83,7 +109,7 @@ class LogScreen(FleetScreen):
         job = self.job
         if job is None or self.follower is None:
             return
-        ref = self.rf.log_ref(job, self.stream)
+        ref = self._ref(job)
         self.loaded = 0
         self.ended = False
         view = self.query_one(LogView)
@@ -109,7 +135,7 @@ class LogScreen(FleetScreen):
         job, follower = self.job, self.follower
         if job is None or follower is None:
             return
-        ref = self.rf.log_ref(job, self.stream)
+        ref = self._ref(job)
         if ref is not None and ref.path is not None and (follower.ref is None or follower.ref.path != ref.path):
             self._start()
             return
@@ -173,9 +199,12 @@ class LogScreen(FleetScreen):
         job = self.job
         streams = self.query_one("#streams", Static)
         width = streams.size.width or (self.size.width or 120) - 2
-        ref = self.rf.log_ref(job, self.stream) if job is not None else None
+        ref = self._ref(job)
         merged = ref is not None and ref.merged and self.stream == "stderr"
         items = [("stdout", "stdout"), ("stderr", "stderr (merged)" if merged else "stderr")]
+        picked = self.rf.stream_ref(job, "file") if job is not None else None
+        if picked is not None:                     # o / e / f(<name>): the way back to each
+            items.append(("file", f"f({file_label(picked, 24)})"))
         line = Text(" ")
         line.append_text(tab_strip(items, self.stream, "screen.stream"))
         view = self.query_one(LogView)
@@ -187,7 +216,9 @@ class LogScreen(FleetScreen):
                 whole = self._stream_start == 0
             else:
                 whole = self.loaded >= ref.size or ref.size <= STREAM_TAIL_BYTES
-            info.append(" (whole file)" if whole else f" of {humanize.size(ref.size)}", style=theme.muted())
+            # a picked file's size is from the find: it may have grown since (no "of" then)
+            if whole or self.stream != "file":
+                info.append(" (whole file)" if whole else f" of {humanize.size(ref.size)}", style=theme.muted())
         info.append(" · tail -F via ssh · ", style=theme.dim())
         state = self.rf.store.hosts[self.key.host].status.state if self.key.host in self.rf.store.hosts else None
         auto = self.follower is not None and self.follower.attempts < len(RECONNECT_DELAYS)
@@ -210,6 +241,18 @@ class LogScreen(FleetScreen):
             line.append(" " * max(1, room - p.cell_len))
             line.append_text(p)
         streams.update(line)
+        self._render_find_hint()
+
+    def _render_find_hint(self) -> None:
+        """One line under the streams when a running job's stdout went quiet (or holds only a launcher's lines)."""
+        job = self.job
+        text = None
+        if job is not None and self.stream != "file":
+            text = quiet_hint(job, fresher_ref(self.rf.log_ref(job, "stdout"), self.detail_logs), self.rf.now(),
+                              self.rf.service.config.general.stall_after)
+        widget = self.query_one("#find-hint", Static)
+        widget.display = text is not None
+        widget.update(Text(f" {text}" if text else "", style=theme.warn()))
 
     def refresh_data(self, changes: FleetChanged | None) -> None:
         if self.is_mounted:
@@ -218,6 +261,8 @@ class LogScreen(FleetScreen):
             self._render_streams()
 
     def refresh_time(self) -> None:
+        if self.is_mounted:
+            self._render_find_hint()
         if self.is_mounted and self.follower is not None and self.follower.dead:
             self._keep_following()
         if self.is_mounted and self.hit is not None and self._hit_since is not None:
@@ -234,10 +279,42 @@ class LogScreen(FleetScreen):
 
     # ------------------------------------------------------------------ actions (keymap "log")
     def action_stream(self, stream: str) -> None:
+        job = self.job
+        if stream == "file" and job is not None and self.rf.stream_ref(job, "file") is None:
+            self._find_logs()                # nothing picked yet
+            return
         if stream != self.stream:
             self.stream = stream
             self.hit = None                  # the other stream: no hit to land on
             self._start()
+
+    def action_find_logs(self) -> None:
+        """`f`: back to the file picked for this job; on it (or none picked yet) the picker of the files written under
+        the job's workdir while it ran."""
+        job = self.job
+        if job is not None and self.stream != "file" and self.rf.stream_ref(job, "file") is not None:
+            self.action_stream("file")
+            return
+        self._find_logs()
+
+    def _find_logs(self) -> None:
+        job = self.job
+        problem = find_problem(job)
+        if problem is not None or job is None:
+            self.rf.toast(problem or "no job", severity="warning")
+            return
+        current = self._ref(job)
+        own = own_paths(job, self.detail_logs)
+
+        def picked(found: Any) -> None:
+            job = self.job
+            if found is None or not self.is_mounted or job is None:
+                return
+            self.stream = remember_pick(self.rf.found_logs, job, found, own)
+            self.hit = None
+            self._start()
+
+        self.app.push_screen(picker(self.rf, job, current.path if current is not None else None, own), picked)
 
     def action_reconnect(self) -> None:
         """Reopen the stream now (also resets the automatic reconnect budget)."""
@@ -302,8 +379,7 @@ class LogScreen(FleetScreen):
         return False
 
     def action_copy_path(self) -> None:
-        job = self.job
-        ref = self.rf.log_ref(job, self.stream) if job is not None else None
+        ref = self._ref(self.job)
         if ref is None or ref.path is None:
             self.rf.toast("no log path known", severity="warning")
             return

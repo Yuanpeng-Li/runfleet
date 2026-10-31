@@ -13,22 +13,28 @@ State kept across ticks (sans-IO; time comes from `HostContext.now`):
   (`gpu_type_source="nvidia-smi"`) while the job is known, and so reaches jobmeta.
 - `_sprio`, `_shares`: the last `sprio` rows (by raw job id) and `sshare` rows of the user (§5.2.10), read by the
   `slurm.priority` group only while an own job is pending.
+- `_acct_*`: the last good readings of the `slurm.account` group (Account, §5.2.11): sshare account rows, the user's
+  sreport usage, sbank balances (`_acct_sbank_at`: the last successful sbank reading, re-read after SBANK_PERIOD) and
+  the classified error of each failing section; together they make `CollectorOutput.account`. An on-demand account
+  report refreshes them too (`ingest_account`); `_acct_plans` holds what `account_sections` planned per window.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 import re
 import shlex
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from runfleet.backends.base import (ActionPlan, ActionSpec, AttachPlan, Cadence, CollectorOutput, HostContext,
                                     MonitorView, SchedulerCollector)
-from runfleet.backends.common import (GpuIdleTracker, StatInfo, complete, log_idle_hint, parse_error,
+from runfleet.backends.common import (GpuIdleTracker, ParseResult, StatInfo, complete, log_idle_hint, parse_error,
                                       parse_stat_lines, section_error, usable, with_stat)
+from runfleet.backends.slurm import account as acct
 from runfleet.backends.slurm import actions as slurm_actions
 from runfleet.backends.slurm import attach
 from runfleet.backends.slurm import commands as cmds
@@ -44,13 +50,15 @@ from runfleet.backends.slurm.states import (explain, humanize_reason, min_job_ag
                                            short_summary)
 from runfleet.config import HostConfig
 from runfleet.errors import AttachBlocked
-from runfleet.models import (ActionResult, AttachMode, Capabilities, ErrorKind, FairShare, HostError, Job, JobDetail,
-                             JobKey, JobKind, JobLive, JobState, JobStep, LogRef, NODE_JOBS_TTL, Node, NodeAlloc,
-                             PartitionSummary, PendingPriority, StateGroup)
+from runfleet.models import (WINDOW_DAYS, AccountReport, AccountSummary, AccountUse, ActionResult, AttachMode,
+                             Capabilities, ErrorKind, FairShare, HostError, Job, JobDetail, JobKey, JobKind, JobLive,
+                             JobState, JobStep, LogRef, NODE_JOBS_TTL, Node, NodeAlloc, PartitionCharge,
+                             PartitionSummary, PendingPriority, StateGroup, UsageWindow)
 from runfleet.probe.section import Section, SectionOutcome, SectionResult
 from runfleet.util.efficiency import efficiency
 from runfleet.util.efficiency import lines as efficiency_lines
-from runfleet.util.slurmfmt import expand_array_tasks, parse_int, parse_tres, parse_tres_per, seconds_prefix
+from runfleet.util.slurmfmt import (expand_array_tasks, nullish, parse_float, parse_int, parse_tres, parse_tres_per,
+                                   seconds_prefix, split_rows)
 
 log = logging.getLogger("runfleet.backends.slurm.collector")
 
@@ -65,6 +73,14 @@ OCCUPANTS_PERIOD = 30.0                                # every user's jobs on th
 PRIORITY_PERIOD = 600.0                                # sprio + sshare (§5.2.10): at most every 10 min, own pending jobs
 PRIORITY_HIDDEN = 6.0                                  # off screen: once an hour
 PRIORITY_MAX_BACKOFF = 3600.0                          # failures: 20, 40, 60 min
+ACCOUNT_FLOOR = 900.0                                  # `slurm.account` (§5.2.11): poll_account, never below 15 min
+ACCOUNT_HIDDEN = 2.0                                   # off screen: hourly at the default 30 min
+ACCOUNT_MAX_BACKOFF = 7200.0                           # failures: 1 h, 2 h
+SBANK_PERIOD = timedelta(hours=6)                      # a reallocation date changes about once a year
+SLURMDBD = "accounting_storage/slurmdbd"
+NO_SREPORT = "sreport not installed"
+NO_SREPORT_REPORT = "sreport not installed: totals from your job records"
+REPORT_SBANK_PERIOD = timedelta(hours=1)               # the on-demand report re-reads sbank at most hourly
 
 _CTLD_DOWN = re.compile(r"Unable to contact slurm controller|Socket timed out|slurm_load_jobs error|"
                         r"Zero Bytes were transmitted", re.IGNORECASE)
@@ -84,6 +100,18 @@ class JobMeta:
     stderr: str | None                 # None = merged with stdout
     gpu_type: str | None
     per_node: tuple[NodeAlloc, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ReportPlan:
+    """What `account_sections` planned for one on-demand account report (§5.2.11), read back by `ingest_account`."""
+    window: UsageWindow                # the window answered ("period" without a start -> "30d")
+    starts: Mapping[str, datetime]     # account -> its window start (period: accounts without one left out)
+    inferred: frozenset[str]           # accounts whose period start is inferred (next reallocation − period)
+    sreport: Mapping[str, tuple[str, ...]]   # sreport section -> its accounts
+    chunks: tuple[str, ...]            # the sacct chunk sections, oldest first
+    clipped: bool                      # the period was clipped at MAX_PERIOD_DAYS: the report is truncated
+    sep: str                           # sacct separator of the chunks
 
 
 class SlurmCollector(SchedulerCollector):
@@ -128,6 +156,19 @@ class SlurmCollector(SchedulerCollector):
         self._sprio_at: datetime | None = None
         self._shares: tuple[FairShare, ...] = ()           # the user's sshare rows
         self._prio_unsupported = False                     # sprio said the cluster is not multifactor (stale caps)
+        self._acct_names: list[str] = []                   # accounts of the last planned `slurm.account` sections
+        self._acct_share: tuple[acct.ShareRow, ...] | None = None   # last good sshare -A rows (None: never read)
+        self._acct_read_at: datetime | None = None
+        self._acct_usage: tuple[AccountUse, ...] = ()      # the user's sreport usage per account
+        self._acct_usage_at: datetime | None = None
+        self._acct_usage_window: UsageWindow | None = None   # of _acct_usage (a restored one may be of another)
+        self._acct_no_sreport = False                      # sreport is not installed: no usage, a note
+        self._acct_sbank: dict[str, acct.SbankBalance] = {}   # lower-case account -> last good sbank balance
+        self._acct_sbank_at: datetime | None = None
+        self._acct_seed_at: datetime | None = None         # the restored summary's sshare time (warm start)
+        self._acct_errors: dict[str, HostError] = {}       # section -> its classified failure, until it answers
+        self._acct_plans: dict[str, _ReportPlan] = {}      # requested window -> the on-demand report planned for it
+        self._acct_fresh = False                           # a report refreshed the state: publish at the next tick
 
     # ------------------------------------------------------------ detection
     @classmethod
@@ -141,6 +182,7 @@ class SlurmCollector(SchedulerCollector):
             Section("slurm.config", cmds.CONFIG_CMD, timeout=10, requires=("scontrol",)),
             Section("slurm.assoc", cmds.ASSOC_CMD, timeout=15, requires=("sacctmgr",)),
             Section("slurm.parts", cmds.PARTS_CMD, timeout=15, requires=("scontrol",)),
+            Section("slurm.qos", cmds.QOS_CMD, timeout=15, requires=("sacctmgr",), max_stdout=cmds.QOS_MAX_STDOUT),
             Section("slurm.sacctfmt", cmds.SACCTFMT_CMD, timeout=10, requires=("sacct",)),
             Section("slurm.gputres", cmds.GPUTRES_CMD, timeout=30, requires=("sacct",)),
         ]
@@ -165,6 +207,9 @@ class SlurmCollector(SchedulerCollector):
             Cadence("slurm.names", 0.0, mode="event"),
             *([Cadence("slurm.priority", PRIORITY_PERIOD, floor=PRIORITY_PERIOD, hidden_factor=PRIORITY_HIDDEN,
                        max_backoff=PRIORITY_MAX_BACKOFF)] if self._priority_wanted(ctx) else []),
+            *([Cadence("slurm.account", max(s.poll_account, ACCOUNT_FLOOR), floor=ACCOUNT_FLOOR, mode="piggyback",
+                       hidden_factor=ACCOUNT_HIDDEN, max_backoff=ACCOUNT_MAX_BACKOFF)]
+              if self._account_wanted(ctx) else []),
         ]
 
     def _priority_pending(self, ctx: HostContext) -> list[Job]:
@@ -205,6 +250,44 @@ class SlurmCollector(SchedulerCollector):
             out.append(sec)
         if "slurm.priority" in due:
             out += self._priority_sections(ctx)
+        if "slurm.account" in due:
+            out += self._account_sections(ctx)
+        return out
+
+    def _account_wanted(self, ctx: HostContext) -> bool:
+        """`slurm.account` (§5.2.11): `account_usage` on, slurmdbd accounting, at least one account of this cluster
+        in the associations, and sshare, sreport or sbank there (tools unknown: assumed)."""
+        caps = ctx.caps
+        if not ctx.host.slurm.account_usage or caps.slurm_config.get("AccountingStorageType") != SLURMDBD:
+            return False
+        if caps.tools and not {"sshare", "sreport", "sbank"} & caps.tools:
+            return False
+        return bool(acct.accounts(caps))
+
+    def _account_sections(self, ctx: HostContext) -> list[Section]:
+        """The periodic summary, piggybacked on a regular tick: sshare -A (balances) + sreport (the user's usage over
+        `general.usage_window`, "period" -> 30d) + sbank when the last good reading is older than SBANK_PERIOD."""
+        if not self._account_wanted(ctx):
+            return []
+        names = self._acct_names = acct.accounts(ctx.caps)
+        period = timedelta(seconds=max(ctx.host.slurm.poll_account, ACCOUNT_FLOOR))
+        if self._acct_read_at is None and self._acct_seed_at is not None and ctx.now - self._acct_seed_at < period:
+            return []           # warm start, `agent --refresh`: the restored summary is younger than its period
+        self._acct_seed_at = None
+        tools = ctx.caps.tools
+        out: list[Section] = []
+        if not tools or "sshare" in tools:
+            out.append(Section("slurm.acct_share", cmds.acct_share_cmd(names), timeout=15, requires=("sshare",),
+                               max_stdout=cmds.ACCT_SHARE_MAX_STDOUT, meta={"accounts": names}))
+        self._acct_no_sreport = bool(tools) and "sreport" not in tools
+        if not self._acct_no_sreport:
+            days = WINDOW_DAYS.get(ctx.general.usage_window, 30)
+            out.append(Section("slurm.acct_sreport", cmds.acct_sreport_cmd(names, f"now-{days}days", totals=False),
+                               timeout=20, requires=("sreport",), max_stdout=cmds.ACCT_SREPORT_MAX_STDOUT,
+                               meta={"accounts": names, "days": days}))
+        if "sbank" in tools and (self._acct_sbank_at is None or ctx.now - self._acct_sbank_at >= SBANK_PERIOD):
+            out.append(Section("slurm.acct_sbank", cmds.acct_sbank_cmd(names), timeout=20, requires=("sbank",),
+                               max_stdout=cmds.ACCT_SBANK_MAX_STDOUT, meta={"accounts": names}))
         return out
 
     def _priority_sections(self, ctx: HostContext) -> list[Section]:
@@ -415,6 +498,7 @@ class SlurmCollector(SchedulerCollector):
         if self._ingest_occupants(results, ctx, errors) and self._unnamed():
             followups.add("slurm.names")
         handled = self._ingest_priority(results, ctx, errors)
+        account = self._ingest_account(results, ctx, errors)
         if self._nodes is not None and ({"slurm.sinfo", "slurm.occupants", "slurm.names"} & set(results)):
             nodes = self._nodes_now(ctx)
 
@@ -432,7 +516,7 @@ class SlurmCollector(SchedulerCollector):
         jobs = self._merge(ctx) if (ran and self._have_jobs) else None
         return CollectorOutput(jobs=jobs, nodes=nodes, partitions=partitions,
                                caps_patch=caps_patch or None, errors=tuple(errors), followups=frozenset(followups),
-                               handled=handled)
+                               handled=handled, account=account)
 
     def _ingest_scontrol(self, r: SectionResult, now: datetime, errors: list[HostError]) -> None:
         if not r.ok:
@@ -680,6 +764,303 @@ class SlurmCollector(SchedulerCollector):
                 elif r.ok or sp.items:
                     self._shares = tuple(sp.items)
         return frozenset(handled)
+
+    def _ingest_account(self, results: Mapping[str, SectionResult], ctx: HostContext,
+                        errors: list[HostError]) -> AccountSummary | None:
+        """`slurm.account` (§5.2.11): a failing section keeps its last values (with their ages) and reports a classified
+        error, both in `errors` (section status, group backoff) and in the summary. MISSING is an answer: no sreport
+        -> no usage and a note; no sbank -> no reallocation dates. None when none of the group's sections ran and no
+        on-demand report refreshed the state since the last tick."""
+        now = ctx.now
+        ran = [n for n in ("slurm.acct_share", "slurm.acct_sreport", "slurm.acct_sbank") if n in results]
+        if not ran and not self._acct_fresh:
+            return None
+        self._acct_fresh = False
+        if (r := results.get("slurm.acct_share")) is not None:
+            self._ingest_share(r, now, errors)
+        if (r := results.get("slurm.acct_sreport")) is not None:
+            if r.outcome is SectionOutcome.MISSING:
+                self._acct_no_sreport, self._acct_usage, self._acct_usage_at = True, (), None
+                self._acct_errors.pop(r.name, None)
+            elif self._account_ok(r, now, errors):
+                sp = acct.parse_sreport(r.stdout)
+                if sp.mostly_bad:
+                    self._account_fail(parse_error(r.name, sp, now, "sreport"), errors)
+                else:
+                    self._acct_no_sreport = False
+                    self._acct_usage, self._acct_usage_at = self._sreport_usage(sp.items, ctx), now
+                    self._acct_usage_window = self._summary_window(ctx)
+        if (r := results.get("slurm.acct_sbank")) is not None:
+            self._ingest_sbank_result(r, now, errors)
+        return self._account_summary(ctx)
+
+    def _ingest_share(self, r: SectionResult, now: datetime, errors: list[HostError]) -> None:
+        """`slurm.acct_share` (periodic or on demand): the sshare account rows; MISSING forgets them (no sshare)."""
+        if r.outcome is SectionOutcome.MISSING:
+            self._acct_share, self._acct_read_at = None, None
+            self._acct_errors.pop(r.name, None)
+        elif self._account_ok(r, now, errors):
+            pr = acct.parse_share(r.stdout)
+            if pr.mostly_bad:
+                self._account_fail(parse_error(r.name, pr, now, "sshare"), errors)
+            else:
+                self._acct_share, self._acct_read_at = tuple(pr.items), now
+
+    def _ingest_sbank_result(self, r: SectionResult, now: datetime, errors: list[HostError]) -> None:
+        """`slurm.acct_sbank` (periodic or on demand); MISSING: no reallocation dates, not asked again for 6 h."""
+        if r.outcome is SectionOutcome.MISSING:
+            self._acct_sbank, self._acct_sbank_at = {}, now
+            self._acct_errors.pop(r.name, None)
+        elif self._account_ok(r, now, errors):
+            self._ingest_sbank(r, now, errors)
+
+    def _account_ok(self, r: SectionResult, now: datetime, errors: list[HostError]) -> bool:
+        """True when `r` answered; else its classified error is kept (and reported) and the last values stay."""
+        if r.ok:
+            self._acct_errors.pop(r.name, None)
+            return True
+        err = acct.account_error(r, now)
+        if err is not None:
+            self._account_fail(err, errors)
+        return False
+
+    def _account_fail(self, err: HostError, errors: list[HostError]) -> None:
+        if err.section:
+            self._acct_errors[err.section] = err
+        errors.append(err)
+
+    def _sreport_usage(self, rows: Sequence[acct.SreportRow], ctx: HostContext, *,
+                       starts: Mapping[str, datetime] | None = None,
+                       inferred: frozenset[str] = frozenset()) -> tuple[AccountUse, ...]:
+        """The user's usage per planned account (`starts`: account -> window start; default the summary window for
+        every account); an account sreport printed no rows for used nothing (0, not unknown: sreport answered)."""
+        only = starts is not None                          # a period sreport: only the accounts of that start
+        if starts is None:
+            days = WINDOW_DAYS.get(ctx.general.usage_window, 30)
+            starts = dict.fromkeys(self._acct_names, ctx.now - timedelta(days=days))
+        mine, _totals = acct.sreport_usage(rows, cluster=ctx.caps.cluster_name, starts=starts)
+        got = {u.account: u for u in mine if not only or u.account in starts}
+        for name, start in starts.items():
+            got.setdefault(name, AccountUse(account=name, scope="me", cpu_h=0.0, gpu_h=0.0, billing_h=0.0,
+                                            start=start))
+        return tuple(dataclasses.replace(got[a], start_inferred=a in inferred) for a in sorted(got))
+
+    def _ingest_sbank(self, r: SectionResult, now: datetime, errors: list[HostError]) -> None:
+        """One block per account; an unknown layout is a PARSE error for that account only (its last good balance
+        stays)."""
+        bad: list[str] = []
+        for key, bank in acct.parse_sbank(r.stdout).items():
+            if bank.error is not None:
+                bad.append(bank.error)
+            else:
+                self._acct_sbank[key] = bank
+        self._acct_sbank_at = now
+        if bad:
+            err = HostError(ErrorKind.PARSE, f"could not read sbank for {len(bad)} account(s) (see log)",
+                            "\n".join(bad)[:4096], r.name, now)
+            log.info("%s: sbank: %s", self.host.name, "; ".join(bad)[:400])
+            self._account_fail(err, errors)
+
+    def _account_summary(self, ctx: HostContext) -> AccountSummary:
+        caps = ctx.caps
+        names = self._acct_names
+        sbank = {k: v for k, v in self._acct_sbank.items() if k in {n.lower() for n in names}}
+        items = acct.balances(names, self._acct_share, sbank, caps, read_at=self._acct_read_at or self._acct_sbank_at)
+        window = self._summary_window(ctx)
+        same = self._acct_usage_window in (None, window)
+        return AccountSummary(
+            window=window, read_at=self._acct_read_at or ctx.now, mode=acct.mode(items), balances=items,
+            usage=self._acct_usage if same else (), usage_at=self._acct_usage_at if same else None,
+            sbank_at=self._acct_sbank_at if sbank else None, half_life_s=acct.half_life_s(caps),
+            reset_period=acct.reset_period(caps), notes=(NO_SREPORT,) if self._acct_no_sreport else (),
+            errors=tuple(self._acct_errors[k] for k in sorted(self._acct_errors)))
+
+    def restore_account(self, summary: AccountSummary | None) -> None:
+        """Warm start (§5.2.11): a new collector (a restart, or the throwaway one of `agent --refresh`) takes from the
+        persisted summary what it otherwise keeps in memory: the time of its last sshare reading (the periodic group
+        is skipped while that is younger than its period) and the sbank readings with their time (reallocation dates,
+        sbank usage / limits), so SBANK_PERIOD holds across processes and the "period" window is known at once; and
+        the usage with its window, so an on-demand report published before the next sreport never blanks it."""
+        if summary is None:
+            return
+        if self._acct_read_at is None and any(b.read_at is not None for b in summary.balances):
+            self._acct_seed_at = summary.read_at
+        if self._acct_usage_at is None and summary.usage_at is not None:   # so a report's publication keeps it
+            self._acct_usage, self._acct_usage_at = summary.usage, summary.usage_at
+            self._acct_usage_window = summary.window
+        if self._acct_sbank_at is not None or self._acct_sbank:
+            return
+        for b in summary.balances:
+            if b.realloc_known or "sbank" in (b.used_source, b.limit_source):
+                self._acct_sbank[b.account.lower()] = acct.SbankBalance(
+                    b.account, usage_su=b.used_su if b.used_source == "sbank" else None,
+                    limit_su=b.limit_su if b.limit_source == "sbank" else None, next_realloc=b.next_realloc,
+                    realloc_known=b.realloc_known)
+        if self._acct_sbank:
+            self._acct_sbank_at = summary.sbank_at
+
+    # ------------------------------------------------------------ on-demand account report (§5.2.11)
+    def account_sections(self, window: UsageWindow, ctx: HostContext) -> list[Section]:
+        """One on-demand report: fresh sshare balances, sreport from the window start (the accounts' totals and the
+        user's rows; for "period" one `.p<i>` per distinct start), the user's allocations in ≤ 30-day sacct chunks
+        (oldest first) and sbank when its last reading is older than an hour. A "period" without a known start is
+        answered as "30d". [] where `slurm.account` would not run (no slurmdbd, off in config, no account)."""
+        if not self._account_wanted(ctx):
+            return []
+        caps, now, tools = ctx.caps, ctx.now, ctx.caps.tools
+        names = self._acct_names = acct.accounts(caps)
+        answered: UsageWindow = window
+        starts: dict[str, datetime] = {}
+        inferred: frozenset[str] = frozenset()
+        clipped = False
+        if window == "period":
+            pw = acct.period_starts(self._account_summary(ctx), caps, ctx.host, now)
+            starts, inferred, clipped = dict(pw.starts), pw.inferred, pw.clipped
+            if not starts:
+                answered = "30d"
+        if answered != "period":
+            starts = dict.fromkeys(names, now - timedelta(days=WINDOW_DAYS[answered]))
+        out: list[Section] = []
+        if not tools or "sshare" in tools:
+            out.append(Section("slurm.acct_share", cmds.acct_share_cmd(names), timeout=15, requires=("sshare",),
+                               max_stdout=cmds.ACCT_SHARE_MAX_STDOUT, meta={"accounts": names}))
+        sreport: dict[str, tuple[str, ...]] = {}
+        if not tools or "sreport" in tools:
+            if answered == "period":
+                by_start: dict[datetime, list[str]] = {}
+                for name, start in sorted(starts.items()):
+                    by_start.setdefault(start, []).append(name)
+                for i, (start, group) in enumerate(sorted(by_start.items())):
+                    day = start.astimezone(timezone(caps.tz_offset)).date().isoformat()
+                    sec = f"slurm.acct_sreport.p{i}"
+                    out.append(Section(sec, cmds.acct_sreport_cmd(group, day, totals=True), timeout=20,
+                                       requires=("sreport",), max_stdout=cmds.ACCT_SREPORT_MAX_STDOUT,
+                                       meta={"accounts": group, "start": day, "totals": True}))
+                    sreport[sec] = tuple(group)
+            else:
+                days = WINDOW_DAYS[answered]
+                out.append(Section("slurm.acct_sreport", cmds.acct_sreport_cmd(names, f"now-{days}days", totals=True),
+                                   timeout=20, requires=("sreport",), max_stdout=cmds.ACCT_SREPORT_MAX_STDOUT,
+                                   meta={"accounts": names, "days": days, "totals": True}))
+                sreport["slurm.acct_sreport"] = tuple(names)
+        sep = self._sep["sacct"]
+        days = max(1, math.ceil((now - min(starts.values())).total_seconds() / 86400))
+        chunks: list[str] = []
+        for i, (older, newer) in enumerate(cmds.acct_chunks(days)):
+            sec = f"slurm.acct_jobs.c{i}"
+            out.append(Section(sec, cmds.acct_jobs_cmd(older, newer, sep), timeout=60, requires=("sacct",),
+                               max_stdout=cmds.ACCT_JOBS_MAX_STDOUT,
+                               meta={"older_days": older, "newer_days": newer, "sep": sep}))
+            chunks.append(sec)
+        if "sbank" in tools and (self._acct_sbank_at is None or now - self._acct_sbank_at >= REPORT_SBANK_PERIOD):
+            out.append(Section("slurm.acct_sbank", cmds.acct_sbank_cmd(names), timeout=20, requires=("sbank",),
+                               max_stdout=cmds.ACCT_SBANK_MAX_STDOUT, meta={"accounts": names}))
+        self._acct_plans[window] = _ReportPlan(window=answered, starts=starts, inferred=inferred, sreport=sreport,
+                                               chunks=tuple(chunks), clipped=clipped, sep=sep)
+        return out
+
+    def ingest_account(self, window: UsageWindow, results: Mapping[str, SectionResult],
+                       ctx: HostContext) -> AccountReport | None:
+        """The report planned by the last `account_sections(window)`. sshare and sbank refresh the collector's own
+        summary state (the next tick publishes it), and so does sreport when the window is the summary's. Chunks are
+        deduplicated and clipped to each account's start; a cut chunk marks the rollup `truncated`, a refused range
+        is an error (never "no jobs"). Without sreport the user's usage is summed from the rollup (with a note)."""
+        plan = self._acct_plans.pop(window, None)
+        if plan is None:
+            return None
+        caps, now = ctx.caps, ctx.now
+        errors: list[HostError] = []
+        if (r := results.get("slurm.acct_share")) is not None:
+            self._ingest_share(r, now, errors)
+        if (r := results.get("slurm.acct_sbank")) is not None:
+            self._ingest_sbank_result(r, now, errors)
+
+        no_sreport = bool(caps.tools) and "sreport" not in caps.tools
+        sreport_ok = bool(plan.sreport)
+        mine: list[AccountUse] = []
+        totals: list[AccountUse] = []
+        for sec, group in plan.sreport.items():
+            r = results.get(sec)
+            if r is None or r.outcome is SectionOutcome.MISSING:
+                no_sreport = no_sreport or r is not None
+                sreport_ok = False
+                continue
+            if not r.ok:
+                if (err := acct.account_error(r, now)) is not None:
+                    errors.append(err)
+                sreport_ok = False
+                continue
+            sp = acct.parse_sreport(r.stdout)
+            if sp.mostly_bad:
+                errors.append(parse_error(sec, sp, now, "sreport"))
+                sreport_ok = False
+                continue
+            starts = {a: plan.starts[a] for a in group if a in plan.starts}
+            mine += self._sreport_usage(sp.items, ctx, starts=starts, inferred=plan.inferred)
+            _mine, total = acct.sreport_usage(sp.items, cluster=caps.cluster_name, starts=starts)
+            got = {u.account: u for u in total if u.account in starts}
+            for name, since in starts.items():         # no account row: nobody used it (0, as for "me")
+                got.setdefault(name, AccountUse(account=name, scope="account", cpu_h=0.0, gpu_h=0.0, billing_h=0.0,
+                                                start=since))
+            totals += [dataclasses.replace(got[a], start_inferred=a in plan.inferred) for a in sorted(got)]
+
+        truncated = plan.clipped
+        chunks: list[list[acct.AcctJob]] = []
+        for sec in plan.chunks:
+            r = results.get(sec)
+            if r is None or r.outcome is SectionOutcome.NOT_RUN:
+                truncated = True                       # the probe stopped before this chunk: its jobs are missing
+                continue
+            cut = acct.truncated(r)
+            truncated = truncated or cut
+            if not r.ok and (err := acct.account_error(r, now)) is not None:
+                errors.append(err)
+            if not r.stdout or not (r.ok or cut or usable(r)):
+                truncated = truncated or not r.ok      # refused / failed chunk: the rollup is a lower bound
+                continue
+            pr = acct.parse_acct_jobs(r.stdout, tz=caps.tz_offset, sep=plan.sep)
+            truncated = truncated or bool(pr.bad_lines)    # rows lost to parsing: the rollup is a lower bound
+            if pr.mostly_bad:
+                errors.append(parse_error(sec, pr, now, "sacct"))
+                continue
+            chunks.append(pr.items)
+        # one start for every account (so jobs of an account outside the associations count too), or per account
+        start: datetime | Mapping[str, datetime] = (plan.starts if plan.window == "period"
+                                                    else min(plan.starts.values()))
+        cells, seen = acct.cells(acct.merge_jobs(chunks), caps, now=now, start=start)
+
+        notes: tuple[str, ...] = ()
+        usage: tuple[AccountUse, ...] = ()
+        usage_at: datetime | None = None
+        if sreport_ok:
+            usage, usage_at = tuple(sorted(mine, key=lambda u: u.account)), now
+            if plan.window == self._summary_window(ctx):
+                self._acct_usage, self._acct_usage_at, self._acct_no_sreport = usage, now, False
+                self._acct_usage_window = plan.window
+                self._acct_errors.pop("slurm.acct_sreport", None)
+        elif no_sreport and not truncated:             # sums (and zeros) only from a complete set of chunks
+            summed = {u.account: u for u in acct.usage_from_cells(cells, plan.starts)}
+            usage = tuple(dataclasses.replace(
+                summed.get(a) or AccountUse(account=a, scope="me", cpu_h=0.0, gpu_h=0.0, billing_h=0.0,
+                                            source="sacct", start=s), start_inferred=a in plan.inferred)
+                for a, s in sorted(plan.starts.items()))
+            usage_at, notes = now, (NO_SREPORT_REPORT,)
+        self._acct_fresh = True
+        base = self._account_summary(ctx)
+        summary = dataclasses.replace(
+            base, window=plan.window, usage=usage, usage_at=usage_at, notes=notes,
+            errors=tuple(e for e in errors if not (e.section or "").startswith("slurm.acct_jobs")))
+        return AccountReport(
+            host=self.host.name, window=plan.window, fetched_at=now, summary=summary,
+            window_start=min(plan.starts.values()) if plan.starts else None,
+            account_totals=tuple(sorted(totals, key=lambda u: u.account)), cells=cells, jobs_seen=seen,
+            truncated=truncated, errors=tuple(errors))
+
+    @staticmethod
+    def _summary_window(ctx: HostContext) -> UsageWindow:
+        """The periodic summary's window: `general.usage_window`, "period" read as 30d."""
+        window = ctx.general.usage_window
+        return "30d" if window == "period" else window
 
     def _priority_of(self, job: Job, ctx: HostContext) -> PendingPriority | None:
         """Priority evidence of an own pending job (§5.2.10); None where the cluster's priority setup is unknown."""
@@ -1200,6 +1581,44 @@ def gpu_partitions(text: str, associations: Sequence[tuple[str, str, str, str]],
     return tuple(sorted(set(found)))
 
 
+def partition_charges(text: str) -> tuple[PartitionCharge, ...]:
+    """How each partition charges (Account, §5.2.11), from the `PartitionName=` lines of `slurm.parts`: every line
+    whose name passes the validator (hidden ones and those closed to the user's groups are not printed without `-a`).
+    TRESBillingWeights stays raw (keys compare case-insensitively later); `QoS=N/A` and `AllowQos=ALL` -> None."""
+    out: list[PartitionCharge] = []
+    for line in text.splitlines():
+        if not line.startswith("PartitionName="):
+            continue
+        f = _fields(line)
+        name = f.get("PartitionName", "")
+        if not name or not cmds.NAME_RE.match(name):
+            continue
+        weights = next((v for k, v in f.items() if k.lower() == "tresbillingweights"), "")
+        allow = f.get("AllowQos", "")
+        out.append(PartitionCharge(
+            partition=name, billing_weights=nullish(weights) or "", qos=nullish(f.get("QoS")),
+            allow_qos=None if not allow or allow == "ALL" else tuple(q for q in allow.split(",") if q),
+            def_cpu_per_gpu=parse_int(f.get("DefCpuPerGPU")),            # UNLIMITED / absent -> None
+            def_mem_per_cpu_mb=parse_int(f.get("DefMemPerCPU"))))
+    return tuple(out)
+
+
+def parse_qos(text: str) -> ParseResult[tuple[str, float]]:
+    """`slurm.qos` (Account, §5.2.11): `name|UsageFactor` rows. A row without a valid name or a finite factor >= 0 is
+    bad; the caller drops the whole field when most rows are (`mostly_bad`)."""
+    pr: ParseResult[tuple[str, float]] = ParseResult()
+    for n, line in enumerate(split_rows(text), 1):
+        if not line.strip():
+            continue
+        name, _, rest = line.strip().partition("|")
+        factor = parse_float(rest.split("|", 1)[0])
+        if not cmds.NAME_RE.match(name) or factor is None or factor < 0:
+            pr.bad(n, line, "not a QOS name and usage factor")
+            continue
+        pr.items.append((name, factor))
+    return pr
+
+
 def _effective(assocs: Sequence[tuple[str, str, str, str]], partition: str) -> list[tuple[str, str, str, str]]:
     """Per account, Slurm uses the association for this partition when there is one, else the one for all."""
     specific = [a for a in assocs if a[2] and partition in a[2].split(",")]
@@ -1241,6 +1660,15 @@ def parse_capabilities(results: Mapping[str, SectionResult]) -> dict[str, object
         assoc_now, cluster = out.get("associations"), out.get("cluster_name")
         out["gpu_partitions"] = gpu_partitions(r.stdout, assoc_now if isinstance(assoc_now, tuple) else (),
                                                cluster if isinstance(cluster, str) else None)
+        out["partition_charges"] = partition_charges(r.stdout)
+    r = results.get("slurm.qos")
+    if r is not None and usable(r):
+        qos = parse_qos(r.stdout)
+        if qos.mostly_bad:              # a PARSE error: the field stays unset (cost shows `×1?`), the detection goes on
+            lineno, line, why = qos.bad_lines[0]
+            log.warning("slurm.qos: could not parse the QOS list (line %d: %s: %.200s)", lineno, why, line)
+        else:
+            out["qos_usage_factor"] = dict(qos.items)
     r = results.get("slurm.sacctfmt")
     if r is not None and usable(r):
         out["sacct_fields"] = frozenset(r.stdout.split())
