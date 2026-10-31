@@ -1,0 +1,3 @@
+k2|campus01|alice0001|cpu|939271
+k2|campus01|alice0001|gres/gpu|97479
+k2|campus01|alice0001|billing|939271

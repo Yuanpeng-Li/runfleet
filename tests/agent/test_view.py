@@ -139,9 +139,9 @@ def keys(d: dict[str, Any]) -> list[str]:
 # ---------------------------------------------------------------- J3: every printed command round-trips
 _DESTS = {"--state": "state", "--name": "name", "--workdir": "workdir", "--partition": "partition",
           "--since": "since", "--limit": "limit", "--type": "type", "--min": "min", "--lines": "lines",
-          "--grep": "grep", "--stream": "stream", "--bytes": "bytes", "--timeout": "timeout"}
+          "--grep": "grep", "--stream": "stream", "--bytes": "bytes", "--timeout": "timeout", "--file": "file"}
 _FLAGS = {"--json": "json", "--attention": "attention", "--all-users": "all_users", "--head": "head",
-          "--path-only": "path_only", "--refresh": "refresh", "--write": "write"}
+          "--path-only": "path_only", "--refresh": "refresh", "--write": "write", "--files": "list_files"}
 _POSITIONAL = {"job": "ids", "log": "id", "host": "host", "help": "topic"}
 
 
@@ -237,7 +237,9 @@ PROBLEM = ["action", "code", "hint", "message", "since"]
 ERROR = ["action", "code", "hint", "host", "job", "message", "since"]
 JOB = sorted("""id key host kind name user mine state group state_text reason reason_text held hints submitted_at started_at
 start_is_estimate ended_at elapsed_s limit_s left_s partition qos account gpus gpu_type cpus mem_bytes nodes gpu_use exit
-workdir logs array restarts observed_at""".split())
+workdir logs array restarts observed_at cost""".split())
+COST = sorted("""cpu_h gpu_h gpu_h_by_model billing billing_basis qos usage_factor billing_h charged_su projected_su free live
+as_of""".split())
 GPU_USE = ["mean_pct", "mem_used_mib", "peak_pct", "sampled_at", "source"]
 EXIT = ["cause", "code", "signal"]
 LOGS = ["merged", "stderr", "stderr_size", "stdout", "stdout_size"]
@@ -273,10 +275,12 @@ def test_brief_keys(demo: FleetView) -> None:
 def test_job_projection_keys(demo: FleetView) -> None:
     d = view.jobs(demo, view.JobFilter(states=view.parse_states("all")), limit=400).data
     assert keys(d) == sorted([*ENVELOPE, "filter", "jobs"])
-    assert keys(d["filter"]) == ["all_users", "attention", "name", "partition", "since", "states", "workdir"]
+    assert keys(d["filter"]) == ["all_users", "attention", "name", "partition", "since", "sort", "states", "workdir"]
     assert d["jobs"]
     for j in d["jobs"]:
         assert keys(j) == JOB
+        assert j["cost"] is None or keys(j["cost"]) == COST
+        assert (j["cost"] is None) == (not j["mine"] or j["kind"] != "slurm")
         assert j["exit"] is None or keys(j["exit"]) == EXIT
         assert j["logs"] is None or keys(j["logs"]) == LOGS
         assert j["array"] is None or keys(j["array"]) == ARRAY
@@ -288,7 +292,7 @@ def test_job_verb_keys(demo: FleetView) -> None:
     d = view.job(demo, [("k2", "3371400"), ("lyra", "32377076"), ("k2", "99")]).data
     assert keys(d) == sorted([*ENVELOPE, "arrays", "jobs"])
     for j in d["jobs"]:
-        assert keys(j) == sorted([*JOB, "note", "pending"])
+        assert keys(j) == sorted([*JOB, "note", "other_logs", "pending"])
     assert keys(d["arrays"][0]) == ["ref", "shown", "states", "tasks", "total"]
     assert keys(d["errors"][0]) == ERROR and d["errors"][0]["code"] == "outside_coverage"
     pend = view.job(demo, [("vega", "824507")]).data["jobs"][0]["pending"]
@@ -299,9 +303,9 @@ def test_job_verb_keys(demo: FleetView) -> None:
 def test_host_gpus_events_log_help_keys(demo: FleetView) -> None:
     h = view.host(demo, "k2").data
     assert keys(h) == sorted([*ENVELOPE, "host"])
-    assert keys(h["host"]) == ["data", "enabled", "gpus", "health", "kind", "metrics", "my_jobs", "my_jobs_lower_bound",
-                               "name", "partitions", "problems", "sacct_window_s", "sections", "source", "state",
-                               "state_since"]
+    assert keys(h["host"]) == ["account", "data", "enabled", "gpus", "health", "kind", "metrics", "my_jobs",
+                               "my_jobs_lower_bound", "name", "partitions", "problems", "sacct_window_s", "sections",
+                               "source", "state", "state_since"]
     assert keys(h["host"]["data"]) == ["history_at", "jobs_at", "metrics_at", "nodes_at"]
     assert keys(h["host"]["health"]) == ["consecutive_failures", "controller_slowdown", "last_ok", "latency_s",
                                          "tick_interval_s"]
@@ -325,7 +329,7 @@ def test_host_gpus_events_log_help_keys(demo: FleetView) -> None:
     assert keys(e["coverage"][0]) == ["gap", "history_at", "history_from", "host", "jobs_at", "no_data",
                                       "tasks_from"]
     lg = view.log(demo, ("k2", "3371400"), _read(["a", "b"]), lines=10).data
-    assert keys(lg) == sorted([*ENVELOPE, "log"])
+    assert keys(lg) == sorted([*ENVELOPE, "file", "files", "find", "log"])
     assert keys(lg["log"]) == ["cause", "fetched_at", "first_line", "grep", "job", "key", "lines", "live", "merged",
                                "mtime", "path", "shown_lines", "size", "started_mid_file", "stream", "total_lines",
                                "window_bytes"]
@@ -388,8 +392,9 @@ def test_gpus_mig_apart_and_scope(demo: FleetView) -> None:
     doc = view.gpus(demo)
     assert "# scope: Slurm counts cover only" in doc.text
     k2 = next(p for p in doc.data["partitions"] if p["partition"] == "gpu-preempt")
-    assert (k2["free"], k2["total"], k2["mig_free"]) == (12, 108, 11) and k2["planned"] == 14
-    assert "12/108 +11 MIG (14 planned)" in doc.text
+    # 11: the launcher job (demo.world.LAUNCHER_JOB, "find other log files") holds one H200 of gpu-preempt
+    assert (k2["free"], k2["total"], k2["mig_free"]) == (11, 108, 11) and k2["planned"] == 14
+    assert "11/108 +11 MIG (14 planned)" in doc.text
     h100 = view.gpus(demo, gpu_type="h100")
     assert {p["partition"] for p in h100.data["partitions"]} == {"lab", "h100"}
     assert not h100.data["workstation_gpus"]
@@ -1981,11 +1986,11 @@ def test_no_command_advice_states_the_concrete_change() -> None:
     assert tr["advice"] == ("no command printed: a value you gave (--name) holds text RunFleet redacts or escapes; "
                             "repeat your command with --limit 3")
     # text cut but JSON holds everything: "add --json"
-    many = [mk_job("k2", str(1000 + i), name="订单-実験-🚀" * 12) for i in range(36)]
+    many = [mk_job("k2", str(1000 + i), name="订单実験" * 21) for i in range(30)]   # with job cost (~250 B each)
     doc = view.jobs(fleet(mk_host("k2", many), config_path=secret_c), view.JobFilter(), limit=80)
     footer = next(ln for ln in doc.text.splitlines() if ln.startswith("# +"))
     assert doc.data["truncated"] is None and footer == (
-        "# +5 more not shown (output budget): no command printed: the -c path holds text RunFleet redacts or escapes; "
+        "# +3 more not shown (output budget): no command printed: the -c path holds text RunFleet redacts or escapes; "
         "repeat your command with --json; or narrow: --name / --workdir / --partition / --state")
     # another verb's command: what to run after your own -c option
     b = view.brief(replace(fv, hosts=(mk_host("k2", jobs + [mk_job("k2", "7", JobState.FAILED,

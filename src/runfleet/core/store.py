@@ -11,7 +11,8 @@ from datetime import datetime
 
 from runfleet.backends.base import CollectorOutput
 from runfleet.config import HostConfig
-from runfleet.models import (GPU, Capabilities, ConnState, HostSnapshot, HostStatus, Job, JobKey, StateGroup)
+from runfleet.models import (GPU, AccountSummary, Capabilities, ConnState, HostSnapshot, HostStatus, Job, JobKey,
+                             StateGroup)
 
 log = logging.getLogger("runfleet.core.store")
 _FRESH_STATES = (ConnState.OK, ConnState.DEGRADED)
@@ -43,13 +44,15 @@ class ChangeSet:
     metrics: bool = False
     paused: bool = False                         # idle pause toggled (host == "*")
     live: frozenset[str] = frozenset()           # job ids whose AttachState changed (§7.16): re-read attach_state()
+    account: bool = False                        # Account (§5.2.11): snapshot.account changed or a report arrived
 
 class FleetStore:
     """Current state of every configured host. Single-threaded (the asyncio loop); callbacks run synchronously.
 
     The UI only reads (`hosts`, `jobs()`, `job()`, `gpus()`, `counts()`, `subscribe()`); core writes through `apply`,
     `set_status`, `set_idle_paused`, plus the core-only helpers `set_caps`, `set_snapshot`, `add_host`, `remove_host`
-    and `reorder` (runtime host management from Settings, §7.13), and `notify_live` (Attach, §7.16).
+    and `reorder` (runtime host management from Settings, §7.13), `notify_live` (Attach, §7.16) and `notify_account`
+    (Account, §5.2.11).
     """
 
     hosts: dict[str, HostState]                  # insertion order = config order = scope numbers 1..9
@@ -160,6 +163,9 @@ class FleetStore:
         nodes_changed = ((out.nodes is not None and tuple(out.nodes) != snap.nodes)
                          or (out.partitions is not None and tuple(out.partitions) != snap.partitions))
         metrics_changed = out.metrics is not None and out.metrics != snap.metrics
+        # a failing account section keeps the last good readings, across a restart too (§5.2.11: warm start)
+        account = merged_account(out.account, snap.account) if out.account is not None else None
+        account_changed = account is not None and account != snap.account
         if out.gpus is not None:
             updates["gpus"] = tuple(out.gpus)
         if out.procs is not None:
@@ -170,12 +176,16 @@ class FleetStore:
             updates["partitions"] = tuple(out.partitions)
         if out.metrics is not None:
             updates["metrics"] = out.metrics
+        if account is not None:
+            updates["account"] = account
         if out.caps_patch and snap.caps is not None:
             updates["caps"] = _patch_caps(snap.caps, out.caps_patch)
         hs.snapshot = dataclasses.replace(snap, **updates)   # type: ignore[arg-type]
         change = ChangeSet(host=host, jobs_added=added, jobs_changed=changed, jobs_removed=removed,
-                           gpus=gpus_changed, procs=procs_changed, nodes=nodes_changed, metrics=metrics_changed)
-        if added or changed or removed or gpus_changed or procs_changed or nodes_changed or metrics_changed:
+                           gpus=gpus_changed, procs=procs_changed, nodes=nodes_changed, metrics=metrics_changed,
+                           account=account_changed)
+        if (added or changed or removed or gpus_changed or procs_changed or nodes_changed or metrics_changed
+                or account_changed):
             self._notify(change)
         return change
 
@@ -200,6 +210,14 @@ class FleetStore:
             return ChangeSet(host=host)
         return self._notify(ChangeSet(host=host, live=ids))
 
+    def notify_account(self, host: str) -> ChangeSet:
+        """Core only (Account, §5.2.11): an on-demand account report arrived (reports live in FleetService, not
+        here); subscribers re-read it. No-op for an unknown host. `apply` sets `account` itself when the periodic
+        summary changes."""
+        if host not in self.hosts:
+            return ChangeSet(host=host)
+        return self._notify(ChangeSet(host=host, account=True))
+
     def set_caps(self, host: str, caps: Capabilities, taken_at: datetime) -> ChangeSet:
         """Core only: capabilities from detection (or the cache) become part of the snapshot."""
         snap = self._snapshot_for(host, taken_at)
@@ -212,7 +230,7 @@ class FleetStore:
         """Core only: warm start from the cache (shown stale until the first successful poll)."""
         self.hosts[host].snapshot = snapshot
         return self._notify(ChangeSet(host=host, status=True, jobs_added=frozenset(snapshot.jobs), gpus=True,
-                                      procs=True, nodes=True, metrics=True))
+                                      procs=True, nodes=True, metrics=True, account=snapshot.account is not None))
 
 
 def _patch_caps(caps: Capabilities, patch: Mapping[str, object]) -> Capabilities:
@@ -235,3 +253,19 @@ def job_material_eq(a: Job, b: Job) -> bool:
         return False
     return dataclasses.replace(a, observed_at=None, elapsed=None, raw={}) == dataclasses.replace(
         b, observed_at=None, elapsed=None, raw={})
+
+
+def merged_account(new: AccountSummary | None, old: AccountSummary | None) -> AccountSummary | None:
+    """The poll's account summary (§5.2.11) with what its failing sections could not read taken from the cached one,
+    as the collector keeps it across ticks: the balances when sshare failed, the usage when sreport did (each with its
+    own reading time; the usage only when it is of the same window). No summary this poll: the cached one."""
+    if new is None or old is None:
+        return new or old
+    failed = {e.section for e in new.errors}
+    out = new
+    if "slurm.acct_share" in failed and old.balances and all(b.read_at is None for b in new.balances):
+        out = dataclasses.replace(out, balances=old.balances, read_at=old.read_at, mode=old.mode)
+    if (any(f.startswith("slurm.acct_sreport") for f in failed if f) and old.usage and new.usage_at is None
+            and old.window == new.window):             # never show another window's usage under this one's label
+        out = dataclasses.replace(out, usage=old.usage, usage_at=old.usage_at)
+    return out

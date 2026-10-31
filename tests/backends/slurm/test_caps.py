@@ -1,12 +1,16 @@
-"""[WP2] Slurm capability parsing (§5.1) from slurm_config / sacctmgr_assoc / sinfo_version fixtures, plus the
-stat and env fixtures that inform the logstat parser and the prelude's env unsetting."""
+"""[WP2] Slurm capability parsing (§5.1) from slurm_config / sacctmgr_assoc / sinfo_version fixtures, the charging
+rules of Account (§5.2.11: sacctmgr_qos, scontrol_partitions_charges), plus the stat and env fixtures that inform the
+logstat parser and the prelude's env unsetting."""
 
 from __future__ import annotations
 
 import pytest
 
 from runfleet.backends.common import parse_stat_lines
-from runfleet.backends.slurm.collector import SlurmCollector, gpu_partitions, parse_capabilities
+from runfleet.backends.slurm import commands as cmds
+from runfleet.backends.slurm.collector import (SlurmCollector, gpu_partitions, parse_capabilities, parse_qos,
+                                               partition_charges)
+from runfleet.models import PartitionCharge
 from tests.backends.factories import fixture_result, result
 from tests.conftest import sample
 
@@ -18,6 +22,7 @@ def caps_of(host: str) -> dict[str, object]:
         "slurm.assoc": fixture_result("slurm.assoc", host, "sacctmgr_assoc"),
         "slurm.parts": fixture_result("slurm.parts", host, "scontrol_partitions"),
         "slurm.gputres": fixture_result("slurm.gputres", host, "sacct_completed_gpu_tres"),
+        "slurm.qos": fixture_result("slurm.qos", host, "sacctmgr_qos"),
     })
 
 
@@ -103,6 +108,80 @@ def test_gpu_partitions_names_with_spaces_and_partition_associations() -> None:
     both = (("c", "lab", "", "high"), ("c", "lab", "hi", "low"))
     assert "hi" not in gpu_partitions(lines, both, "c")
     assert "hi" in gpu_partitions(lines, (("c", "lab", "", "high"), ("c", "lab", "other", "low")), "c")
+
+
+# ---------------------------------------------------------------- charging rules (Account, §5.2.11)
+@pytest.mark.parametrize(("host", "count", "free"), [
+    ("lyra", 28, {"low", "guest", "free-part", "free-gpu-part"}),   # high ×2; free-gpuxl-part is ×1 (not decisive)
+    ("k2", 7, set()), ("vega", 9, set()),                           # usage only: every factor 1
+])
+def test_qos_usage_factor(host: str, count: int, free: set[str]) -> None:
+    f = caps_of(host)["qos_usage_factor"]
+    assert isinstance(f, dict) and len(f) == count and f["normal"] == 1.0
+    assert {q for q, v in f.items() if v == 0} == free
+    if host == "lyra":
+        assert f["high"] == 2.0 and f["free-gpuxl-part"] == 1.0
+    else:
+        assert set(f.values()) == {1.0}
+
+
+def test_qos_bad_rows() -> None:
+    pr = parse_qos("normal|1.000000\nlow|0.000000\nodd|x\nneg|-1\nbad name|1\n\nwide|0.5|DenyOnLimit\n")
+    assert pr.items == [("normal", 1.0), ("low", 0.0), ("wide", 0.5)] and len(pr.bad_lines) == 3
+    assert not pr.mostly_bad
+    # one bad row is skipped; mostly bad rows leave the field unset (the cost shows the factor as unknown)
+    assert parse_capabilities({"slurm.qos": result("slurm.qos", "normal|1\nodd|x")})["qos_usage_factor"] == \
+        {"normal": 1.0}
+    assert "qos_usage_factor" not in parse_capabilities({"slurm.qos": result("slurm.qos", "a|x\nb|y\nc|1")})
+    assert "qos_usage_factor" not in parse_capabilities(
+        {"slurm.qos": result("slurm.qos", "", 1, "sacctmgr: error: Problem talking to the database")})
+    assert parse_capabilities({"slurm.qos": result("slurm.qos", "")})["qos_usage_factor"] == {}
+
+
+def test_partition_charges_from_lyra() -> None:
+    """lyra prints QoS and TRESBillingWeights on every line: free partitions admit only QOS low/guest and weight
+    nothing, the charged ones weight GPUs (gpuxl per model, with the capitalised types scontrol prints)."""
+    c = parse_capabilities({"slurm.assoc": fixture_result("slurm.assoc", "lyra", "sacctmgr_assoc"),
+                            "slurm.parts": fixture_result("slurm.parts", "lyra", "scontrol_partitions_charges")})
+    charges = {p.partition: p for p in c["partition_charges"]}  # type: ignore[attr-defined]
+    assert list(charges) == ["free", "free-gpu", "free-gpuxl", "gpu", "gpu-highmem", "gpuxl", "standard",
+                             "standard-mem"]
+    assert charges["free-gpuxl"] == PartitionCharge("free-gpuxl", "", "free-gpuxl-part", ("low", "guest"))
+    assert charges["gpu"] == PartitionCharge("gpu", "cpu=1,gres/gpu=32", "gpu-part", ("normal", "high"))
+    assert charges["gpuxl"].billing_weights == "cpu=1,gres/gpu:L40S=32,gres/gpu:RTX6000=64"
+    assert charges["standard"].qos == "normal" and charges["standard-mem"].allow_qos == ("standard-mem",
+                                                                                         "standard-mem-pi02")
+    assert all(p.def_cpu_per_gpu is None and p.def_mem_per_cpu_mb is None for p in charges.values())
+    # the extra fields change nothing about where the user may submit
+    assert c["gpu_partitions"] == caps_of("lyra")["gpu_partitions"]
+
+
+@pytest.mark.parametrize(("host", "count"), [("k2", 5), ("vega", 6)])
+def test_partition_charges_without_charging_fields(host: str, count: int) -> None:
+    """The trimmed k2 / vega lines carry no QoS and no weights: billing = CPUs, every partition QOS unknown."""
+    charges = caps_of(host)["partition_charges"]
+    assert isinstance(charges, tuple) and len(charges) == count
+    assert all(p.billing_weights == "" and p.qos is None for p in charges)
+    assert [p.allow_qos for p in charges if p.allow_qos] == ([("labpi",)] if host == "k2" else [])
+
+
+def test_partition_charges_synthetic() -> None:
+    lines = "\n".join([
+        "groups=lab", "parents=complete",
+        _part("a", QoS="N/A", DefCpuPerGPU="8", DefMemPerCPU="4000", TRESBillingWeights="CPU=1.0,Mem=0.25G"),
+        _part("b", AllowQos="low", DefMemPerCPU="UNLIMITED", TresBillingWeights="cpu=2"),
+        _part("bad;name"), _part("c", AllowQos=""), "PartitionName= AllowQos=ALL",
+    ])
+    assert partition_charges(lines) == (
+        PartitionCharge("a", "CPU=1.0,Mem=0.25G", None, None, 8, 4000),
+        PartitionCharge("b", "cpu=2", None, ("low",)),
+        PartitionCharge("c"))
+
+
+def test_qos_section_is_cheap_and_guarded() -> None:
+    (sec,) = [s for s in SlurmCollector.capability_sections(None) if s.name == "slurm.qos"]  # type: ignore[arg-type]
+    assert sec.cmd == cmds.QOS_CMD == "sacctmgr -n -P show qos format=Name,UsageFactor"
+    assert sec.requires == ("sacctmgr",) and sec.timeout == 15 and sec.max_stdout == 64_000
 
 
 def test_sacct_helpformat_and_missing_sections() -> None:

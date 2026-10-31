@@ -23,18 +23,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from runfleet.agent.data import Document, FleetView, Problem, ProblemCode
+from runfleet.agent.data import Document, FleetView, HostView, Problem, ProblemCode
 from runfleet.errors import RunFleetError
 from runfleet.util.redact import escape_controls, scrub
 
 if TYPE_CHECKING:
+    from runfleet.agent.view import CostRequest
     from runfleet.config import FleetConfig
     from runfleet.core.clock import Clock
-    from runfleet.core.logs import LogRead
+    from runfleet.core.logs import LogFiles, LogRead
     from runfleet.core.service import TransportFactory
+    from runfleet.models import Job, UsageWindow
+    from runfleet.util.usage import GroupBy
     from runfleet.wait import Target
 
-VERBS = ("brief", "jobs", "job", "log", "gpus", "host", "events", "help")
+VERBS = ("brief", "jobs", "job", "log", "gpus", "host", "events", "usage", "cost", "help")
 DEFAULT_TIMEOUT = 30.0
 GRACE = 5.0                          # s past the deadline for cleanup (closing transports) before giving up
 JOB_IDS_MAX = 10
@@ -42,9 +45,12 @@ LOG_LINES_DEFAULT = 60
 LOG_BYTES_DEFAULT, LOG_BYTES_MAX = 32 << 10, 256 << 10
 STREAMS = ("auto", "out", "err")
 GREP_MAX, GREP_TERMS_MAX = 400, 20     # --grep: the terms are echoed back, inside the log budget
+FILE_MAX = 4096                        # --file PATH: characters (PATH_MAX: every listed path fits)
 DEMO_SEED = 7
 CACHE_THREAD = "runfleet-agent-cache"          # the daemon thread of a cache read (agent.mcp waits for it)
 _DUR = re.compile(r"(\d+(?:\.\d+)?)([smhdw])")
+USAGE_ROWS_MAX = 50                    # `usage --limit`: rollup rows per host
+COST_MAX = 100_000                     # `cost`: --gpus / --cpus / --nodes at most (a typo, not a request)
 _UNIT_S = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "w": 604800.0}
 
 
@@ -52,7 +58,12 @@ ERROR_TEXT_MAX = 300                 # bytes: an error text that echoes caller i
 
 
 class UsageError(RunFleetError):
-    """A bad verb, parameter, host name, id or time (CLI exit 2); raised before any IO."""
+    """A bad verb, parameter, host name, id or time (CLI exit 2); raised before any IO. ``mcp``: the same problem
+    in the MCP tools' parameter names when the message names CLI flags (``list_files`` for ``--files``)."""
+
+    def __init__(self, message: str, *, mcp: str | None = None) -> None:
+        super().__init__(message)
+        self.mcp = mcp
 
 
 def safe_text(text: str, limit: int = ERROR_TEXT_MAX) -> str:
@@ -149,6 +160,7 @@ class Request:
     # the call's own global options, repeated in every printed command (FleetView.config_path / demo_seed)
     config_path: str | None = None            # -c PATH as given (None: the default config, or --demo)
     demo_seed: int | None = None              # --demo-seed N when not the default
+    usage_default: UsageWindow = "30d"        # general.usage_window: the window `usage` answers without --window
 
 
 def _resolve_hosts(config: FleetConfig, names: Sequence[str]) -> tuple[str, ...]:
@@ -201,12 +213,19 @@ def build_request(verb: str, raw: Mapping[str, Any], config: FleetConfig, *,
                 raise UsageError(f"grep: at most {GREP_TERMS_MAX} alternatives and {GREP_MAX} characters")
             for key in ("head", "path_only"):
                 p.flag(key)
+            _check_files(p)
         named = tuple(dict.fromkeys(t.host for t in targets))
         return Request(verb, named, named, targets=targets, **common)
     if verb == "host":
         name = p.text("host")
         if not name:
             raise UsageError("host: give HOST")
+        return Request(verb, _resolve_hosts(config, [name]), (name,), **common)
+    if verb == "cost":
+        name = p.text("host")
+        if not name:
+            raise UsageError("cost: give HOST")
+        cost_request(p)
         return Request(verb, _resolve_hosts(config, [name]), (name,), **common)
     typed = tuple(p.names("hosts"))
     hosts: tuple[str, ...] | None = _resolve_hosts(config, typed) if typed else None
@@ -221,6 +240,11 @@ def build_request(verb: str, raw: Mapping[str, Any], config: FleetConfig, *,
             p.text(key)
         for key in ("attention", "all_users"):
             p.flag(key)
+        sort = p.text("sort")
+        if sort is not None and sort not in view.SORTS:
+            raise UsageError(f"sort: one of {', '.join(view.SORTS)} (got {sort!r})")
+    elif verb == "usage":
+        usage_options(p)
     elif verb == "events" and not p.text("since"):
         raise UsageError("events: --since is required (a duration like 2h, 90m, 1d, or an ISO time)")
     since = p.text("since") if verb in ("jobs", "events") else None
@@ -233,6 +257,101 @@ def build_request(verb: str, raw: Mapping[str, Any], config: FleetConfig, *,
         p.text("type")
         p.count("min", 0, minimum=0)
     return Request(verb, hosts, typed, **common)
+
+
+def usage_options(p: _Params) -> tuple[UsageWindow | None, GroupBy | None, str]:
+    """`usage`: --window, --by, --scope (and --limit ≤ USAGE_ROWS_MAX); UsageError naming the bad one."""
+    from runfleet.models import USAGE_WINDOWS
+    from runfleet.util.usage import GROUP_BYS
+
+    window, by, scope = p.text("window"), p.text("by"), p.text("scope") or "me"
+    if window is not None and window not in USAGE_WINDOWS:
+        raise UsageError(f"window: one of {' '.join(USAGE_WINDOWS)} (got {window!r})")
+    if by is not None and by not in GROUP_BYS:
+        raise UsageError(f"by: one of {' '.join(GROUP_BYS)} (got {by!r})")
+    if scope not in ("me", "account"):
+        raise UsageError(f"scope: one of me, account (got {scope!r})")
+    if (p.count("limit", None) or 0) > USAGE_ROWS_MAX:
+        raise UsageError(f"limit: at most {USAGE_ROWS_MAX} rollup rows per host")
+    return window, by, scope         # checked against the literals above
+
+
+def parse_hours(text: str) -> float:
+    """`--time`: ``24h`` / ``90m`` / ``1d12h`` or Slurm's ``HH:MM:SS`` / ``D-HH:MM:SS`` / minutes; a positive duration
+    in hours. ValueError otherwise."""
+    from runfleet.util.slurmfmt import parse_duration
+
+    t = text.strip()
+    if t and _DUR.sub("", t) == "":
+        seconds = sum(float(n) * _UNIT_S[u] for n, u in _DUR.findall(t))
+    elif t.isdigit():                            # sbatch --time=90: minutes
+        seconds = int(t) * 60.0
+    else:
+        d = parse_duration(t) if re.fullmatch(r"[\d:-]+", t) else None
+        seconds = d.total_seconds() if d is not None else 0.0
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError(f"time: a positive duration like 24h, 90m, 1d12h or 2-00:00:00 (got {text!r})")
+    return seconds / 3600
+
+
+def parse_mem_gb(text: str) -> float:
+    """`--mem`: ``64G`` / ``512M`` / ``1T`` (no unit: MB, as sbatch) in GiB; ValueError for anything else."""
+    from runfleet.util.slurmfmt import parse_mem_mib
+
+    mib = parse_mem_mib(text.strip()) if re.fullmatch(r"\d+(?:\.\d+)?[KMGTkmgt]?[Bb]?", text.strip()) else None
+    if mib is None or not math.isfinite(mib) or mib <= 0:
+        raise ValueError(f"mem: a positive size like 64G or 512M (got {text!r})")
+    return mib / 1024
+
+
+def cost_request(p: _Params) -> CostRequest:
+    """`cost`: every parameter checked before any IO (UsageError); whether the partition and the GPU type exist is
+    for the cached charging rules to say (not_found / a usage error after the cache read)."""
+    from runfleet.agent.view import CostRequest
+
+    partition = p.text("partition")
+    if not partition or not partition.strip():
+        raise UsageError("cost: --partition is required")
+    gpu_type = p.text("gpu_type")
+    if gpu_type is not None and not re.fullmatch(r"[A-Za-z0-9_.:+-]{1,64}", gpu_type):
+        raise UsageError(f"gpu_type: a GPU type like l40s or a100 (got {gpu_type!r})", mcp=None)
+    time_text, mem = p.text("time"), p.text("mem")
+    try:
+        hours = parse_hours(time_text) if time_text is not None else None
+        mem_gb = parse_mem_gb(mem) if mem is not None else None
+    except ValueError as exc:
+        raise UsageError(str(exc)) from None
+    counts = {k: p.count(k, None, minimum=0 if k == "gpus" else 1) for k in ("gpus", "cpus", "nodes")}
+    for key, n in counts.items():
+        if n is not None and n > COST_MAX:
+            raise UsageError(f"{key}: at most {COST_MAX}")
+    return CostRequest(partition=partition.strip(), gpus=counts["gpus"] or 0, gpu_type=gpu_type,
+                       cpus=counts["cpus"], mem_gb=mem_gb, nodes=counts["nodes"] or 1, hours=hours,
+                       time_text=time_text.strip() if time_text is not None else None, qos=p.text("qos"),
+                       account=p.text("account"))
+
+
+def _check_files(p: _Params) -> None:
+    """`log --files` / `--file PATH`: one of them, with the read options that make sense (a UsageError names the
+    clash); PATH one line, no NUL, at most FILE_MAX characters (whether it lies under the job's workdir is decided
+    once the job is known, before any probe)."""
+    listing, file = p.flag("list_files"), p.text("file")
+    if file is not None and (not file.strip() or len(file) > FILE_MAX or any(c in file for c in "\x00\n\r")):
+        raise UsageError(f"file: a path under the job's workdir (one line, at most {FILE_MAX} characters)")
+    if not listing and file is None:
+        return
+    given = {"list_files": listing, "file": file is not None, "stream": p.text("stream") is not None,
+             "path_only": p.flag("path_only"), "grep": bool(p.text("grep")), "head": p.flag("head")}
+    allowed = ("list_files",) if listing else ("file", "grep", "head")
+    clash = [name for name, on in given.items() if on and name not in allowed]
+    if clash:
+        mode = "list_files" if listing else "file"
+        raise UsageError(f"{_FLAGS[mode]} does not combine with {' '.join(_FLAGS[c] for c in clash)}",
+                         mcp=f"{mode} does not combine with {' '.join(clash)}")
+
+
+_FLAGS = {"list_files": "--files", "file": "--file", "stream": "--stream", "path_only": "--path-only",
+          "grep": "--grep", "head": "--head"}       # `agent log` parameters -> their CLI flags (usage errors)
 
 
 # ================================================================================================== the fleet
@@ -280,8 +399,10 @@ def _demo(seed: int, clock: Clock) -> tuple[FleetConfig, TransportFactory]:
 
 
 # ================================================================================================== rendering
-def render(req: Request, fv: FleetView, read: LogRead | None = None, *, path_only: bool | None = None) -> Document:
-    """The agent.view document of a request over a fleet view (fv.error set: the verb's no-data document)."""
+def render(req: Request, fv: FleetView, read: LogRead | None = None, *, path_only: bool | None = None,
+           files: LogFiles | None = None) -> Document:
+    """The agent.view document of a request over a fleet view (fv.error set: the verb's no-data document);
+    ``files``: the find of `log --files` / `--file`."""
     from runfleet.agent import view
 
     if req.config_path is not None or req.demo_seed is not None:
@@ -297,21 +418,36 @@ def render(req: Request, fv: FleetView, read: LogRead | None = None, *, path_onl
             name_glob=p.text("name"), workdir_prefix=p.text("workdir"), partition=p.text("partition"),
             since=parse_since(since_text, fv.generated_at) if since_text else None,
             attention_only=p.flag("attention"), all_users=p.flag("all_users"), hosts=req.typed_hosts,
-            since_text=since_text)
+            since_text=since_text, sort=p.text("sort"))
         return view.jobs(fv, flt, **({"limit": req.limit} if req.limit is not None else {}))
     if req.verb == "job":
         return view.job(fv, [(t.host, t.job) for t in req.targets])
     if req.verb == "log":
         t = req.targets[0]
+        if p.flag("list_files"):
+            return view.log_files(fv, (t.host, t.job), files)
         return view.log(fv, (t.host, t.job), read, lines=p.count("lines", LOG_LINES_DEFAULT) or LOG_LINES_DEFAULT,
                         grep=p.text("grep"), path_only=p.flag("path_only") if path_only is None else path_only,
-                        stream=p.text("stream") or "auto", head=p.flag("head"))
+                        stream=p.text("stream") or "auto", head=p.flag("head"), file=p.text("file"), files=files)
     if req.verb == "gpus":
         return view.gpus(fv, gpu_type=p.text("type"), min_free=p.count("min", 0, minimum=0) or 0,
                          hosts=req.typed_hosts)
     if req.verb == "host":
         assert req.hosts
         return view.host(fv, req.hosts[0])
+    if req.verb == "usage":
+        window, by, scope = usage_options(p)
+        return view.usage(fv, window=window, default=req.usage_default, by=by, scope=scope,
+                          limit=req.limit or view.USAGE_ROWS)
+    if req.verb == "cost":
+        assert req.hosts
+        creq = cost_request(p)
+        hv = fv.host(req.hosts[0])
+        types = view.gpu_types(hv) if hv is not None and fv.error is None else set()
+        if creq.gpu_type is not None and types and creq.gpu_type.lower() not in types:
+            raise UsageError(f"gpu_type: {creq.gpu_type!r} is not a GPU type of {req.hosts[0]} "
+                             f"(known: {' '.join(sorted(types)[:16])})")
+        return view.cost(fv, req.hosts[0], creq)
     if req.verb == "events":
         since_text = p.text("since") or ""
         since = parse_since(since_text, fv.generated_at)
@@ -347,7 +483,8 @@ async def run_async(verb: str, params: Mapping[str, Any], *, config_path: Path |
     req = dataclasses.replace(
         build_request(verb, params, config, now=clock.now()),
         config_path=str(config_path) if config_path is not None and not demo else None,
-        demo_seed=demo_seed if demo and demo_seed != DEMO_SEED else None)
+        demo_seed=demo_seed if demo and demo_seed != DEMO_SEED else None,
+        usage_default=config.general.usage_window)
     if not demo and not config.hosts:
         fv = _failed_view(config, clock.now(), "no hosts configured", demo)
         return render(req, fv)
@@ -376,9 +513,12 @@ async def _answer(req: Request, config: FleetConfig, *, demo: bool, clock: Clock
         return max(0.1, req.timeout - (clock.monotonic() - started))
 
     names = list(req.hosts) if req.hosts else None
+    window = _report_window(req)
     if demo:
         assert transports is not None
-        fv = await source.demo_view(config, transports, clock, names, timeout=left())
+        # the demo has no cache: `usage` reads the report of its window in memory too (instant probes)
+        want = (window or req.usage_default) if req.verb == "usage" else None
+        fv = await source.demo_view(config, transports, clock, names, timeout=left(), usage_window=want)
         return await _with_log(req, config, fv, clock=clock, transports=transports, timeout=left)
     from runfleet import paths
     from runfleet.core.service import default_lock_base
@@ -393,10 +533,48 @@ async def _answer(req: Request, config: FleetConfig, *, demo: bool, clock: Clock
             outcomes = await source.refresh(config, names, clock=clock, timeout=left(), cache_path=cache_path,
                                             lock_base=default_lock_base())
     fv = await _in_daemon_thread(lambda: source.load_view(config, names, cache_path=cache_path, now=clock.now(),
-                                                          lock_base=read_lock_base(), outcomes=outcomes))
+                                                          lock_base=read_lock_base(), outcomes=outcomes,
+                                                          reports=req.verb == "usage"))
     if no_ssh:
         fv = _with_problem(fv, Problem(ProblemCode.NO_SSH))
+    elif req.refresh and window is not None and fv.error is None:
+        fv = await _with_reports(config, fv, window, clock=clock, timeout=left(), cache_path=cache_path)
     return await _with_log(req, config, fv, clock=clock, transports=None, timeout=left)
+
+
+def _report_window(req: Request) -> UsageWindow | None:
+    """The window whose on-demand account report `usage` needs (§8.7): one other than the periodic summary's, or
+    any window with --by / --scope account; None when the summary answers (or another verb)."""
+    from runfleet.agent import view
+
+    if req.verb != "usage":
+        return None
+    window, by, scope = usage_options(_Params(req.params))
+    want = window or req.usage_default
+    return want if want != view.summary_window(req.usage_default) or by is not None or scope == "account" else None
+
+
+async def _with_reports(config: FleetConfig, fv: FleetView, window: UsageWindow, *, clock: Clock, timeout: float,
+                        cache_path: Path) -> FleetView:
+    """`usage --refresh`: after the bounded refresh, one account report of `window` per selected Slurm host that
+    can have one (enabled, its rows this config's, account usage on), concurrently under the deadline; each lands
+    in the cache (`source.read_usage`) and in the host's view."""
+    from runfleet.agent import source, view
+
+    def wanted(hv: HostView) -> bool:
+        return (hv.enabled and view.account_reads(hv)
+                and not any(p.code is ProblemCode.CONFIG_MISMATCH for p in hv.problems))
+
+    picked = [hv for hv in fv.hosts if wanted(hv)]
+    if not picked or _ssh_missing(config, [hv.name for hv in picked]):
+        return fv
+    got = await asyncio.gather(*(source.read_usage(config, hv, window, clock=clock, timeout=timeout,
+                                                   cache_path=cache_path) for hv in picked))
+    found = {hv.name: r for hv, r in zip(picked, got, strict=True) if r is not None}
+    hosts = tuple(dataclasses.replace(hv, account_reports={**hv.account_reports, window: found[hv.name],
+                                                           found[hv.name].window: found[hv.name]})
+                  if hv.name in found else hv for hv in fv.hosts)
+    return dataclasses.replace(fv, hosts=hosts)
 
 
 async def _in_daemon_thread(fn: Callable[[], FleetView]) -> FleetView:
@@ -432,7 +610,9 @@ async def _in_daemon_thread(fn: Callable[[], FleetView]) -> FleetView:
 async def _with_log(req: Request, config: FleetConfig, fv: FleetView, *, clock: Clock,
                     transports: TransportFactory | None, timeout: Callable[[], float]) -> Document:
     """Render; for `log`, first the one bounded read of the log agent.view will show (no probe when the job is
-    unknown, ambiguous, someone else's, has no log path, or `path_only`)."""
+    unknown, ambiguous, someone else's, has no log path, or `path_only`). `--files`: one find under the job's
+    workdir instead; `--file PATH`: that find, then the read of PATH only when the find listed it (a PATH outside
+    the workdir is refused before any probe)."""
     from runfleet.agent import source, view
 
     if req.verb != "log" or fv.error is not None:
@@ -444,6 +624,10 @@ async def _with_log(req: Request, config: FleetConfig, fv: FleetView, *, clock: 
     hv, found, problem = view.lookup(fv, t.host, t.job)
     if problem is not None or hv is None or len(found) != 1 or not found[0].is_mine:
         return render(req, fv)
+    file = p.text("file")
+    if p.flag("list_files") or file is not None:
+        return await _with_files(req, config, fv, hv, found[0], file, clock=clock, transports=transports,
+                                 timeout=timeout)
     stream = p.text("stream") or "auto"
     ref = view.pick_log(found[0], stream)
     if ref is None or not ref.path:
@@ -454,3 +638,28 @@ async def _with_log(req: Request, config: FleetConfig, fv: FleetView, *, clock: 
     read = await source.read_log(config, hv, found[0], stream=stream, nbytes=nbytes, head=p.flag("head"),
                                  clock=clock, timeout=timeout(), transports=transports, log_ref=ref)
     return render(req, fv, read)
+
+
+async def _with_files(req: Request, config: FleetConfig, fv: FleetView, hv: HostView, job: Job, file: str | None, *,
+                      clock: Clock, transports: TransportFactory | None, timeout: Callable[[], float]) -> Document:
+    """`log --files` / `--file PATH` of one job of mine: no probe for a job that has not started, has no workdir or
+    a PATH outside it, the workdir itself, a directory or another user's job's log (agent.view says why); else the one find (bounded by an
+    ended job's end), and for `--file` the read of the listed file."""
+    from runfleet.agent import source, view
+
+    p = _Params(req.params)
+    workdir = job.workdir
+    if not view.started(job) or not workdir or (file is not None and view.file_precheck(job, file, hv) is not None):
+        return render(req, fv)
+    if transports is None and _ssh_missing(config, [hv.name]):
+        return render(req, _with_problem(fv, Problem(ProblemCode.NO_SSH, host=hv.name)))
+    files = await source.find_logs(config, hv, job, clock=clock, timeout=timeout(), transports=transports)
+    if file is None:
+        return render(req, fv, files=files)
+    hit, _why = view.file_choice(job, file, files, hv)
+    if hit is None:
+        return render(req, fv, files=files)
+    nbytes = min(p.count("bytes", LOG_BYTES_DEFAULT) or LOG_BYTES_DEFAULT, LOG_BYTES_MAX)
+    read = await source.read_log(config, hv, job, nbytes=nbytes, head=p.flag("head"), clock=clock,
+                                 timeout=timeout(), transports=transports, log_ref=view.found_ref(hit))
+    return render(req, fv, read, files=files)

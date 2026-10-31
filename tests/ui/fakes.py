@@ -12,7 +12,7 @@ import asyncio
 import dataclasses
 import tempfile
 from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,15 +22,17 @@ from runfleet.config import (FleetConfig, GeneralSettings, HostConfig, NotifySet
 from runfleet.core.clock import ManualClock
 from runfleet.core import logsearch
 from runfleet.core.forwards import PortForward
+from runfleet.core.logs import FIND_END_SLACK, FIND_MAX_FILES, FoundLog, LogFiles
 from runfleet.core.logsearch import LogQuery, LogSearchResult
 from runfleet.core.service import LogPeek, LogUpdate
 from runfleet.core.store import ChangeSet, FleetStore, HostState
 from runfleet.errors import ActionError, AttachBlocked, AttachConsentRequired, RunFleetError
 from runfleet.models import (
-    GPU, ActionResult, AttachMode, AttachOffer, AttachState, AttachStatus, Capabilities, CgroupStats, ConnState,
+    GPU, WINDOW_DAYS, AccountBalance, AccountReport, AccountSummary, AccountUse, ActionResult, AttachMode, AttachOffer, AttachState, AttachStatus, Capabilities, CgroupStats, ConnState,
     DetectReport, DoctorCheck, DoctorReport, ErrorKind, GPUProcess, GresCount, HostError, HostMetrics, HostSnapshot,
     HostStatus, Job, JobDetail, JobGpuUsage, JobKey, JobKind, JobLive, JobState, JobStep, LogRef, Node, NodeAlloc,
-    NodeInspect, NodeJob, PartitionSummary, Proc, ResourceAlloc, SectionStatus, StateGroup, Visibility,
+    NodeInspect, NodeJob, PartitionCharge, PartitionSummary, Proc, ResourceAlloc, SectionStatus, StateGroup,
+    UsageCell, UsageWindow, Visibility,
 )
 from runfleet.probe.section import SectionOutcome, SectionResult
 from runfleet.util.efficiency import efficiency
@@ -326,7 +328,10 @@ def build_world() -> tuple[FleetConfig, list[HostState]]:
                                                     "AccountingStorageType": "accounting_storage/slurmdbd"},
                                       associations=(("k2", "campus01", "", "gpu-priority"),
                                                     ("k2", "campus01", "", "normal"),
-                                                    ("k2", "campus01", "", "labpi"))),
+                                                    ("k2", "campus01", "", "labpi")),
+                                      # usage only, as the field probes found k2 (§5.2.11): every factor 1, no weights
+                                      qos_usage_factor={"gpu-priority": 1.0, "normal": 1.0, "labpi": 1.0},
+                                      partition_charges=(PartitionCharge("gpu-preempt"), PartitionCharge("labpi"))),
                       {j.key.id: j for j in k2_jobs}, (), (), k2_nodes, k2_parts,
                       HostMetrics(32, (2.3, 2.1, 2.0), 7.0, 256 * GiB, 180 * GiB, 0, 0, 3e6, T0))
 
@@ -350,7 +355,10 @@ def build_world() -> tuple[FleetConfig, list[HostState]]:
     ]
     vega = HostSnapshot("vega", T0, _caps(ME, "login-v01", ("slurm", "procfs"), slurm_version="25.11.4",
                                           cluster_name="vega", gpu_tres=True,
-                                          slurm_config={"PreemptMode": "REQUEUE", "MinJobAge": "300"}),
+                                          slurm_config={"PreemptMode": "REQUEUE", "MinJobAge": "300"},
+                                          qos_usage_factor={"normal": 1.0, "vega": 1.0, "vega-dev": 1.0},
+                                          partition_charges=tuple(PartitionCharge(p) for p in ("h200", "h100",
+                                                                                               "a30"))),
                         {j.key.id: j for j in vega_jobs}, (), (), (),
                         (PartitionSummary("h200", 5, 40, 2, 2, {"nvidia_h200": (2, 40)}, {"mixed": 5}),
                          PartitionSummary("h100", 2, 9, 0, 0, {"nvidia_h100": (0, 9)}, {"allocated": 2}),
@@ -367,10 +375,19 @@ def build_world() -> tuple[FleetConfig, list[HostState]]:
                   user="alice07"),
         *_completed("lyra", 31308336, 3, "orb-swp--train--places-warmup"),
     ]
-    lyra_jobs = [dataclasses.replace(j, user="alice07", is_mine=True) for j in lyra_jobs]
+    lyra_jobs = [dataclasses.replace(j, user="alice07", is_mine=True,                 # free partitions: QOS low ×0
+                                     qos="low" if (j.partition or "").startswith("free") else j.qos)
+                 for j in lyra_jobs]
     lyra = HostSnapshot("lyra", _ago(240), _caps("alice07", "login-a01", ("slurm", "procfs"),
                                                  slurm_version="26.05.3", cluster_name="lyra", gpu_tres=False,
-                                                 slurm_config={"PreemptMode": "CANCEL"}),
+                                                 slurm_config={"PreemptMode": "CANCEL"},
+                                                 # charged and free partitions, as on lyra (§5.2.11)
+                                                 qos_usage_factor={"normal": 1.0, "high": 1.0, "low": 0.0,
+                                                                   "guest": 0.0},
+                                                 partition_charges=(
+                                                     PartitionCharge("free-gpu", allow_qos=("low", "guest")),
+                                                     PartitionCharge("gpu", "cpu=1,gres/gpu=32"),
+                                                     PartitionCharge("free-gpuxl", allow_qos=("low", "guest")))),
                         {j.key.id: j for j in lyra_jobs}, (), (), (),
                         (PartitionSummary("free-gpu", 30, 120, 9, 0, {"rtx6000": (9, 120)}, {"mixed": 30}),
                          PartitionSummary("free-gpuxl", 9, 36, 4, 0, {"a30": (4, 36)}, {"mixed": 9})),
@@ -538,8 +555,107 @@ def attach_sample(key: JobKey, n: int, now: datetime) -> JobLive:
 def lyra_running_job() -> Job:
     job = slurm_job("lyra", LYRA_LIVE_KEY.id, "orb-swp--train--places-cosinewarm--s50--a01", JobState.RUNNING,
                     elapsed=_hms(1, 30), gpu_type="rtx6000", node="s71-02", partition="free-gpu", user="alice07",
-                    cpus=16, mem_gib=96)
+                    cpus=16, mem_gib=96, qos="low")
     return dataclasses.replace(job, is_mine=True)
+
+
+# ---------------------------------------------------------------- account usage (§5.2.11, mockups O / O2)
+# lyra: SU limits from sshare, sbank reallocation dates, a free (QOS low ×0) and a charged (gpu: cpu=1,gres/gpu=32)
+# rollup; k2 / vega: usage only (factor 1, billing = CPUs), usage decays (half-life 7d / 14d; vega resets monthly).
+# Numbers are for the 30d window; the others scale them (`_WINDOW_SCALE`). k2 has no period window ("period" -> 30d).
+_WINDOW_SCALE = {"7d": 0.25, "30d": 1.0, "90d": 2.6, "period": 4.1}
+ACCOUNT_DOWN = HostError(ErrorKind.REMOTE, "slurmdbd unreachable", "sreport: error: Problem talking to the database",
+                         "slurm.acct_sreport", None)
+
+
+def _cell(name: str, account: str, partition: str, qos: str, model: str, jobs: int, running: int, cpu_h: float,
+          gpu_h: float, *, gpu_weight: float = 0.0, factor: float | None = 1.0) -> UsageCell:
+    billing = cpu_h + gpu_weight * gpu_h
+    return UsageCell(name, account, partition, qos, model, jobs, running, cpu_h, gpu_h, billing,
+                     None if factor is None else billing * factor)
+
+
+def _lyra_cells() -> list[UsageCell]:
+    exp = "orb-swp--train--cifar-warmup--scratch"
+    cells = [_cell(f"{exp}--s0--a01", "alice07", "free-gpu", "low", "rtx6000", 60, 2, 4634, 802, factor=0),
+             _cell(f"{exp}--s1--a01", "alice07", "free-gpuxl", "low", "l40s", 36, 1, 2778, 388, factor=0),
+             _cell("orb-swp--eval--cifar--fork-warmup--s0", "alice07", "free-gpuxl", "low", "a30", 40, 0, 2054, 512,
+                   factor=0),
+             _cell("lmft-x0--train--lr1e-5--finetune-base--s0--a01", "pilab_02", "gpu", "normal", "v100", 3, 0, 23.2,
+                   2.9, gpu_weight=32),
+             _cell("jupyter", "pilab_02", "gpu", "normal", "", 6, 1, 182, 0, gpu_weight=32)]
+    cells += [_cell(f"orb-swp--probe--k{i}--s0", "alice07", "free-gpu", "low", "rtx6000", 9 + i, 0, 40.0 - i,
+                    8.0 - i, factor=0) for i in range(7)]
+    return cells
+
+
+def _k2_cells() -> list[UsageCell]:
+    exp = "orb-swp--train--cifar-warmup--scratch"
+    cells = [_cell(f"{exp}--s0--a01", "campus01", "gpu-preempt", "gpu-priority", "nvidia_geforce_rtx_3090", 420, 3,
+                   64_140, 6_010),
+             _cell(f"{exp}--s1--a01", "campus01", "gpu-preempt", "gpu-priority", "nvidia_a100-sxm4-40gb", 220, 1,
+                   32_070, 3_011)]
+    cells += [_cell(f"lmft-x{i}--train--lr1e-6--s0--a01", "campus01", "gpu-preempt", "normal",
+                    "nvidia_h100_nvl_1g.12gb", 24 + i, 0, 4_000.0 - 150 * i, 340.0 - 15 * i) for i in range(17)]
+    cells.append(_cell("prep_env", "campus01", "cpu-preempt", "normal", "", 28, 0, 9_000, 0))
+    return cells
+
+
+def _vega_cells() -> list[UsageCell]:
+    return [_cell("orb-swp--train--warmup--s45--a01", "pilab", "h200", "normal", "nvidia_h200_nvl", 12, 1, 2_900, 700),
+            _cell("orb-swp--report--s42-44", "pilab", "dev", "normal", "", 30, 0, 510, 0)]
+
+
+def _scaled(cells: Sequence[UsageCell], k: float) -> tuple[UsageCell, ...]:
+    def n(x: float | None) -> float | None:
+        return None if x is None else x * k
+    return tuple(dataclasses.replace(c, jobs=max(1, round(c.jobs * k)), cpu_h=c.cpu_h * k, gpu_h=c.gpu_h * k,
+                                     billing_h=c.billing_h * k, charged_su=n(c.charged_su)) for c in cells)
+
+
+def account_report(host: str, window: UsageWindow, now: datetime) -> AccountReport | None:
+    """The fake world's on-demand account report of a Slurm host (None for a workstation)."""
+    if host == "k2" and window == "period":
+        window = "30d"
+    k = _WINDOW_SCALE[window]
+    start = now - timedelta(days=WINDOW_DAYS.get(window, 30))
+    read = now - timedelta(minutes=2)
+    if host == "lyra":
+        starts = {"pilab_02": datetime(2026, 1, 14, 8, tzinfo=UTC), "pilab_02_gpu": datetime(2026, 4, 2, 8, tzinfo=UTC)}
+        mine = {"alice07": (27_554, 3_256, 27_554), "pilab_02": (205, 2.9, 298), "pilab_02_gpu": (0, 0, 0)}
+        totals = {"alice07": (27_554, 3_256, 27_554), "pilab_02": (1_316, 171, 1_316), "pilab_02_gpu": (0, 0, 0)}
+        balances = (AccountBalance("alice07", 1_000, 0, "since_reset", "sshare", "sshare", realloc_known=True,
+                                   read_at=read),
+                    AccountBalance("pilab_02", 97_885, 298.12, "since_reset", "sshare", "sshare",
+                                   next_realloc=date(2027, 1, 14), realloc_known=True, read_at=read),
+                    AccountBalance("pilab_02_gpu", 97, 0, "since_reset", "sshare", "sshare",
+                                   next_realloc=date(2027, 4, 2), realloc_known=True, read_at=read))
+        mode: Literal["limits", "usage_only"] = "limits"
+        half, reset, sbank_at, cells = 0.0, None, now - timedelta(hours=3), _lyra_cells()
+    elif host in ("k2", "vega"):
+        account = "campus01" if host == "k2" else "pilab"
+        starts = {account: datetime(2026, 9, 1, tzinfo=UTC)} if host == "vega" else {}
+        mine = totals = ({account: (171_881, 15_434, 171_881)} if host == "k2" else {account: (3_410, 812, 3_410)})
+        balances = (AccountBalance(account, None, 2_503_304 if host == "k2" else 8_620, "decayed", None, "sshare",
+                                   read_at=read, my_used_su=5_859 if host == "k2" else 1_234),)
+        mode, sbank_at = "usage_only", None
+        half, reset = (7 * 86400.0, None) if host == "k2" else (14 * 86400.0, "MONTHLY")
+        cells = _k2_cells() if host == "k2" else _vega_cells()
+    else:
+        return None
+    if window != "period":
+        starts = dict.fromkeys(mine, start)
+    inferred = host == "lyra" and window == "period"
+
+    def use(values: Mapping[str, tuple[float, float, float]], scope: Literal["me", "account"]) -> tuple[AccountUse, ...]:
+        return tuple(AccountUse(a, scope, c * k, g * k, b * k, start=starts[a], start_inferred=inferred)
+                     for a, (c, g, b) in sorted(values.items()) if a in starts)
+    summary = AccountSummary(window=window, read_at=read, mode=mode, balances=balances, usage=use(mine, "me"),
+                             usage_at=read, sbank_at=sbank_at, half_life_s=half, reset_period=reset)
+    rollup = _scaled(cells, k)
+    return AccountReport(host=host, window=window, fetched_at=now, summary=summary,
+                         window_start=min(starts.values()) if starts else None,
+                         account_totals=use(totals, "account"), cells=rollup, jobs_seen=sum(c.jobs for c in rollup))
 
 
 LOG_LINES = (
@@ -616,6 +732,12 @@ class FakeService:
         self.log_head: dict[str, list[str]] = {}            # path -> head_log lines (default: the first log_lines)
         self.search_errors: dict[str, str] = {}             # host -> search_logs error (no probe)
         self.search_gate: asyncio.Event | None = None       # set: search_logs waits for it (a slow host)
+        self.found_files: dict[str, list[FoundLog]] = {}    # workdir -> what find_logs lists there (any order)
+        self.find_errors: dict[str, HostError] = {}         # host -> find_logs transport error
+        self.find_file_error: str | None = None             # set: find_logs answers it (BusyBox find, no workdir)
+        self.find_gate: asyncio.Event | None = None         # set: find_logs waits for it (loading state)
+        self.find_incomplete: str | None = None             # set: find_logs' walk stopped early ("timed out", …)
+        self.detail_logs: dict[JobKey, tuple[LogRef, ...]] = {}   # job_detail's logs (default: the job's)
         self.already_connected: set[str] = set()
         self.logins: dict[str, Callable[[], int]] = {}      # connect_login answers (session transport hosts)
         # Settings (FleetAPI runtime host management): in memory like --demo unless a test sets config_path
@@ -636,6 +758,11 @@ class FakeService:
         self.attach_states: dict[JobKey, AttachState] = {}
         self.attach_samples: dict[JobKey, int] = {}
         self.attach_open: JobKey | None = None
+        # Account (§5.2.11): reports per (host, window asked); a fault makes the next fetch keep the last report (or
+        # build one 12 min old) with that error, as FleetService does when sreport / slurmdbd fails
+        self.account_reports: dict[tuple[str, str], AccountReport] = {}
+        self.account_faults: dict[str, HostError] = {}
+        self.account_gate: asyncio.Event | None = None      # set: account_report waits for it (loading state)
 
     def _record(self, name: str, *args: Any) -> None:
         self.calls.append((name, args))
@@ -708,7 +835,8 @@ class FakeService:
             snap = self.store.hosts[key.host].snapshot
             procs = tuple(p for p in (snap.procs if snap else ()) if p.task == key)
         fields = dict(job.raw) | {"WorkDir": job.workdir or "", "Command": job.command or ""}
-        return JobDetail(job, fields, job.alloc.per_node, steps, job.logs, job.gpu, procs, procs_note,
+        return JobDetail(job, fields, job.alloc.per_node, steps, self.detail_logs.get(key, job.logs), job.gpu, procs,
+                         procs_note,
                          {"CUDA_VISIBLE_DEVICES": "3"} if job.kind is JobKind.TASK else {}, explanation,
                          self.clock.now(), efficiency=efficiency_lines(efficiency(job, steps)))   # like the collector
 
@@ -763,6 +891,26 @@ class FakeService:
         res = SectionResult(section.name, SectionOutcome.OK if out.stdout else SectionOutcome.EMPTY, out.rc,
                             out.stdout, out.stderr, 7)
         return logsearch.parse(host, query, search, res, max_matches=max_matches)
+
+    async def find_logs(self, host: str, workdir: str, *, since: datetime | None = None,
+                        until: datetime | None = None) -> LogFiles:
+        """``found_files[workdir]`` written since ``since`` (None: the last 24 h) and, for an ended job, up to
+        ``until`` + FIND_END_SLACK; newest first, capped like log.find; ``find_incomplete`` marks the walk cut."""
+        self._record("find_logs", host, workdir, since, until)
+        if self.find_gate is not None:
+            await self.find_gate.wait()
+        now = self.clock.now()
+        if host in self.find_errors:
+            return LogFiles(workdir, (), now, error=self.find_errors[host])
+        if self.find_file_error is not None:
+            return LogFiles(workdir, (), now, file_error=self.find_file_error)
+        cutoff = since - timedelta(seconds=60) if since is not None else now - timedelta(hours=24)
+        end = until + timedelta(seconds=FIND_END_SLACK) if until is not None else None
+        files = sorted((f for f in self.found_files.get(workdir, ())
+                        if f.mtime >= cutoff and (end is None or f.mtime <= end)),
+                       key=lambda f: f.mtime, reverse=True)
+        return LogFiles(workdir, tuple(files[:FIND_MAX_FILES]), now, truncated=len(files) > FIND_MAX_FILES,
+                        incomplete=self.find_incomplete)
 
     async def head_log(self, host: str, ref: LogRef, *, nbytes: int = 32768) -> LogPeek:
         self._record("head_log", host, ref.path)
@@ -1192,6 +1340,37 @@ class FakeService:
         return self.attach_states.get(key)
 
     # ------------------------------------------------------------ test helpers (world mutation)
+    # Account (§5.2.11)
+    async def account_report(self, host: str, window: UsageWindow | None = None, *,
+                             max_age_s: float = 600) -> AccountReport:
+        want: UsageWindow = window or self.config.general.usage_window
+        self._record("account_report", host, want, max_age_s)
+        now = self.clock.now()
+        last = self.account_reports.get((host, want))
+        if last is not None and (now - last.fetched_at).total_seconds() < max_age_s:
+            return last
+        if self.account_gate is not None:
+            await self.account_gate.wait()
+        fresh = account_report(host, want, now)
+        if fresh is None:
+            note = ("workstation: no scheduler accounting" if host in ("labstation", "lynx")
+                    else "Slurm accounting not available on this cluster")
+            return AccountReport(host, "30d" if want == "period" else want, now,
+                                 AccountSummary("30d" if want == "period" else want, now, "usage_only", notes=(note,)))
+        fault = self.account_faults.get(host)
+        if fault is not None:
+            fault = dataclasses.replace(fault, at=now - timedelta(minutes=12))
+            old = last or account_report(host, want, now - timedelta(minutes=12))
+            assert old is not None
+            fresh = dataclasses.replace(old, errors=(fault,),
+                                        summary=dataclasses.replace(old.summary, errors=(fault,)))
+        self.account_reports[(host, want)] = self.account_reports[(host, fresh.window)] = fresh
+        self.store.emit(ChangeSet(host, account=True))
+        return fresh
+
+    def account_cached(self, host: str, window: UsageWindow) -> AccountReport | None:
+        return self.account_reports.get((host, window))
+
     def set_ok(self, host: str) -> None:
         st = self.store.hosts[host].status
         now = self.clock.now()

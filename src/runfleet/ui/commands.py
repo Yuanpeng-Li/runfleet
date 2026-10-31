@@ -1,7 +1,7 @@
 """[WP3] Command palette Provider with RunFleet commands (§7.10).
 
 Fuzzy-matched commands only, no grammar: views, scope, host detail / connect / refresh / enable / disable per host,
-state presets, sort, grouping, search logs, saved Jobs views (save as / apply / delete), GPU watches (watch free GPUs… / the list),
+account usage (all / one cluster first, §7.17), state presets, sort, grouping, search logs, saved Jobs views (save as / apply / delete), GPU watches (watch free GPUs… / the list),
 doctor, settings, update, theme, Fleet card size, action log, RunFleet log, help, quit. ``:`` opens the same palette.
 """
 
@@ -17,6 +17,7 @@ from runfleet.models import ConnState
 from runfleet.util import platform
 from runfleet.ui.query import PRESETS, SORT_CYCLE, SORT_LABELS
 from runfleet.ui.saved_views import GROUPS, describe
+from runfleet.ui.widgets.host_card import is_cluster
 
 Command = tuple[str, Callable[[], Any], str]
 
@@ -44,6 +45,11 @@ class RunFleetCommands(Provider):
                 yield f"Disable {host}", partial(app.service.set_host_enabled, host, False), "stop polling"
             yield f"Doctor {host}", partial(app.show_doctor, host), "connection diagnostics"
         yield "Refresh all", app.action_refresh_all, "poll every host now"
+        yield "Account usage", app.action_account, \
+            "Slurm account balances, your usage per window and where it went, per cluster in scope (key $)"
+        for host, state in app.store.hosts.items():
+            if is_cluster(state):
+                yield f"Account: {host}", partial(app.action_account, host), "account usage, this cluster first"
         yield "Log in to all hosts needing auth", app.action_login_all, "one terminal session, host after host (key C)"
         yield "Search logs…", app.action_search_logs, \
             "find text in the logs of your recent jobs in scope: last 256 KiB of each, ≤ 20 files per host (^f in Jobs)"
@@ -53,6 +59,9 @@ class RunFleetCommands(Provider):
             yield f"State preset: {preset}", partial(app.jobs_setting, "preset", preset), "jobs filter preset"
         for column in SORT_CYCLE:
             yield f"Sort by {SORT_LABELS[column]}", partial(app.jobs_setting, "sort", column), "jobs table"
+        yield "Sort by SU", partial(app.jobs_setting, "sort", "su"), \
+            "jobs table: SU = charged billing-hours (= CPU-h where a cluster has no billing weights)"
+        yield "Sort by GPU-h", partial(app.jobs_setting, "sort", "gpuh"), "jobs table: GPU-hours so far"
         for group in GROUPS:
             yield f"Group by {group}", partial(app.jobs_setting, "group", group), "jobs table"
         yield "Save view as…", app.prompt_save_view, "name the Jobs view's filter, preset, sort and grouping (ui.json)"

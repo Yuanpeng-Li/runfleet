@@ -1,4 +1,4 @@
-"""[WP1] LogService: follow streams, line assembly, peek, read, fetch, search (§4.7.1), pager argv (§4.7).
+"""[WP1] LogService: follow streams, line assembly, peek, read, fetch, search (§4.7.1), find (§4.7.2), pager argv.
 
 Streams yield raw blocks (`StreamHandle.chunks()`), never lines, so a multi-MB CR-only tqdm line cannot overflow a
 reader limit. `LineAssembler` turns blocks into display lines with terminal semantics: `\\n` ends a line, `\\r` restarts
@@ -13,14 +13,16 @@ import codecs
 import contextlib
 import dataclasses
 import logging
+import math
 import os
+import posixpath
 import re
 import shutil
 import tempfile
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from runfleet import paths
@@ -29,7 +31,7 @@ from runfleet.core.clock import Clock
 from runfleet.core.logsearch import LogQuery, LogSearchResult, SearchPlan
 from runfleet.core.service import LogPeek, LogUpdate
 from runfleet.errors import RunFleetError
-from runfleet.models import Capabilities, ErrorKind, HostError, LogRef
+from runfleet.models import Capabilities, ErrorKind, HostError, Job, JobKey, LogRef
 from runfleet.probe import framing
 from runfleet.probe.section import ProbeScript, Section, SectionOutcome, StreamSpec
 from runfleet.transport.base import ProbeResult, StreamHandle, Transport
@@ -283,6 +285,264 @@ def _read_from_head(peek: LogPeek, nbytes: int, path: str) -> LogRead:
     return LogRead(path=path, lines=peek.lines, live=None, size=peek.size, mtime=peek.mtime,
                    window_bytes=min(peek.size, nbytes) if peek.size is not None else nbytes,
                    started_mid_file=False, fetched_at=peek.fetched_at, file_error=peek.error)
+
+
+# ======================================================================================= find other logs (§4.7.2)
+FIND_MAX_FILES = 30
+FIND_MAX_DEPTH = 6
+FIND_SLACK = 60.0              # files written from 60 s before `since` (the job's start) on
+FIND_WINDOW = 86400.0          # since None: the last 24 h
+FIND_END_SLACK = 300.0         # an ended job (`until`): files written up to 5 min after its end (flushes, teardown)
+FIND_TIMEOUT = 15              # the section (remote `timeout -k 2`)
+FIND_WALK = 12                 # `find` alone, so sort/head still print what it found when a tree is slow
+FIND_NAMES = ("*.log", "*.out", "*.err", "*.stdout", "*.stderr")      # wandb's files/output.log is a *.log
+FIND_PRUNE = (".git", ".venv*", "venv", "node_modules", "__pycache__", ".cache", ".mypy_cache", ".pytest_cache",
+              "site-packages")
+FIND_MAX_STDOUT = (FIND_MAX_FILES + 1) * 4200 + 256    # PATH_MAX-long lines at worst
+FIND_UNSUPPORTED = "unsupported: needs GNU find (-printf, -newermt)"
+
+
+@dataclass(frozen=True, slots=True)
+class FoundLog:
+    """A file under a job's workdir that looks like a log and was written since the job started."""
+    path: str                       # absolute, under LogFiles.workdir
+    size: int
+    mtime: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class LogFiles:
+    """One `log.find` listing (§4.7.2): newest first, at most FIND_MAX_FILES."""
+    workdir: str                    # normalised (what the probe searched)
+    files: tuple[FoundLog, ...]
+    fetched_at: datetime
+    error: HostError | None = None  # transport failure (typed: auth, hostkey, timeout …); no files then
+    file_error: str | None = None   # "No such directory", "Permission denied", FIND_UNSUPPORTED, …
+    truncated: bool = False         # more than FIND_MAX_FILES matched; only the newest are listed
+    incomplete: str | None = None   # why the walk may have missed files: "timed out", "output cut", "sort failed",
+                                    # "some directories unreadable", "find failed (rc N)"
+
+
+def find_workdir(workdir: str) -> str:
+    """The workdir a probe may search: absolute, one line (`util.shell.path`), no `..` (a remote symlink before it
+    would make a lexical normalisation name another directory), normalised, never `/`."""
+    if not workdir:
+        raise ValueError("workdir unknown")
+    if ".." in shell.path(workdir).split("/"):
+        raise ValueError("refusing a workdir with '..'")
+    wd = posixpath.normpath(workdir)
+    wd = "/" + wd.lstrip("/")                      # normpath keeps a leading "//"
+    if wd == "/":
+        raise ValueError("refusing to search / (workdir is the filesystem root)")
+    return wd
+
+
+def find_cutoff(since: datetime | None, now: datetime) -> int:
+    """Epoch seconds `find -newermt` compares with: `since` - FIND_SLACK, else now - FIND_WINDOW."""
+    at = since - timedelta(seconds=FIND_SLACK) if since is not None else now - timedelta(seconds=FIND_WINDOW)
+    return max(0, int(at.timestamp()))
+
+
+def find_until(until: datetime | None) -> int | None:
+    """Epoch seconds `! -newermt` compares with for an ended job: its end + FIND_END_SLACK; None = no upper bound."""
+    return None if until is None else max(0, math.ceil(until.timestamp()) + int(FIND_END_SLACK))
+
+
+def find_window(job: Job) -> tuple[datetime | None, datetime | None]:
+    """(since, until) of a job's `log.find`, one rule for the TUI and the agent: since its start (a scheduler
+    estimate is no start), until its end once it ended (a running job's end_time is only its time limit). An ended
+    job with no usable start: the FIND_WINDOW before its end, never the default "last 24 h" from now (which misses,
+    or inverts against `until`, a job that ended days ago). (None, None): the last 24 h."""
+    until = job.end_time if job.state.is_terminal else None
+    since = job.start_time if job.start_time is not None and not job.est_start else None
+    if since is None and until is not None:
+        since = until - timedelta(seconds=FIND_WINDOW)
+    return since, until
+
+
+def find_command(workdir: str, cutoff: int, until: int | None = None) -> str:
+    """`log.find` (Appendix A): ``@@nodir`` | ``@@denied`` | ``@@unsupported`` alone, or up to FIND_MAX_FILES + 1
+    ``MTIME SIZE PATH\\037`` lines (``%T@ %s %p\\037``, newest first; ``@@sort RC`` when sort failed), then
+    ``@@end RC`` (find's exit status; 124/137 = the walk was stopped). ``-H``: only the workdir itself may be a
+    symlink; symlinked files and directories under it are neither listed nor entered. Names with control characters
+    (a newline) are skipped; `until`: only files modified at or before it (an ended job)."""
+    d = shell.quote(find_workdir(workdir))
+    prune = " -o ".join(f"-name {shell.quote(n)}" for n in FIND_PRUNE)
+    names = " -o ".join(f"-name {shell.quote(n)}" for n in FIND_NAMES)
+    walk = (f"$t find -H \"$d\" -mindepth 1 -maxdepth {FIND_MAX_DEPTH} \\( -type d \\( {prune} \\) \\) -prune "
+            f"-o -type f \\( {names} \\) ! -path '*[[:cntrl:]]*' -newermt @{int(cutoff)} "
+            + (f"! -newermt @{int(until)} " if until is not None else "") + "-printf '%T@ %s %p\\037\\n'")
+    return "\n".join((
+        f"d={d}",
+        "[ -d \"$d\" ] || { echo @@nodir; exit 0; }",
+        "{ [ -r \"$d\" ] && [ -x \"$d\" ]; } || { echo @@denied; exit 0; }",
+        # a failed check is GNU find missing, unless the workdir went away since `[ -d ]`
+        "find -H \"$d\" -maxdepth 0 -newermt @0 -printf '' >/dev/null 2>&1 || "
+        "{ [ -d \"$d\" ] || { echo @@nodir; exit 0; }; echo @@unsupported; exit 0; }",
+        f"if command -v timeout >/dev/null 2>&1; then t='timeout -k 1 {FIND_WALK}'; else t=; fi",
+        "exec 3>&1",
+        # find's status leaves the pipeline on fd 4; the sorted list goes straight to stdout (fd 3)
+        f"r=$({{ {{ {walk}; echo $? >&4; }} | {{ sort -rn || echo \"@@sort $?\"; }} | head -n {FIND_MAX_FILES + 1} "
+        ">&3; } 4>&1)",
+        # a failed walk whose workdir is gone: find escapes the name it prints (LC_ALL=C), never match it in stderr
+        "[ \"$r\" = 0 ] || [ -d \"$d\" ] || { echo @@nodir; exit 0; }",
+        "echo \"@@end $r\"",
+    ))
+
+
+def find_section(workdir: str, since: datetime | None, now: datetime, until: datetime | None = None) -> Section:
+    """`log.find`: recently written log-like files under a job's workdir (on demand, one probe); `until` = an ended
+    job's end (files written after it + FIND_END_SLACK are left out). Raises ValueError for a workdir no probe may
+    search (relative, several lines, `/`, `..`); OverflowError for a since / until out of range."""
+    wd = find_workdir(workdir)
+    cutoff = find_cutoff(since, now)
+    end = find_until(until)
+    return Section("log.find", cmd=find_command(wd, cutoff, end), timeout=FIND_TIMEOUT,
+                   requires=("find", "sort", "head"),
+                   meta={"workdir": wd, "since": cutoff, "until": end, "max_depth": FIND_MAX_DEPTH,
+                         "max_files": FIND_MAX_FILES},
+                   max_stdout=FIND_MAX_STDOUT)
+
+
+_FIND_LINE = re.compile(r"(\d+(?:\.\d*)?) (\d+) (/[^\x1f]*)\x1f")      # \037 ends a whole record
+_FIND_MARKS = {"@@nodir": "No such directory", "@@denied": "Permission denied", "@@unsupported": FIND_UNSUPPORTED}
+_FIND_DENIED = re.compile(r"find: .*: Permission denied")    # LC_ALL=C (framing): a private subdirectory
+# removed / renamed while find walked (a temp dir): that entry is not listed. Old findutils quote with `…'.
+_FIND_GONE = re.compile(r"find: [`']?(.*?)'?: No such file or directory")
+FIND_TIMED_OUT = "timed out"
+FIND_CUT = "output cut"
+FIND_SORT_FAILED = "sort failed"
+FIND_UNREADABLE = "some directories unreadable"
+FIND_NO_OUTPUT = "no output"
+
+
+def _stderr_lines(stderr: str) -> list[str]:
+    """find's stderr as whole, stripped lines. The framing keeps at most STDERR_LIMIT bytes (``head -c``): a capped
+    stderr that does not end in a newline ends in a cut line (``find: '/w/pri``) that matches nothing: dropped."""
+    lines = stderr.split("\n")
+    if not stderr.endswith("\n") and len(stderr.encode("utf-8", "replace")) >= framing.STDERR_LIMIT:
+        lines.pop()
+    return [s for ln in lines if (s := ln.strip())]
+
+
+def _find_failure(rc: str, stderr: str, workdir: str) -> tuple[str | None, str | None]:
+    """find's non-zero status -> (file_error when nothing was listed, incomplete when something was). Unreadable
+    subdirectories alone are no error, only an incomplete walk; an entry below the workdir removed or renamed during
+    the walk is tolerated (it is simply not listed), the workdir itself gone is "No such directory"."""
+    failed = f"find failed (rc {rc[:8] or '?'})"
+    lines = _stderr_lines(stderr)
+    gone = [m.group(1) for ln in lines if (m := _FIND_GONE.fullmatch(ln)) is not None]
+    if workdir in gone or workdir.rstrip("/") in gone:     # removed / renamed after the `[ -d ]` check
+        return "No such directory", failed
+    rest = [ln for ln in lines if not _FIND_GONE.fullmatch(ln)]
+    if not rest:
+        return (None, None) if gone else (failed, failed)
+    if all(_FIND_DENIED.fullmatch(ln) for ln in rest):
+        return None, FIND_UNREADABLE
+    other = "\n".join(ln for ln in rest if not _FIND_DENIED.fullmatch(ln))    # the real cause, not a private dir
+    return _file_error(other) or failed, failed
+
+
+def parse_find(stdout: str, stderr: str, workdir: str, now: datetime) -> LogFiles:
+    """`log.find` output -> newest first, ≤ FIND_MAX_FILES (`truncated` when more matched). A path outside the
+    workdir or not valid UTF-8 is dropped. A walk that may have missed files keeps what it listed and says why in
+    `incomplete` (timed out, output cut, sort failed, unreadable subdirectories, find failed); with nothing listed,
+    a real failure is a `file_error` instead (an I/O error is never "no log files")."""
+    try:
+        wd = find_workdir(workdir)
+    except ValueError:
+        wd = workdir
+    prefix = wd.rstrip("/") + "/"
+    rows: list[tuple[float, FoundLog]] = []
+    records = 0                                      # whole records, kept or dropped: what `head` let through
+    end: str | None = None
+    sort_rc: str | None = None
+    # A record cut mid-path (find killed by its timeout, then sort adds the newline; max_stdout) lacks its \037 end:
+    # it never matches, so a prefix of a name is never offered.
+    for line in stdout.split("\n"):
+        if line.startswith("@@"):
+            tag, _, rest = line.partition(" ")
+            if tag in _FIND_MARKS:
+                return LogFiles(workdir=wd, files=(), fetched_at=now, file_error=_FIND_MARKS[tag])
+            if tag == "@@end":
+                end = rest.strip()
+            elif tag == "@@sort":
+                sort_rc = rest.strip()
+            continue
+        m = _FIND_LINE.fullmatch(line)
+        if m is None:
+            continue
+        records += 1
+        path = m.group(3)
+        if not path.startswith(prefix) or "\ufffd" in path or "/../" in path or path.endswith("/.."):
+            continue
+        try:
+            ts = float(m.group(1))
+            rows.append((ts, FoundLog(path=path, size=int(m.group(2)), mtime=datetime.fromtimestamp(ts, tz=UTC))))
+        except (ValueError, OverflowError, OSError):
+            continue
+    rows.sort(key=lambda r: (-r[0], r[1].path))
+    files = tuple(f for _, f in rows)
+    error: str | None = None
+    incomplete: str | None = None
+    if end in ("124", "137"):
+        incomplete = FIND_TIMED_OUT                  # `timeout` stopped the walk: what it found so far, if anything
+    elif end is None:
+        incomplete = FIND_CUT
+        error = _file_error("\n".join(ln for ln in _stderr_lines(stderr) if not _FIND_DENIED.fullmatch(ln)))
+        error = error or FIND_NO_OUTPUT
+    elif sort_rc is not None:
+        incomplete = FIND_SORT_FAILED
+        error = next((ln.strip()[:120] for ln in stderr.splitlines() if ln.startswith("sort:")),
+                     f"sort failed (rc {sort_rc[:8]})")
+    elif end != "0":
+        error, incomplete = _find_failure(end, stderr, wd)
+    if error is not None and not files:
+        return LogFiles(workdir=wd, files=(), fetched_at=now, file_error=error)
+    return LogFiles(workdir=wd, files=files[:FIND_MAX_FILES], fetched_at=now, truncated=records > FIND_MAX_FILES,
+                    incomplete=incomplete)
+
+
+def norm_log_path(path: str) -> str:
+    """The form `known_logs` / `suggest` compare paths in: normalised, one leading `/` (`//a/./b` -> `/a/b`)."""
+    return "/" + posixpath.normpath(path).lstrip("/")
+
+
+def known_logs(jobs: Iterable[Job], exclude: JobKey) -> dict[str, str]:
+    """The stdout / stderr files of the OTHER jobs on `exclude`'s host (a shared workdir holds every job's
+    ``logs/<name>_<id>.out``) -> "job <label> stdout|stderr", so a picker / agent marks them and never suggests one."""
+    out: dict[str, str] = {}
+    for job in jobs:
+        if job.key == exclude or job.key.host != exclude.host:
+            continue
+        for ref in job.logs:
+            if ref.path and ref.path.startswith("/") and ref.stream in ("stdout", "stderr"):
+                out.setdefault(norm_log_path(ref.path), f"job {job.key.label} {ref.stream}")
+    return out
+
+
+def suggest(files: Sequence[FoundLog], skip: Collection[str]) -> FoundLog | None:
+    """The newest found file worth opening first: not in `skip` (the job's own stdout / stderr and `known_logs`;
+    compared normalised). None when every file is skipped: no suggestion then."""
+    skipped = {norm_log_path(p) for p in skip if p}
+    return next((f for f in sorted(files, key=lambda f: f.mtime, reverse=True)
+                 if norm_log_path(f.path) not in skipped), None)
+
+
+QUIET_TINY = 4096              # bytes: a running job's stdout this small …
+QUIET_TINY_AGE = 600.0         # … and unchanged this long holds a launcher's few lines: the real log is elsewhere
+
+
+def stdout_quiet_for(ref: LogRef | None, now: datetime, stall_after: float) -> float | None:
+    """Seconds since a stdout last changed when it is "quiet": unchanged longer than `stall_after` (the "log idle"
+    rule), or ≤ QUIET_TINY bytes and unchanged ≥ QUIET_TINY_AGE. None otherwise, or with no mtime. One rule for the
+    TUI's hint and the agent's "next" line (§4.7.2)."""
+    if ref is None or ref.mtime is None:
+        return None
+    quiet = (now - ref.mtime).total_seconds()
+    if quiet > stall_after or (ref.size is not None and ref.size <= QUIET_TINY and quiet >= QUIET_TINY_AGE):
+        return quiet
+    return None
 
 
 # ======================================================================================= streaming sessions
@@ -569,6 +829,50 @@ class LogService:
         if res.error is not None:
             return LogSearchResult(host, query, search, max_matches=max_matches, error=res.error.summary)
         return logsearch.parse(host, query, search, res.sections[logsearch.SECTION], max_matches=max_matches)
+
+    # ------------------------------------------------------------ find other logs (§4.7.2)
+    async def find(self, host: str, workdir: str, *, since: datetime | None,
+                   until: datetime | None = None) -> LogFiles:
+        """ONE `log.find` probe: log-like files written under `workdir` since `since` (the job's start; None = the
+        last 24 h) and, for an ended job, not after `until` (its end) + FIND_END_SLACK. On demand only, never
+        cached; never raises (`error`, `file_error`, `incomplete`, `truncated`)."""
+        now = self.clock.now()
+        empty = LogFiles(workdir=workdir, files=(), fetched_at=now)
+        try:
+            section = find_section(workdir, since, now, until)
+        except (ValueError, OverflowError) as e:     # relative, several lines, `/`, `..`, a since out of range
+            return dataclasses.replace(empty, file_error=(str(e) or "invalid workdir")[:120])
+        wd = str(section.meta["workdir"])
+        empty = dataclasses.replace(empty, workdir=wd)
+        try:
+            res = await self._probe(host, framing.make_script([section], "log"))
+        except Exception as e:             # an unknown host, a broken transport: a typed error, not a crash
+            log.info("%s: log find failed: %r", host, e)
+            return dataclasses.replace(empty, error=HostError(ErrorKind.INTERNAL, (str(e) or type(e).__name__)[:80],
+                                                              at=now))
+        if res.error is not None:
+            return dataclasses.replace(empty, error=res.error)
+        r = res.sections.get(section.name)
+        if r is None:
+            return dataclasses.replace(empty, file_error=FIND_NO_OUTPUT)
+        if r.outcome is SectionOutcome.MISSING:
+            tool = r.stderr.partition("missing:")[2].strip() or "find"
+            return dataclasses.replace(empty, file_error=f"unsupported: {tool} not installed"[:120])
+        if not r.ok and not r.stdout:
+            known = _file_error(r.stderr)
+            if known is None and r.outcome is SectionOutcome.TIMEOUT:
+                return dataclasses.replace(empty, error=HostError(ErrorKind.TIMEOUT, "log find timed out",
+                                                                  section=section.name, at=now))
+            return dataclasses.replace(empty, file_error=known or r.outcome.value)
+        out = parse_find(r.stdout, r.stderr, wd, now)
+        if r.ok or out.incomplete == FIND_TIMED_OUT:
+            return out
+        why = FIND_TIMED_OUT if r.outcome is SectionOutcome.TIMEOUT else FIND_CUT     # cut short: a partial list
+        if out.file_error == FIND_NO_OUTPUT and r.outcome is SectionOutcome.TIMEOUT:
+            return dataclasses.replace(empty, incomplete=why)          # stopped before listing anything
+        if out.file_error is None:
+            return dataclasses.replace(out, incomplete=out.incomplete if out.incomplete != FIND_CUT else why)
+        return out
 
     # ------------------------------------------------------------ pagers
     def pager_argv(self, host: str, ref: LogRef) -> list[str] | None:

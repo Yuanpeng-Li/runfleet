@@ -170,6 +170,7 @@ def test_detect_probe_through_shell(tmp_path: Path) -> None:
     assert {"squeue", "sacct", "sinfo", "scontrol", "sstat", "scancel", "sacctmgr"} <= caps.tools
     assert caps.slurm_version == "25.05.8" and caps.cluster_name == "k2" and caps.gpu_tres is True
     assert caps.associations == (("k2", "campus01", "", "gpu-priority,normal,labpi"),)
+    assert len(caps.qos_usage_factor) == 7 and caps.qos_usage_factor["labpi"] == 1.0      # Account (§5.2.11)
     assert "JobIDRaw" in caps.sacct_fields and "StdOut" not in caps.sacct_fields
     assert abs(caps.clock_skew.total_seconds()) < 10 ** 9
     # the priority settings of §5.2.10 come through the real grep, the other config keys stay out of it

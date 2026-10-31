@@ -7,8 +7,10 @@ presets (§7.6), the default and column sort orders (§7.5) and the time-derived
 Grammar: space-separated terms, all must match. ``word`` matches as a substring of the job's host, id, name, state,
 partition, nodes, reason or user, or of the name with its separators removed (``orbswp`` finds ``orb-swp--…``); no
 subsequence fuzz: common words would match nearly every long sweep name. ``host:``/``h:``, ``state:``/``st:`` (codes
-``R``/``PD``, groups ``active``/``failed``, names ``running``/``pending``/``oom``…) and ``user:``/``u:`` take comma lists;
-``!term`` negates.
+``R``/``PD``, groups ``active``/``failed``, names ``running``/``pending``/``oom``…), ``user:``/``u:``,
+``acct:``/``account:`` and ``part:``/``p:`` take comma lists; ``su:`` and ``gpuh:`` compare the job's cost (Account,
+§5.2.11) with ``> >= < <= =`` (``su:>10``, ``gpuh:>=5``); ``!term`` negates. The cost comes from a callback the screen
+builds from the cached charging rules, so this module stays pure.
 """
 
 from __future__ import annotations
@@ -21,13 +23,25 @@ from typing import Literal
 import re
 
 from runfleet.models import Job, JobState, StateGroup
+from runfleet.util import cost as costs
+from runfleet.util.cost import JobCost
 
-TermKind = Literal["text", "host", "state", "user"]
+TermKind = Literal["text", "host", "state", "user", "account", "partition", "su", "gpuh"]
+CostFn = Callable[[Job, datetime], JobCost | None]      # util.cost.job_cost with the job's host caps (§7.5)
 
 _KEY_ALIASES: dict[str, TermKind] = {
     "host": "host", "h": "host",
     "state": "state", "st": "state", "s": "state",
     "user": "user", "u": "user",
+    "acct": "account", "account": "account",
+    "part": "partition", "p": "partition", "partition": "partition",
+    "su": "su", "gpuh": "gpuh",
+}
+_NUMERIC: frozenset[TermKind] = frozenset({"su", "gpuh"})
+_COMPARE = re.compile(r"^(?P<op>>=|<=|>|<|=)?(?P<n>\d+(?:\.\d*)?|\.\d+)$")
+_OPS: dict[str, Callable[[float, float], bool]] = {
+    ">": lambda a, b: a > b, ">=": lambda a, b: a >= b, "<": lambda a, b: a < b, "<=": lambda a, b: a <= b,
+    "=": lambda a, b: abs(a - b) < 0.05,      # (`_numeric_matches` compares `=` at the precision shown instead)
 }
 _GROUP_NAMES = {g.value: g for g in StateGroup}
 _STATE_CODES = {s.value.upper(): s for s in JobState}
@@ -41,8 +55,9 @@ _SEPARATORS = re.compile(r"[^0-9a-z]+")
 @dataclass(frozen=True, slots=True)
 class Term:
     kind: TermKind
-    values: tuple[str, ...]      # lower-cased
+    values: tuple[str, ...]      # lower-cased; numeric terms: (operator,)
     negate: bool = False
+    number: float = 0.0          # numeric terms (su, gpuh): the right-hand side
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +80,12 @@ def parse(text: str) -> Query:
             continue
         key, sep, rest = body.partition(":")
         kind = _KEY_ALIASES.get(key.lower()) if sep else None
+        if kind in _NUMERIC:
+            m = _COMPARE.match(rest)
+            if m is not None:        # a malformed number falls through to a text term
+                terms.append(Term(kind, (m.group("op") or "=",), negate, float(m.group("n"))))
+                continue
+            kind = None
         if kind is not None and rest:
             values = tuple(v.lower() for v in rest.split(",") if v)
             terms.append(Term(kind, values, negate))
@@ -102,19 +123,53 @@ def _state_matches(values: Sequence[str], job: Job) -> bool:
     return False
 
 
-def _term_matches(term: Term, job: Job) -> bool:
+def su_value(job: Job, cost: JobCost | None) -> float | None:
+    """The job's SU as the `su` column shows it (billing-h on usage-only clusters, via JobCost.as_billing_h): charged
+    so far, a pending job's projection at its limit; None = unknown."""
+    if cost is None:
+        return None
+    return cost.projected_su if job.state.group is StateGroup.QUEUED else cost.charged_su
+
+
+def gpuh_value(job: Job, cost: JobCost | None) -> float | None:
+    """The job's GPU-h so far (a pending job: 0); None = unknown."""
+    return cost.gpu_h if cost is not None else None
+
+
+def _numeric_matches(term: Term, job: Job, now: datetime | None, cost: CostFn | None) -> bool:
+    """A job whose cost is unknown never matches (so `!su:>10` keeps it)."""
+    if cost is None or now is None:
+        return False
+    c = cost(job, now)
+    value = su_value(job, c) if term.kind == "su" else gpuh_value(job, c)
+    if value is None:
+        return False
+    if term.values[0] == "=":           # as the column shows it (`33` is 32.5 … 33.49, `2.9`): `su:=0` = free jobs
+        shown = costs.fmt_su if term.kind == "su" else costs.fmt_hours
+        return shown(value) == shown(term.number)
+    return _OPS[term.values[0]](value, term.number)
+
+
+def _term_matches(term: Term, job: Job, now: datetime | None, cost: CostFn | None) -> bool:
     if term.kind == "host":
         return job.key.host.lower() in term.values
     if term.kind == "state":
         return _state_matches(term.values, job)
     if term.kind == "user":
         return any((job.is_mine if v == "me" else job.user.lower() == v) for v in term.values)
+    if term.kind == "account":
+        return (job.account or "").lower() in term.values
+    if term.kind == "partition":       # a pending job's `gpu,free-gpu` list matches any of its partitions
+        return any(p.strip().lower() in term.values for p in (job.partition or "").split(","))
+    if term.kind in _NUMERIC:
+        return _numeric_matches(term, job, now, cost)
     return _fuzzy(term.values[0], _fields(job), job.name)
 
 
-def matches(query: Query, job: Job) -> bool:
-    """True when every term matches (negated terms must not match)."""
-    return all(_term_matches(t, job) != t.negate for t in query.terms)
+def matches(query: Query, job: Job, now: datetime | None = None, cost: CostFn | None = None) -> bool:
+    """True when every term matches (negated terms must not match). ``su:`` / ``gpuh:`` need ``now`` and ``cost``;
+    without them the job's cost is unknown."""
+    return all(_term_matches(t, job, now, cost) != t.negate for t in query.terms)
 
 
 # ---------------------------------------------------------------- state presets
@@ -185,12 +240,15 @@ def left_s(job: Job, now: datetime) -> float | None:
 
 
 # ---------------------------------------------------------------- sorting
-SortColumn = Literal["host", "id", "name", "state", "elapsed", "left", "gpus", "gpu_util", "submit", "user"]
+SortColumn = Literal["host", "id", "name", "state", "elapsed", "left", "gpus", "gpu_util", "submit", "user", "su",
+                     "gpuh"]
+# su / gpuh (Account) are not in the `o` cycle: a header click or the palette's Sort by SU / Sort by GPU-h
 SORT_CYCLE: tuple[SortColumn, ...] = ("host", "state", "elapsed", "gpu_util", "gpus", "name", "id", "submit")
 SORT_LABELS: dict[SortColumn, str] = {
     "host": "host", "id": "id", "name": "name", "state": "state", "elapsed": "elapsed", "left": "left",
-    "gpus": "gpus", "gpu_util": "GPU%", "submit": "submit", "user": "user",
+    "gpus": "gpus", "gpu_util": "GPU%", "submit": "submit", "user": "user", "su": "SU", "gpuh": "GPU-h",
 }
+COST_SORTS: tuple[SortColumn, ...] = ("su", "gpuh")
 
 # Default state order (§7.5): active, queued, failed, ended, cancelled, done.
 GROUP_ORDER: dict[StateGroup, int] = {
@@ -200,7 +258,7 @@ GROUP_ORDER: dict[StateGroup, int] = {
 
 
 # numeric columns read best largest-first by default (busiest GPU, longest running, newest submit)
-DESC_DEFAULT: frozenset[str] = frozenset({"elapsed", "gpus", "gpu_util", "submit"})
+DESC_DEFAULT: frozenset[str] = frozenset({"elapsed", "gpus", "gpu_util", "submit", "su", "gpuh"})
 
 
 def sort_descending(column: str, reverse: bool) -> bool:
@@ -229,10 +287,10 @@ def _submit_ts(job: Job) -> float:
 
 
 def sort_jobs(jobs: Iterable[Job], column: SortColumn, reverse: bool, *, host_order: Sequence[str],
-              now: datetime) -> list[Job]:
+              now: datetime, cost: CostFn | None = None) -> list[Job]:
     """Sort by ``column`` then by the default order (host, state group, newest submit first), stably.
 
-    Unknown values (``None``) always sort last, whatever the direction.
+    Unknown values (``None``) always sort last, whatever the direction; without ``cost`` every SU / GPU-h is unknown.
     """
     rank = {h: i for i, h in enumerate(host_order)}
 
@@ -260,10 +318,14 @@ def sort_jobs(jobs: Iterable[Job], column: SortColumn, reverse: bool, *, host_or
         value = lambda j: float(j.alloc.gpus) if j.alloc.gpus else None  # noqa: E731
     elif column == "gpu_util":
         value = lambda j: j.gpu.util_mean_pct if j.gpu is not None else None  # noqa: E731
+    elif column in COST_SORTS:
+        pick = su_value if column == "su" else gpuh_value
+        value = lambda j: pick(j, cost(j, now)) if cost is not None else None  # noqa: E731
     else:   # submit
         value = lambda j: _submit_ts(j) or None  # noqa: E731
 
-    known = [j for j in ordered if value(j) is not None]
-    unknown = [j for j in ordered if value(j) is None]
-    known.sort(key=lambda j: value(j), reverse=sort_descending(column, reverse))  # type: ignore[arg-type,return-value]
-    return known + unknown
+    values = [(j, value(j)) for j in ordered]       # once per job: a cost is not free to compute
+    known = [(j, v) for j, v in values if v is not None]
+    unknown = [j for j, v in values if v is None]
+    known.sort(key=lambda jv: jv[1], reverse=sort_descending(column, reverse))
+    return [j for j, _v in known] + unknown

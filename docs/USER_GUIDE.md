@@ -178,9 +178,13 @@ runfleet agent jobs --state finished --since 1d    # everything that ended in th
 runfleet agent jobs --workdir DIR --name 'orb-*'   # one project's jobs
 runfleet agent job k2:2332861                # times, placement, why it pends, why it ended, log paths
 runfleet agent log k2:2332861 --lines 80     # bounded, scrubbed log tail — the only verb that runs ssh (1 probe)
+runfleet agent log k2:2332861 --files        # log files written under the job's workdir while it ran
+runfleet agent log k2:2332861 --file runs/a/s42/train.log   # read one of them like stdout
 runfleet agent gpus --type h100 --min 4      # where N free GPUs of a type are
 runfleet agent host k2                       # login, failing probes, data ages, partitions, load
 runfleet agent events --since 2h             # submitted / started / ended / time low / host problems
+runfleet agent usage lyra --window 90d       # SU used / limit / left per account, my GPU-h, top experiments
+runfleet agent cost lyra --partition gpuxl --gpus 1 --gpu-type l40s --time 24h   # what a job would cost
 runfleet wait k2:2332861 --json               # waits for a job: in the background, else --timeout 540 repeated
 ```
 
@@ -201,6 +205,36 @@ shell — double quotes on Windows; a value starting with `-` as `--name=-x*`; a
 `labstation:p642229-1788696459`), narrowed to one host when one call cannot hold the rest, with a hint in
 parentheses. When an argument holds text RunFleet redacts (a `-c` path with `token=` in it) or the command would not
 fit, no command is printed and the hint says why and what to change ("repeat your command with --limit 37").
+A job started through a launcher (a script that runs the training with `Popen(stdout=fh)` or `> train.log`) leaves
+its stdout with a few lines while the real output goes to a file under the workdir. `agent job` then adds "stdout is
+quiet; other logs: runfleet agent log ID --files", which lists the log-like files (`*.log *.out *.err`, wandb's
+`output.log`, …) written there since the job started (for a job that ended, up to 5 minutes after its end; one with
+no known start time, the day before its end), newest first, the job's own stdout and stderr marked and other jobs' logs marked `job ID stdout`; `next:` suggests the
+newest file that is neither. A search that did not finish says `search stopped early (timed out): N found so far`
+rather than "no log files"; one that could not read some directories says `some directories were unreadable: their
+files are not listed`. `--file PATH` reads one of them with the same tail, `--head` and `--grep`. Only a file
+that list shows can be read (never anything outside the workdir, nor the workdir itself), and only for your own jobs.
+
+**Account usage and cost for agents (Slurm).** `agent usage` answers from the cache like every other verb: the
+default window comes from the periodic account summary (each account's used / limit / left SU, the next
+reallocation, your CPU-h and GPU-h), and a window or grouping someone fetched before (the Account screen, or an
+earlier `--refresh`) adds "where it went". Anything else — another `--window`, `--by task`, `--scope account` —
+answers `usage_window_not_cached` with the exact command to run once (`… --refresh`): it fetches that report (one
+probe per cluster, reused for 10 minutes) and stores it, so the next call answers from the cache. `limit_su: null`
+means no limit is known, not "unlimited"; on clusters without limits ("usage only") amounts are billing-hours, and
+the decaying "recent" usage is shown twice, labelled: yours and the whole account's (`recent me 5,859 · account
+2,503,304`). If every part of a report fails (sshare, sreport, the job records) the last good report is kept; a
+part that fails takes its last good values, and job records that could not be read say `rollup unknown`.
+`agent cost HOST --partition P` is a calculation from the cached charging rules (billing weights, QOS UsageFactor),
+never a probe and never a submission: billing per hour and its terms, SU for `--time`, the share of the account's SU
+left (`--account`, any case, else the account of your last job there; with neither, every account with an SU limit
+that may run there, least left first) with `EXCEEDS` where the job needs more than is left, a range when the
+partition charges by GPU model and no `--gpu-type` is given (`792-1,560 SU`), and up to two free partitions with the
+requested GPU type; every assumption it makes (CPUs from `DefCpuPerGPU`, the QOS it took, memory not counted) is listed under
+`note`. `agent job` shows each Slurm job's cost (`cost  2.0 GPU-h (L40S) · 16.0 CPU-h · 40/h × qos normal ×1 = 80 SU
+so far · ≈ 960 at limit`), `agent jobs --sort su|gpuh` puts the most expensive first, and `agent host` adds the
+`account` line of the host detail. The skill asks agents to run `agent cost` and `agent usage` before a large launch
+and to offer a free partition when SU run low; choosing the account and submitting stay with hpc-run and you.
 
 - **Freshness.** The answers are as fresh as the cache: a running TUI saves it every 10 s. `--refresh` polls once
   first, but only hosts whose data is over a minute old, that nobody tried to refresh in the last minute (otherwise
@@ -227,7 +261,8 @@ fit, no command is printed and the hint says why and what to change ("repeat you
 `--demo` works with every verb (`runfleet --demo agent brief`): the simulated fleet, nothing touched.
 
 **Clients without a shell: `runfleet mcp`.** The same read-only verbs as MCP tools (`fleet_brief`, `list_jobs`,
-`job_detail`, `read_log`, `gpu_availability`, `host_health`, `fleet_events`, `runfleet_help`) over stdio, for
+`job_detail`, `read_log`, `gpu_availability`, `host_health`, `fleet_events`, `account_usage`, `estimate_cost`,
+`runfleet_help`) over stdio, for
 clients that cannot run commands. Register it yourself (RunFleet never edits these files):
 
 ```sh
@@ -314,7 +349,24 @@ lists every job on the selected node: user and real name, account, partition, GP
 yours first, then the job that ends soonest; on a full node it says when the next GPU frees up at the latest (time
 limits are upper bounds). Other users' jobs are read only while this screen is open (every 30 s), and only where the
 cluster lets users see them (`PrivateData=jobs` hides them; the panel then says so). A host that never
-connected shows only its connection panel (`c` log in, `e` details, `t` disable).
+connected shows only its connection panel (`c` log in, `e` details, `t` disable). A cluster's capabilities end with
+an `account` line: your accounts' used / limit SU and your CPU-h / GPU-h over the usage window (on clusters without SU
+limits: "usage only" and the decaying recent usage), read every 30 minutes; `$` there opens the Account screen on it.
+
+**Account usage** (`$` from any screen, or palette › *Account usage* / *Account: <host>*). One box per Slurm cluster in
+scope: your accounts' used, limit and available SU with a usage bar and the next reallocation (where the cluster has
+SU limits; elsewhere "usage only" and your recent, decaying usage, never called "used"), your CPU-h / GPU-h /
+billing-hours in the window (`u`: the whole account's, recent usage included), which partitions charge and which are free, and *where it
+went*: your job records over the window rolled up by experiment (the job name without its `--s<seed>--a<attempt>`
+fields; `z` cycles task / name / account / partition / GPU model, `o` / `O` sort). `[` / `]` switch the window (7d,
+30d, 90d and, where the cluster has one, the allocation period; the choice is remembered), `enter` opens the Jobs view
+filtered to the row, `tab` moves between clusters (a collapsed one opens; only the focused box shows the `▶` row).
+When the screen is short, a cluster with SU limits keeps its room right after the focused one (collapsed to one
+line of balances, warning-coloured near the limit, and the experiment that spent the most SU) while usage-only
+clusters fold first; the boxes stay in config order. Nothing is read on a timer: the screen
+asks each cluster once when it opens or the window changes (answers younger than 10 minutes come from the cache), and
+`r` reads the focused cluster again (at most once a minute; `ctrl+r` all). A failing `sreport` / `sacct` / `sshare`
+is one red line in the box, with the last data kept; workstations have no scheduler accounting.
 
 **Log viewer** (`l`). The job's stdout or stderr (`o`/`e`), following the file as it grows (`F` toggles). Progress
 bars that rewrite one line with carriage returns (tqdm) show up as a live line under the log instead of flooding it.
@@ -325,6 +377,26 @@ Search the log in your pager with `p` (`less` on the remote host when available,
 the loaded buffer (`n`/`N`); `]`/`[` jump to the next / previous error or warning line (Traceback, `…Error`, CUDA out
 of memory, NCCL errors, `Killed`, OOM kills, `slurmstepd: error`, `DUE TO TIME LIMIT`, preemption, segmentation
 faults, NaN losses, disk quota), which are shown in red (warnings in yellow) here and in the job detail log panes.
+
+**Other log files** (`f` in the job detail and the log viewer). Many jobs print only a launcher's few lines to their
+stdout while the program writes its real log somewhere under the working directory
+(`runs/cifar/warmup/s42/train.log`). `f` lists the files written under the job's workdir while it ran — since it
+started (no known start time: the day before its end), and for a job that ended up to 5 minutes after its end, so a
+later job's files in the same directory stay out (one quick look on the login node or workstation: `*.log`, `*.out`,
+`*.err`, `*.stdout`, `*.stderr`, wandb's `output.log`; a file at most five directories below the workdir, as in
+`a/b/c/d/e/train.log`, never into `.git`, virtualenvs, `node_modules` or caches; the newest 30), newest first, with
+their size and age. The job's own stdout / stderr are marked, and so are other jobs' logs in a shared directory (`job
+2332862 stdout`); the cursor starts on the file shown, else on the newest file that is neither (never on another job's
+log while something else is listed). A search that did not finish says so (`search stopped early (timed out): 3 found
+so far`) rather than "no log file"; unreadable directories are named as such (`some directories were unreadable: their
+files are not listed`), with the 30-file cap when it applies too. `enter` follows the chosen file in the Logs tab (it
+switches there from Summary or GPU), like stdout; the stream line then reads `o` / `e` / `f(train.log)`: `o` and `e`
+go back to stdout and stderr, `f` back to the file, and `f` on the file picks another (`r` in the list looks again).
+RunFleet remembers the chosen file per job until it exits, so `l`, `p` and `y` use it too. Only your own jobs with a
+known workdir; a host where `find` cannot list files by time (BusyBox) says so. When a running job's stdout has been
+quiet for longer than `stall_after` (or holds at most 4 KiB and has not changed for 10 minutes) — the same rule as
+`runfleet agent job`'s "stdout is quiet" — the Logs tab and the log viewer say so: `stdout quiet for 13h; f finds
+other log files in the workdir`.
 
 **Search logs** (palette › *Search logs…*, or `ctrl+f` in the Jobs view). Finds text in the logs of several jobs at
 once: your own jobs on the hosts in scope (`0` all, `1`–`9` one host) that are running or ended within the recent
@@ -394,10 +466,18 @@ directory, a full disk) the panel says so and nothing changes. With `--demo` not
 | `host:k2`, `h:k2,vega` | host is one of these |
 | `state:R`, `st:pd,f`, `state:failed` | state code (`R PD CG F TO OOM CA CD …`) or group (`queued active done failed cancelled ended`) |
 | `user:me`, `user:alice` | owner |
+| `acct:lab`, `account:lab,pilab_02` | Slurm account is one of these |
+| `part:free-gpu`, `p:gpu,gpuxl` | partition is one of these |
+| `su:>10`, `su:<=0`, `gpuh:>=5` | the job's cost so far (`> >= < <= =`; a pending job's SU is its projection at its time limit; SU = billing-hours on clusters without SU limits; `=` matches what the column shows: `su:=33` finds 33.4); a job whose cost is unknown never matches (`!su:>10` keeps it) |
 | `!term` | negation of any term |
 
 `f` cycles the state presets *fresh → active → queued → failed (failed + ended) → all*; `o` cycles the sort column and
-`O` reverses it (or click a column header); `z` groups by nothing → host → array. Scope with `0` (all hosts) and `1`–`9`
+`O` reverses it (or click a column header); `z` groups by nothing → host → array. The optional `su` and `gpuh` columns
+(add them to `jobs_columns` in `[ui]`) show each Slurm job's charged SU (billing-hours on clusters without SU limits,
+muted with an `h`: `576h`; a pending job's projection dim, `≈576`; a free job a dim `0`) and GPU-hours, ticking while it runs; sort by them with a
+header click or palette › *Sort by SU* / *Sort by GPU-h*. The job detail shows the same cost in its Resources box and,
+worked out, in the GPU tab's Cost box (with the account's balance and, first, whether the job fits in what is left:
+`this job exceeds what is left (97 SU)` and `no SU left` in red). All of it comes from the cluster's cached charging rules: no extra command. Scope with `0` (all hosts) and `1`–`9`
 (host N in config order). Filter text, preset, sort and grouping are remembered in `~/.local/state/runfleet/ui.json`.
 
 **Saved views.** Set up the Jobs view the way you like it (filter, preset, sort, grouping), then palette › *Save view
@@ -461,17 +541,17 @@ Every view lists its keys with `?`. The table below is generated from the same s
 <!-- keymap:begin -->
 | Context | Keys |
 |---|---|
-| Global | `?`/`f1` help (this view) · `^p`/`:` command palette · `,` settings (hosts, defaults) · `q` back · quit on the main screen · `^c` quit now · `esc` close / clear filter, marks / back · `0` all hosts (1-9: host N) · `/` filter jobs · `r` refresh hosts in scope (>= 3 s apart) · `^r` refresh all hosts · `+` poll faster (down to 0.5×) · `-` poll slower (up to 4×) · `^z` suspend to the shell · `D` since you were away: what ended, failures first |
+| Global | `?`/`f1` help (this view) · `^p`/`:` command palette · `,` settings (hosts, defaults) · `$` account usage: balances, usage per window, where it went (Slurm) · `q` back · quit on the main screen · `^c` quit now · `esc` close / clear filter, marks / back · `0` all hosts (1-9: host N) · `/` filter jobs · `r` refresh hosts in scope (>= 3 s apart) · `^r` refresh all hosts · `+` poll faster (down to 0.5×) · `-` poll slower (up to 4×) · `^z` suspend to the shell · `D` since you were away: what ended, failures first |
 | Main screen | `tab` next view (Fleet→Jobs→GPUs) · `S-tab` previous view |
 | Fleet view | `↑`/`k` host above · `↓`/`j` host below · `←`/`h` previous host · `→`/`l` next host · `↵` host detail · `a` jobs that need you, fleet-wide: failed, low on time, never start (↵ opens one) · `space` scope to this host · `c` connect (log in: Duo / password prompts) · `C` log in to every host needing auth (one terminal session) · `s` shell on the host · `t` enable / disable polling · `e` error details |
 | Jobs view | `j` move down · `k` move up · `g`/`home` first row · `G`/`end` last row · `^d`/`pgdn` half page down · `^u`/`pgup` half page up · `↵` job detail · `l` log viewer · `p` log in $PAGER · `^f` search recent jobs' logs · `x` action menu · `^k` cancel job / terminate task · `space` mark / unmark · `V` mark all / clear marks · `A` mark the whole array of this row (cancel / hold act on all of it) · `y` copy id · `Y` copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle · Y again = stdout path · `s` shell · `P` forward a port (TensorBoard, Jupyter …) to localhost · `c` connect host · `/` filter jobs · `f` next state preset · `o` next sort column · `O` reverse sort · `z` group by · `u` other users · `w` watch / unwatch (notify on start, end, GPU idle; marked rows too) |
 | GPUs view | `j` move down · `k` move up · `g`/`home` first row · `G`/`end` last row · `↵` owning job / task (or host) · `x` actions of the owning task · `^k` terminate the owning task · `c` connect host · `a` copy CUDA_VISIBLE_DEVICES for N free GPUs of this workstation · `o` next sort column · `O` reverse sort · `/` filter jobs (Jobs view) |
-| Job detail | `[` previous tab · `]` next tab · `o` stdout · `e` stderr · `F` follow on / off · `l` full log viewer · `L` log viewer at the failure line (cause chip) · `/` search the log (opens the log viewer) · `p` log in $PAGER · `r` refresh detail · `x` action menu · `^k` cancel / terminate · `s` shell · `c` connect host · `y` copy id · `Y` copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle · Y again = stdout path · `P` forward a port (TensorBoard, Jupyter …) to localhost · `w` watch / unwatch (notify on start, end, GPU idle) · `a` live readings: auto-refresh on / off (GPU / Procs tab) · `S` live readings: read this job's own GPUs with srun (asks first; one permanent sacct row) |
+| Job detail | `[` previous tab · `]` next tab · `o` stdout · `e` stderr · `f` other log files: pick one written under the job's workdir and follow it (one picked already: switch to it; on it: pick another) · `F` follow on / off · `l` full log viewer · `L` log viewer at the failure line (cause chip) · `/` search the log (opens the log viewer) · `p` log in $PAGER · `r` refresh detail · `x` action menu · `^k` cancel / terminate · `s` shell · `c` connect host · `y` copy id · `Y` copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle · Y again = stdout path · `P` forward a port (TensorBoard, Jupyter …) to localhost · `w` watch / unwatch (notify on start, end, GPU idle) · `a` live readings: auto-refresh on / off (GPU / Procs tab) · `S` live readings: read this job's own GPUs with srun (asks first; one permanent sacct row) |
 | Job detail · GPU / Procs tab (running Slurm job) | `r` read the node now (srun asks first) and refresh the detail · `a` auto-refresh on / off (ssh: every attach_refresh while the tab is open) · `S` read this job's own GPUs with srun when ssh landed in another job (asks first) |
 | Host detail | `^k` terminate the selected task · `x` actions · `s` shell · `c` connect · `t` enable / disable polling · `e` error details |
 | Host detail (workstation) | `↵` open the process' task · `l` log of the selected task · `u` other users' processes · `[` previous GPU: only its processes, all users (click a GPU too) · `]` next GPU · `a` copy CUDA_VISIBLE_DEVICES for N free GPUs · `o` next sort column · `O` reverse sort |
 | Host detail (cluster) | `↵` my job on the selected node · `f` nodes with free GPUs only · `[` previous partition · `]` next partition |
-| Log viewer | `F` follow on / off · `G` bottom + follow · `g` top of the buffer · `o` stdout · `e` stderr · `/` search the buffer · `n` next match · `N` previous match · `[` previous error / warning line · `]` next error / warning line · `p` log in $PAGER · `R` reopen the log stream · `y` copy the path of the shown stream (stdout / stderr) · `c` connect host |
+| Log viewer | `F` follow on / off · `G` bottom + follow · `g` top of the buffer · `o` stdout · `e` stderr · `f` other log files: pick one written under the job's workdir and follow it (one picked already: switch to it; on it: pick another) · `/` search the buffer · `n` next match · `N` previous match · `[` previous error / warning line · `]` next error / warning line · `p` log in $PAGER · `R` reopen the log stream · `y` copy the path of the shown log (stdout / stderr / found file) · `c` connect host |
 | srun confirmation (live readings) | `y` read once (one srun step, one permanent sacct row) · `a` allow srun reads for this job until RunFleet exits (each read still adds a row) · `n`/`esc` cancel · `f1` help (this dialog) |
 | Confirm dialog | `y` confirm · `n`/`esc` cancel · `tab` move between params and buttons · `f1` help (this dialog) |
 | Action menu | `j` move down · `k` move up · `↵` run the action · `letter` pick the entry by its key (copy menu: Y again = stdout path) · `esc`/`q` close · `f1` help (this dialog) |
@@ -484,8 +564,10 @@ Every view lists its keys with `?`. The table below is generated from the same s
 | Port forwards | `j` move down · `k` move up · `↵` copy the local URL again · `^k` cancel the forward (ssh -O cancel, local) · `esc`/`q` close · `f1` help (this dialog) |
 | Search logs (prompt) | `↵` search (in the pattern field) · `tab` move to the options: regular expression, match case · `space` toggle the option under the cursor · `esc` cancel · `f1` help (this dialog) |
 | Search logs (results) | `j` move down · `k` move up · `↵` open the log viewer at this match (esc there comes back here) · `/` edit the search and run it again · `esc`/`q` close · `f1` help (this dialog) |
+| Other log files (f) | `j` move down · `k` move up · `↵` follow this file in the log view (o / e go back to stdout / stderr) · `r` look again (one more probe) · `esc`/`q` close · `f1` help (this dialog) |
 | Prompt | `↵` use this value · `esc` cancel · `f1` help (this dialog) |
 | Dialogs | `esc`/`q` close · `f1` help (this dialog) |
+| Account usage ($) | `esc`/`q` back · `[` previous window (7d · 30d · 90d · period; unavailable ones skipped; remembered) · `]` next window · `z` where it went: group by experiment → task → name → account → partition → GPU model · `o` where it went: sort by GPU-h → SU → CPU-h → jobs → name · `O` reverse the sort · `u` account columns: my usage ↔ the whole account · `↵` Jobs view filtered to this row (account or group, state preset all) · `r` read the focused cluster again (>= 60 s apart) · `^r` read every cluster again · `j`/`↓` next row of the focused box (accounts, then where it went; on to the next box) · `k`/`↑` previous row · `g`/`home` first row of the box · `G`/`end` last row of the box · `tab` next cluster box (a collapsed one opens) · `S-tab` previous cluster box |
 | Settings | `tab`/`→` next section (Hosts → General → About) · `S-tab`/`←` previous section · `↓`/`j` move down · `↑`/`k` move up · `space`/`↵` toggle host (save + poll / remove) · change value · open · `t` test the host now (read-only probe) · `a` add an ssh target that is not in ~/.ssh/config · `p` poll a saved host this run left out (its saved settings, file unchanged) · `J`/`S-↓` move host down (card order, number keys) · `K`/`S-↑` move host up · `/` filter hosts · `e` open config.toml in $EDITOR · `?`/`f1` these keys · `esc`/`q`/`,` close |
 <!-- keymap:end -->
 

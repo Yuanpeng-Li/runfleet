@@ -345,6 +345,23 @@ def test_slurm_capability_outputs_match_fixtures() -> None:
     assert render.sacctmgr_assoc(c).stdout == "k2|campus01||gpu-priority,normal,labpi\n"
 
 
+
+def test_charging_rule_outputs_match_fixtures() -> None:
+    """Account (§5.2.11): `sacctmgr show qos` byte-exact; partition lines carry AllowQos, QoS and
+    TRESBillingWeights in scontrol's order (TRESBillingWeights after TRES, only where set)."""
+    for host in ("k2", "vega", "lyra"):
+        c = k2_cluster()
+        c.qos = tuple((n, float(f)) for n, f in (ln.split("|") for ln in sample(host, "sacctmgr_qos").splitlines()))
+        assert render.sacctmgr_qos(c).stdout == sample(host, "sacctmgr_qos")
+    c = k2_cluster()
+    c.nodes = [SimNode("x1", ("gpu", "free-gpu"), 32, 1000, (GresDef("A30", 4),))]
+    c.partition_fields = {"gpu": {"AllowQos": "normal,high", "QoS": "gpu-part", "TRESBillingWeights": "cpu=1"}}
+    lines = render.scontrol_partitions(c).stdout.splitlines()
+    assert lines[2].startswith("PartitionName=gpu AllowGroups=ALL AllowAccounts=ALL AllowQos=normal,high QoS=gpu-part ")
+    assert lines[2].endswith(",gres/gpu=4 TRESBillingWeights=cpu=1")
+    assert " AllowQos=ALL QoS=N/A " in lines[3] and "TRESBillingWeights" not in lines[3]
+
+
 def test_formatting_helpers() -> None:
     assert render.squeue_time(0) == "0:00" and render.squeue_time(4 * 3600 + 420) == "4:07:00"
     assert render.squeue_time(3 * 86400) == "3-00:00:00" and render.squeue_time(None) == "UNLIMITED"

@@ -8,10 +8,12 @@ import pytest
 
 from runfleet.ui import keymap
 from runfleet.ui.app import RunFleetApp
+from runfleet.ui.screens.account import AccountScreen
 from runfleet.ui.screens.action_menu import ActionLogScreen, ActionMenuScreen
 from runfleet.ui.screens.attention import AttentionScreen
 from runfleet.ui.screens.confirm import AttachConfirmScreen, ConfirmScreen
 from runfleet.ui.screens.forwards import ForwardsScreen, PortPromptScreen
+from runfleet.ui.screens.found_logs import FoundLogsScreen
 from runfleet.ui.screens.gpu_watch import WatchesScreen, WatchPromptScreen
 from runfleet.ui.screens.help import HelpScreen
 from runfleet.ui.screens.host_detail import HostDetailScreen
@@ -38,6 +40,7 @@ OWNERS: dict[str, tuple[type, ...]] = {
     "notifications": (NotificationsScreen,), "digest": (DigestScreen,), "attention": (AttentionScreen,),
     "forwards": (ForwardsScreen,), "prompt": (PortPromptScreen, SaveViewScreen, WatchPromptScreen),
     "watches": (WatchesScreen,), "search_prompt": (SearchPromptScreen,), "log_hits": (LogSearchScreen,),
+    "found_logs": (FoundLogsScreen,), "account": (AccountScreen,),
 }
 
 
@@ -132,7 +135,8 @@ def test_widgets_take_bindings_from_keymap() -> None:
                      (LogScreen, "log"), (JobDetailScreen, "job_detail"), (HelpScreen, "help"),
                      (ConfirmScreen, "confirm"), (AttachConfirmScreen, "attach_confirm"), (ActionMenuScreen, "action_menu"), (HostErrorScreen, "host_error"),
                      (SettingsScreen, "settings"), (NotificationsScreen, "notifications"), (DigestScreen, "digest"),
-                     (AttentionScreen, "attention"), (WatchesScreen, "watches"), (WatchPromptScreen, "prompt")):
+                     (AttentionScreen, "attention"), (WatchesScreen, "watches"), (WatchPromptScreen, "prompt"),
+                     (AccountScreen, "account")):
         assert cls.BINDINGS == keymap.bindings(ctx), cls
     assert inspect.getsource(RunFleetApp).count('keymap.bindings("global")') == 1
 
