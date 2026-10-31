@@ -167,6 +167,25 @@ still matter. The text header shows the full window with dates (`2026-10-18T12:0
 `# +N more → …` command re-runs `events` with a larger `--limit`; more than fit the byte budget: it narrows to one
 host, or the advice asks for a shorter `--since`.
 
+## Account usage and cost (`usage`, `cost`, `job.cost`)
+- **SU** = billing × hours × the UsageFactor of the job's QOS — what sshare / sbank charge. A QOS with factor 0 (free
+  partitions, `qos low ×0`) charges nothing. **billing-h** (sreport, rollups) are before that factor: never call them
+  SU. CPU-h / GPU-h are plain allocation × time.
+- `limit_su: null` means no limit is known, never "unlimited". `used_basis`: `since_reset` = used since the last
+  reset or reallocation; `decayed` ("recent (decays, half-life 14d)") is a fair-share number, not a total — say so.
+  `used_su` is the whole account's; `my_used_su` your own part of it (text: `recent me 5,859 · account 2,503,304`).
+  `realloc_known: true` with `next_realloc: null` = sbank says none is set (not "unknown").
+- Ages: `summary_at` / `summary_age_s` (balances, read every 30 min), `sbank_at`, `report_at` (the window's report,
+  fetched on demand). Quote the age with the numbers; a section that fails keeps its last values and lists itself
+  in `errors[]` (`sreport failing (remote, 12m ago)`).
+- State `usage_window_not_cached`: that window or rollup was never fetched; run the `next` command once (one report
+  probe per host, reused for 10 min). `period` = since the last reallocation (inferred: next reallocation minus
+  `allocation_period`, `period_inferred: true`) or usage reset; a cluster without either answers 30d and says so.
+- `cost` is a calculation from cached charging rules (`caps_age_s`; "charging rules as of 2d ago" when old): it never
+  submits. `notes` list every assumption; `alternatives` are free partitions with the requested GPU type — evidence
+  for the user, not a choice made for them. `job.cost.billing_basis`: `tres` is Slurm's own, `weights` / `cpus` an
+  estimate; `usage_factor: null` = unknown QOS, counted ×1 (`×1?`).
+
 ## Pending, GPUs, other users
 - Pending reasons come with RunFleet's plain-language advice; quote it. There is no queue position.
 - `start_is_estimate: true` = the scheduler's estimate, not a promise.

@@ -11,7 +11,7 @@ import dataclasses
 import importlib
 import inspect
 import pkgutil
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import get_args, get_type_hints
@@ -32,6 +32,7 @@ PKG_DIR = Path(runfleet.__file__).resolve().parent
 EXPECTED_MODULES = """
 __main__ cli export models errors config configedit sshconfig paths debugdump wait update status
 util util.shell util.slurmfmt util.humanize util.logscan util.efficiency util.platform util.redact util.gpufree
+util.cost util.usage
 probe probe.section probe.framing
 transport transport.base transport.openssh transport.mux transport.spawn transport.classify transport.local
 transport.fake transport.agent transport.session
@@ -40,7 +41,7 @@ backends.common backends.common.nvidia backends.common.procfs backends.common.gp
 backends.slurm backends.slurm.collector backends.slurm.commands backends.slurm.states backends.slurm.parse_squeue
 backends.slurm.parse_sacct backends.slurm.parse_scontrol backends.slurm.parse_sinfo backends.slurm.parse_sstat
 backends.slurm.logpaths backends.slurm.actions backends.slurm.attach backends.slurm.parse_attach
-backends.slurm.parse_occupants backends.slurm.priority
+backends.slurm.parse_occupants backends.slurm.priority backends.slurm.account
 backends.process backends.process.collector backends.process.parse_ps backends.process.tasks
 backends.process.actions
 core core.service core.store core.clock core.poller core.actions core.logs core.cache core.doctor
@@ -49,7 +50,7 @@ ui ui.app ui.messages ui.keymap ui.render ui.theme ui.commands ui.query ui.every
 ui.screens ui.screens.main ui.screens.job_detail ui.screens.host_detail ui.screens.log_viewer ui.screens.help
 ui.screens.confirm ui.screens.action_menu ui.screens.host_error ui.screens.settings ui.screens.forwards
 ui.notify ui.screens.notifications ui.screens.attention ui.termbg ui.saved_views ui.screens.save_view
-ui.gpu_watch ui.screens.gpu_watch ui.screens.log_search ui.screens.found_logs
+ui.gpu_watch ui.screens.gpu_watch ui.screens.log_search ui.screens.found_logs ui.screens.account
 ui.widgets ui.widgets.header ui.widgets.hintbar ui.widgets.tabs ui.widgets.fleet_view ui.widgets.host_card
 ui.widgets.jobs_view ui.widgets.job_table ui.widgets.job_preview ui.widgets.gpus_view ui.widgets.gpu_panel
 ui.widgets.proc_table ui.widgets.node_table ui.widgets.log_view ui.widgets.filter_bar ui.widgets.attach_panel
@@ -327,8 +328,11 @@ def test_boundary_checker_detects_violations(tmp_path: Path) -> None:
 def _instances() -> list[object]:
     m, s, t, b, c, st, sv = models, section, tbase, bbase, config, store, service
     err = m.HostError(m.ErrorKind.TIMEOUT, "timed out")
+    charge = m.PartitionCharge(partition="gpu", billing_weights="cpu=1,gres/gpu=32", qos="gpu-part",
+                               allow_qos=("normal", "high"))
     caps = m.Capabilities(remote_user="usr", uid=1000, login_host="login1", tz_offset=timedelta(hours=-5),
-                          clock_skew=timedelta(0), tools=frozenset({"squeue", "sinfo"}))
+                          clock_skew=timedelta(0), tools=frozenset({"squeue", "sinfo"}),
+                          qos_usage_factor={"normal": 1.0, "low": 0.0}, partition_charges=(charge,))
     metrics = m.HostMetrics(ncpu=8, load=(0.1, 0.2, 0.3), cpu_pct=None, mem_total=1 << 30, mem_available=1 << 29,
                             swap_total=None, swap_free=None, uptime_s=12.0, sampled_at=T0)
     status = m.HostStatus(name="k2", state=m.ConnState.OK)
@@ -376,6 +380,18 @@ def _instances() -> list[object]:
                             ssh_summary={}, latency_s=0.2)
     check = m.DoctorCheck(name="probe", ok=True, detail="ok")
     doctor = m.DoctorReport(host="k2", checks=(check,))
+    cell = m.UsageCell(name="mytask--train--s0--a01", account="lab", partition="gpu", qos="normal",
+                       gpu_model="rtx6000", jobs=2, running=1, cpu_h=16.0, gpu_h=2.0, billing_h=144.0, charged_su=144.0)
+    balance = m.AccountBalance(account="lab", limit_su=97885.0, used_su=298.1, used_basis="since_reset",
+                               limit_source="sshare", used_source="sshare", other_limits={"gres/gpu": 2000.0},
+                               next_realloc=date(2027, 1, 14), realloc_known=True, read_at=T0)
+    use = m.AccountUse(account="lab", scope="me", cpu_h=298.1, gpu_h=0.0, billing_h=298.1, start=T0)
+    summary = m.AccountSummary(window="30d", read_at=T0, mode="limits", balances=(balance,), usage=(use,),
+                               usage_at=T0, sbank_at=T0, half_life_s=0.0, notes=("sreport not installed",),
+                               errors=(err,))
+    report = m.AccountReport(host="lyra", window="period", fetched_at=T0, summary=summary, window_start=T0,
+                             account_totals=(dataclasses.replace(use, scope="account"),), cells=(cell,), jobs_seen=2,
+                             truncated=True, errors=(err,))
     sstatus = m.SectionStatus(name="slurm.squeue", outcome="ok", ok=True, rc=0, ms=30, last_ok=T0, error=err)
 
     sec = s.Section(name="slurm.squeue", cmd="squeue --me")
@@ -417,7 +433,7 @@ def _instances() -> list[object]:
             part, step, detail, snap, result, detect, check, doctor, sstatus, sec, sres, script, spec, run, pres,
             c.SlurmSettings(), c.WorkstationSettings(), hcfg, general, c.UISettings(), fleet, cad, ctx, mview,
             cout, param, aspec, plan, hstate, change, lupd, lpeek, c.NotifySettings(), cg, ninsp, live, offer, astate,
-            aplan, *(node.jobs or ()), factor, share, pprio, pending]
+            aplan, *(node.jobs or ()), factor, share, pprio, pending, charge, cell, balance, use, summary, report]
 
 
 def test_every_contract_dataclass_constructs() -> None:

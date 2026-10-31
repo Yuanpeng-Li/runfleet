@@ -192,7 +192,8 @@ def _cli_verb_dests(verb: str) -> set[str]:
 def test_tools_list_one_read_only_tool_per_verb() -> None:
     tools = result(server().handle(req("tools/list")))["tools"]
     assert [t["name"] for t in tools] == ["fleet_brief", "list_jobs", "job_detail", "read_log", "gpu_availability",
-                                          "host_health", "fleet_events", "runfleet_help"]
+                                          "host_health", "fleet_events", "account_usage", "estimate_cost",
+                                          "runfleet_help"]
     assert sorted(t.verb for t in mcp.TOOLS) == sorted(commands.VERBS)
     for t in tools:
         schema = t["inputSchema"]
@@ -210,7 +211,7 @@ def test_tool_arguments_mirror_the_cli_flags(tool: mcp.Tool) -> None:
     dests = _cli_verb_dests(tool.verb)
     assert set(tool.properties) <= dests
     # --limit only where it limits rows; help takes no fleet flags
-    ignored = {"limit"} if tool.verb not in ("jobs", "events") else set()
+    ignored = {"limit"} if tool.verb not in ("jobs", "events", "usage") else set()
     if tool.verb == "help":
         ignored |= {"refresh", "timeout", "limit"}
     assert dests - ignored <= set(tool.properties)

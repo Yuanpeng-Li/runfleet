@@ -41,6 +41,7 @@ refresh_multiplier = 1.0
 pager = ""                     # default: $PAGER, else "less -R +G"
 remember_hosts = true          # `runfleet k2` saves k2 here once it answers
 update_check = true            # once a day, ask GitHub for the newest RunFleet version
+usage_window = "30d"           # account usage window: 7d | 30d | 90d | period
 
 [ui]
 gpu_util_thresholds = [10, 75]
@@ -57,6 +58,9 @@ sacct_window = "3d"
 log_templates = []
 attach = "ssh+srun"            # live GPU/process readings: ssh | ssh+srun | srun | off (see "Live readings")
 attach_refresh = "15s"         # floor 10s; ssh mode only
+account_usage = true           # your accounts' SU balances and usage (see "Account usage")
+poll_account = "30m"           # floor 15m; ×2 when the host is not on screen
+allocation_period = "365d"     # "period" window = next reallocation − this; "0" = unknown
 
 [defaults.workstation]         # every workstation
 poll_gpu = "5s"                # floor 2s
@@ -108,6 +112,7 @@ name = "lynx"
 | `refresh_multiplier` | float | `1.0` | scales every interval (`+`/`-` change it at runtime, 0.5–4); Settings › refresh speed writes `2.0` (slow), `1.0` (normal) or `0.5` (fast) and applies it at once — per-command floors still apply |
 | `pager` | string | `""` | pager for local log copies; empty = `$PAGER`, else `less -R +G` (Windows: `less` when installed, else `more`) |
 | `remember_hosts` | bool | `true` | hosts named on the command line (`runfleet k2 vega`) that are not configured yet are saved (a minimal `[[host]]` table) as soon as they answer or need a login; one notice "saved k2, vega — manage in Settings (,)". That run still shows only the named hosts. |
+| `usage_window` | `7d` \| `30d` \| `90d` \| `period` | `30d` | the account usage window: the periodic summary (`period` reads `30d` there) and the default of the account views; `period` is the allocation period where the cluster tells it (see *Account usage* below) |
 | `update_check` | bool | `true` | at start, at most once a day, fetch the version number of RunFleet's main branch from raw.githubusercontent.com (a plain GET; nothing about you or your hosts is sent) and say once per new version that it is out. Settings › About shows the answer and updates. `false`: no request at start; `runfleet update` and the About row still ask when you use them. `--demo` never asks. |
 
 Settings › General changes `default_view` (used at the next start), `refresh_multiplier`, `readonly`, `mouse`,
@@ -119,7 +124,7 @@ Settings › General changes `default_view` (used at the next start), `refresh_m
 |---|---|---|---|
 | `gpu_util_thresholds` | `[low, high]` | `[10, 75]` | GPU bar colours: below low green, below high yellow, else red |
 | `gpu_mem_thresholds` | `[low, high]` | `[10, 80]` | the same for GPU memory |
-| `jobs_columns` | list | see example | Jobs table columns, in order: `host id name state elapsed left gpus gpu_util node_reason part gmem cpu mem user submit` (narrow terminals drop low-priority ones first) |
+| `jobs_columns` | list | see example | Jobs table columns, in order: `host id name state elapsed left gpus gpu_util node_reason part gmem cpu mem user submit su gpuh` (`su` / `gpuh`: a Slurm job's charged SU and GPU-hours) (narrow terminals drop low-priority ones first) |
 
 ## `[notify]`
 
@@ -189,6 +194,21 @@ Slurm keys may be written flat in a `[[host]]` table and override `[defaults.slu
 | `protected_partitions`, `protected_qos` | list | `[]` | no action is ever offered on jobs in these partitions / QOS |
 | `attach` | `ssh` \| `ssh+srun` \| `srun` \| `off` | `ssh+srun` | live per-GPU / per-process readings of a running job while its GPU or Procs tab is open (see *Live readings* below) |
 | `attach_refresh` | duration | `15s` | how often those readings refresh in `ssh` mode (floor 10 s); `srun` reads only when you press `r` |
+| `account_usage` | bool | `true` | read your accounts' SU balances and your usage (see *Account usage* below); `false`: none of it for this host (job cost from the charging rules stays) |
+| `poll_account` | duration | `30m` | how often that summary is read (floor 15 min; ×2 when the host is not on screen, up to 2 h after failures); it rides a regular refresh, never an extra connection |
+| `allocation_period` | duration or `"0"` | `365d` | the `period` window starts at the next reallocation date (sbank) minus this; `"0"` = unknown, no such window |
+
+### Account usage
+
+On a Slurm cluster with slurmdbd accounting, RunFleet reads, for each of your accounts on that cluster, its SU limit
+and what it has used (one `sshare`, which also gives what is left), and your own CPU-, GPU- and billing-hours over
+`usage_window` (one `sreport`), every `poll_account` with a regular refresh. Where the site's `sbank` wrapper exists
+it is asked, at most every 6 hours, for each account's next reallocation date. Nothing about other members of your
+accounts is read. On clusters without SU limits (every QOS charged ×1, no billing weights) this is "usage only":
+usage that decays over time is shown as recent usage, never as an amount used. A failing read keeps the last values
+with their age. `account_usage = false` turns all of it off for that host. `runfleet agent usage` answers
+`usage_window` from this summary without `--window`; `runfleet agent cost` needs none of it (only the charging rules
+detection reads).
 
 ### Live readings (`attach`)
 

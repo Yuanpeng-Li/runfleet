@@ -158,6 +158,10 @@ JobDetailScreen.-compact #summary-top { display: none; }
 #banner { color: $warning; }
 #myjobs-box, #caps-box { text-wrap: wrap; }
 
+/* ---- account usage (§7.17): the boxes are drawn by the screen, one Static ------------- */
+#acct-body { height: 1fr; }
+#acct-boxes { height: auto; text-wrap: nowrap; }
+
 /* ---- shared: never wrap box content (lines are pre-fitted; overflow ends in …), subtle scrollbars ---- */
 .box { text-wrap: nowrap; text-overflow: ellipsis; }
 DataTable, RichLog, VerticalScroll {

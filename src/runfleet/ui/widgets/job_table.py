@@ -24,7 +24,8 @@ from textual.widgets.data_table import RowKey
 
 from runfleet.models import Job, JobKind, JobState, StateGroup
 from runfleet.ui import query, render, theme
-from runfleet.ui.query import SortColumn, elapsed_s, ended_at, left_s
+from runfleet.ui.query import CostFn, SortColumn, elapsed_s, ended_at, gpuh_value, left_s, su_value
+from runfleet.util import cost as costs
 from runfleet.util import humanize
 
 
@@ -54,7 +55,10 @@ COLUMNS: dict[str, Column] = {c.key: c for c in (
     Column("mem", "MEM", 6, 5),
     Column("user", "USER", 9, 0, "user"),
     Column("submit", "SUBMIT", 11, 5, "submit"),
+    Column("su", "SU", 8, 4, "su"),                    # Account (§5.2.11): off by default, via ui.jobs_columns
+    Column("gpuh", "GPU-h", 7, 4, "gpuh"),
 )}
+RIGHT_ALIGNED = frozenset({"su", "gpuh"})
 
 NAME_CAP = 40
 NAME_FIRST = 28                  # slack tiers: NAME up to 28, then NODE / REASON up to 26, then NAME up to NAME_CAP,
@@ -130,6 +134,8 @@ class RowContext:
     widths: Mapping[str, int] = field(default_factory=dict)
     name_starts: Mapping[str, int] = field(default_factory=dict)    # humanize.distinct_starts of the visible names
     watched: frozenset[str] = frozenset()     # `w` (§7.14): "◉" before the name
+    cost: CostFn | None = None                # SU / GPU-h columns (Account, §5.2.11); None = unknown everywhere
+    usage_only_hosts: frozenset[str] = frozenset()   # their `su` value is billing-h, not SU: shown `576h`, muted
 
 
 def gpus_text(job: Job) -> Text:
@@ -231,6 +237,24 @@ def left_text(job: Job, now: datetime) -> Text:
     return Text(humanize.left(remaining), style=style)
 
 
+def cost_cell(job: Job, key: str, ctx: RowContext) -> Text:
+    """SU / GPU-h (§7.5): ACTIVE rows tick with ``ctx.now``; a pending job's SU is its projection, dim (`≈576`); a free
+    job a dim `0`; unknown `—`. On a usage-only cluster the value is billing-h, unscaled by the QOS factor (the cost
+    fn swaps it in, JobCost.as_billing_h), never SU: it carries an `h` and is muted (`576h`, `≈576h`), so it is not
+    read as charged SU next to a limits cluster's."""
+    c = ctx.cost(job, ctx.now) if ctx.cost is not None else None
+    value = su_value(job, c) if key == "su" else gpuh_value(job, c)
+    if value is None:
+        return Text(humanize.NONE, style=theme.dim())
+    if key == "su":
+        bill_h = job.key.host in ctx.usage_only_hosts
+        text = costs.fmt_su(value) + ("h" if bill_h else "")
+        if job.state.group is StateGroup.QUEUED:
+            return Text("≈" + text, style=theme.dim())
+        return Text(text, style=theme.dim() if value == 0 else theme.muted() if bill_h else "")
+    return Text(costs.fmt_hours(value), style=theme.dim() if value == 0 else "")
+
+
 def runway_level(remaining: float, limit: float | None) -> str | None:
     """Time left before the limit: ``red`` below 2 % of it or 5 min, ``amber`` below 10 % or 30 min. The absolute
     floors are capped at 10 % / 25 % of the limit, so a 30-minute job is not amber for its whole run."""
@@ -301,10 +325,14 @@ def job_cells(job: Job, cols: Sequence[tuple[str, int]], ctx: RowContext, *, cur
         elif key == "submit":
             sub = job.submit_time or job.start_time
             cell = Text(humanize.ago(sub, ctx.now, dash=humanize.NONE), style=theme.muted())
+        elif key in RIGHT_ALIGNED:
+            cell = cost_cell(job, key, ctx)
         else:   # pragma: no cover - layout only yields known keys
             cell = Text("")
         if key != "marker" and cell.cell_len > w:
             cell.truncate(w, overflow="ellipsis")
+        elif key in RIGHT_ALIGNED and cell.cell_len < w:
+            cell = Text(" " * (w - cell.cell_len)) + cell
         if stale and key not in ("marker",):
             cell.stylize(theme.dim())
         out.append(cell)
@@ -477,6 +505,13 @@ class JobTable(ClickTable):
         return True
 
     def _header_label(self, key: str, width: int) -> Text:
+        label = self._header_text(key, width)
+        room = max(1, width - GAP)
+        if key in RIGHT_ALIGNED and label.cell_len < room:      # over its right-aligned numbers
+            return Text(" " * (room - label.cell_len)) + label
+        return label
+
+    def _header_text(self, key: str, width: int) -> Text:
         col = COLUMNS[key]
         room = max(1, width - GAP)
         sorted_here = (col.sort is not None and col.sort == self.sort_column) or (key == "host" and

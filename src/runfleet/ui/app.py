@@ -39,6 +39,7 @@ from runfleet.ui import keymap, saved_views, theme
 from runfleet.ui.commands import RunFleetCommands
 from runfleet.ui.messages import ClockTick, FleetChanged, ScopeChanged
 from runfleet.ui.notify import Alerts
+from runfleet.ui.query import Preset
 from runfleet.ui.saved_views import SavedView
 from runfleet.ui.screens import FleetScreen
 from runfleet.util import platform as rfplatform
@@ -415,10 +416,11 @@ class RunFleetApp(App[None]):
         if host is not None and host not in self.store.hosts:
             return
         self.scope = host
+        from runfleet.ui.screens.account import AccountScreen
         from runfleet.ui.screens.main import MainScreen
 
         for screen in self.screen_stack:
-            if isinstance(screen, MainScreen):
+            if isinstance(screen, (MainScreen, AccountScreen)):
                 screen.post_message(ScopeChanged(host))
         self.update_visibility()
 
@@ -993,6 +995,8 @@ class RunFleetApp(App[None]):
             out["app.action_menu"] = None
         if "job_live" in contexts:             # GPU / Procs tab: its r / a / S hints need the room more than `f`
             out["find_logs"] = None
+        if "account" in contexts:              # `esc/q back` says it (§7.17 mockup O)
+            out["app.back_or_quit"] = None
         return out
 
     def action_action_menu(self) -> None:
@@ -1092,6 +1096,29 @@ class RunFleetApp(App[None]):
             main.jobs.set_sort(value)
         elif kind == "group":
             main.jobs.set_group(value)
+
+    # ------------------------------------------------------------------ account usage (§7.17)
+    def action_account(self, host: str | None = None) -> None:
+        """`$` / palette › Account usage, Account: <host>: the Account screen; from a cluster's host detail that
+        cluster first and focused. On the Account screen `$` does nothing (the palette's host entry focuses it)."""
+        from runfleet.ui.screens.account import AccountScreen
+        from runfleet.ui.screens.host_detail import HostDetailScreen
+
+        base = self.base_screen()
+        if isinstance(base, AccountScreen):
+            if host is not None and host in base.hosts:
+                base.focus_idx = base.hosts.index(host)
+                base.refresh_data(None)
+            return
+        if host is None and isinstance(base, HostDetailScreen) and base.cluster:
+            host = base.host
+        self.push_screen(AccountScreen(first=host))
+
+    def show_jobs_filtered(self, text: str, *, preset: Preset | None = None) -> None:
+        """The Jobs view with this filter (and state preset): the Account screen's `enter` (§7.17)."""
+        main = self.go_main("jobs")
+        if main is not None:
+            main.jobs.set_filter(text, preset=preset)
 
     # ------------------------------------------------------------------ log search (§4.7.1)
     def action_search_logs(self) -> None:

@@ -11,6 +11,8 @@ The stubs follow the §3.6 contract with tiny line formats:
   mode; ssh stderr "Host key verification failed" -> one HOSTKEY error, no patch. GPUs with util < 5 and mem > 1024
   extend `idle_streak` (by uuid "GPU-<index>") from `previous` like the backend. `slurm.attach.audit` stdout "clean"
   -> JobLive.clean True, anything else -> False (detail = the text).
+- Account (§5.2.11), StubSlurm only: one section `slurm.acct_share` (meta: window) unless `account_usage` is off;
+  its stdout "<account> <used SU>" becomes the report's one balance, a failing answer a REMOTE error.
 """
 
 from __future__ import annotations
@@ -26,8 +28,9 @@ from runfleet.config import HostConfig
 from runfleet.core.clock import ManualClock
 from runfleet.core.poller import BackendHooks
 from runfleet.errors import ActionError, AttachBlocked, RunFleetError
-from runfleet.models import (DETECT_REV, GPU, ActionResult, AttachMode, Capabilities, ErrorKind, HostError, HostMetrics,
-                             Job, JobDetail, JobKey, JobKind, JobLive, JobState, LogRef, NodeInspect)
+from runfleet.models import (DETECT_REV, GPU, AccountBalance, AccountReport, AccountSummary, ActionResult, AttachMode,
+                             Capabilities, ErrorKind, HostError, HostMetrics, Job, JobDetail, JobKey, JobKind, JobLive,
+                             JobState, LogRef, NodeInspect, UsageWindow)
 from runfleet.probe import framing
 from runfleet.probe.section import Section, SectionOutcome, SectionResult
 
@@ -135,6 +138,34 @@ class StubSlurm(SchedulerCollector):
 
     def shell_command(self, job: Job | None, ctx: HostContext, node: str | None = None) -> str | None:
         return None if job is None else f"cd /w/{job.key.id} && exec $SHELL -l"
+
+    # ---- Account (tiny format, see the module docstring)
+    restored: list[AccountSummary | None] = []      # restore_account calls, every instance (tests reset it)
+
+    def restore_account(self, summary: AccountSummary | None) -> None:
+        StubSlurm.restored.append(summary)
+
+    def account_sections(self, window: UsageWindow, ctx: HostContext) -> list[Section]:
+        if not ctx.host.slurm.account_usage:
+            return []
+        return [Section("slurm.acct_share", "sshare -A lab", meta={"window": window})]
+
+    def ingest_account(self, window: UsageWindow, results: Mapping[str, SectionResult],
+                       ctx: HostContext) -> AccountReport | None:
+        r = results.get("slurm.acct_share")
+        if r is None:
+            return None
+        balances: tuple[AccountBalance, ...] = ()
+        errors: tuple[HostError, ...] = ()
+        if _ok(r) and r.stdout.strip():
+            account, used = r.stdout.split()
+            balances = (AccountBalance(account, used_su=float(used), read_at=ctx.now),)
+        elif not _ok(r):
+            errors = (HostError(ErrorKind.REMOTE, "slurmdbd unreachable", r.stderr, r.name, ctx.now),)
+        answered: UsageWindow = "30d" if window == "period" else window
+        summary = AccountSummary(window=answered, read_at=ctx.now, mode="usage_only", balances=balances,
+                                 errors=errors)
+        return AccountReport(host=ctx.host.name, window=answered, fetched_at=ctx.now, summary=summary, errors=errors)
 
     # ---- Attach (tiny formats, see the module docstring)
     def attach_modes(self, job: Job, ctx: HostContext) -> tuple[AttachMode, ...]:

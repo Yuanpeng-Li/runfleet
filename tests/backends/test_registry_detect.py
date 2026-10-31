@@ -15,6 +15,7 @@ from runfleet.backends.detect import build_capabilities, choose_profile, detect_
 from runfleet.backends.process.collector import ProcessCollector
 from runfleet.backends.slurm.collector import SlurmCollector
 from runfleet.errors import RunFleetError
+from runfleet.models import DETECT_REV
 from runfleet.probe.section import SectionResult
 from tests.backends.factories import NOW, caps, fixture_result, host_config, result
 from tests.conftest import sample
@@ -71,11 +72,12 @@ def test_detect_sections() -> None:
     names = [s.name for s in secs]
     assert names[:2] == ["detect.id", "detect.tools"]
     assert set(names) == {"detect.id", "detect.tools", "slurm.version", "slurm.config", "slurm.assoc",
-                          "slurm.parts", "slurm.sacctfmt", "slurm.gputres", "nvidia.version"}
+                          "slurm.parts", "slurm.qos", "slurm.sacctfmt", "slurm.gputres", "nvidia.version"}
     by = {s.name: s for s in secs}
     assert by["slurm.version"].requires == ("sinfo",) and by["nvidia.version"].requires == ("nvidia-smi",)
     assert "date +%z" in by["detect.id"].cmd and "command -v" in by["detect.tools"].cmd
     assert "-E now" in by["slurm.gputres"].cmd
+    assert " sshare sreport sbank;" in by["detect.tools"].cmd and by["slurm.qos"].requires == ("sacctmgr",)
 
 
 class _BadCaps(Collector):
@@ -123,6 +125,41 @@ def test_k2_capabilities_and_profile() -> None:
     assert c.slurm_version == "25.05.8" and c.cluster_name == "k2" and c.gpu_tres is True
     assert c.slurm_config["PreemptMode"] == "REQUEUE" and c.acct_gather_freq_s == 30
     assert c.driver_version is None
+    assert c.qos_usage_factor == {} and c.partition_charges == ()       # no slurm.qos / slurm.parts here
+    assert c.detect_rev == DETECT_REV == 3
+
+
+def test_charging_rules_reach_capabilities() -> None:
+    """Account (§5.2.11): slurm.qos and the partition lines become Capabilities fields that pass _check_types."""
+    results = {
+        "detect.id": id_result("alice07", "-0700"),
+        "detect.tools": result("detect.tools", "squeue\nsinfo\nsacctmgr\nscontrol\nsreport\nsbank"),
+        "slurm.config": fixture_result("slurm.config", "lyra", "slurm_config"),
+        "slurm.assoc": fixture_result("slurm.assoc", "lyra", "sacctmgr_assoc"),
+        "slurm.parts": fixture_result("slurm.parts", "lyra", "scontrol_partitions_charges"),
+        "slurm.qos": fixture_result("slurm.qos", "lyra", "sacctmgr_qos"),
+    }
+    c = build_capabilities(results, host_config("lyra"), NOW, registry.collectors())
+    assert {"sreport", "sbank"} <= c.tools
+    assert c.qos_usage_factor["low"] == 0.0 and c.qos_usage_factor["high"] == 2.0
+    assert [p.partition for p in c.partition_charges if p.billing_weights] == ["gpu", "gpu-highmem", "gpuxl"]
+
+
+class _WrongCharges(ProcessCollector):
+    name = "wrong"
+
+    @classmethod
+    def capability_sections(cls, host: Any) -> list[Any]:
+        return []
+
+    @classmethod
+    def ingest_capabilities(cls, results: Any) -> Any:
+        return {"partition_charges": ["gpu"]}            # a list, not a tuple
+
+
+def test_check_types_rejects_wrong_charging_rules() -> None:
+    with pytest.raises(RunFleetError, match="partition_charges"):
+        build_capabilities({"detect.id": id_result("x")}, host_config("k2"), NOW, {"wrong": _WrongCharges})
 
 
 def test_workstation_capabilities() -> None:

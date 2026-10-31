@@ -1,8 +1,9 @@
 # RunFleet — Technical Design (v0.1)
 
-Status: **revision 3**, 2026-10 — revision 3 adds the v0.2 **Attach** contract (D7 rewritten, §7.16, models /
-Collector / FleetAPI / config changes marked "Attach"). Revision 2, 2026-10 — revision 1 plus an adversarial
-critique (every finding resolved or answered in Appendix D) and the v0.1 scope cut.
+Status: **revision 4**, 2026-10 — revision 4 adds **account usage and job cost** (§5.2.11, §7.17; additive models /
+Collector / FleetAPI / config / cache changes marked "Account"). Revision 3, 2026-10 — adds the v0.2 **Attach**
+contract (D7 rewritten, §7.16, models / Collector / FleetAPI / config changes marked "Attach"). Revision 2, 2026-10 —
+revision 1 plus an adversarial critique (every finding resolved or answered in Appendix D) and the v0.1 scope cut.
 
 **Evidence.** The design rests on read-only **field probes**: the exact Slurm, `nvidia-smi`, `ps` and procfs commands
 RunFleet runs, captured on three production Slurm clusters (Slurm 25.05, 25.11 and 26.05) and two GPU workstations,
@@ -291,6 +292,10 @@ src/runfleet/
     redact.py            secrets scrubbed (support bundle, `runfleet agent`), ANSI stripped, control characters made
                          visible in untrusted remote strings (pure)  [WP4]
     gpufree.py           which GPUs count as free: the GPU views' in-use rule, the workstation pick (pure)  [WP4]
+    cost.py              job cost (CPU-h, GPU-h, billing, SU), billing rates, the pre-submit estimate, free/charged
+                         partitions, SU/hour formatting (pure, shared by the UI and the agent, §5.2.11)  [WP2]
+    usage.py             usage rollup: grouping keys (experiment, task, name, …) and group() over UsageCells (pure,
+                         §5.2.11)  [WP2]
   probe/
     section.py           FROZEN Section, SectionResult, SectionOutcome, ProbeScript, StreamSpec  [WP1]
     framing.py           render ProbeScript → POSIX sh; parse framed stdout → SectionResults  [WP1]
@@ -321,6 +326,8 @@ src/runfleet/
       parse_squeue.py parse_sacct.py parse_scontrol.py parse_sinfo.py parse_sstat.py     [WP2]
       parse_occupants.py every user's running jobs per node + getent names (§5.2.9)    [WP2]
       priority.py        pending priority evidence: priority settings, sprio / sshare parsers, hints (§5.2.10)  [WP2]
+      account.py         account usage: sshare / sreport / sbank / sacct-rollup parsers, balances, usage cells, period
+                         windows (§5.2.11)  [WP2]
       logpaths.py        %x/%j/%A/%a… expansion, WorkDir resolution, merged-stderr rules [WP2]
       actions.py         cancel / hold / release / requeue specs, plans, interpretation [WP2]
       attach.py          Attach plan/ingest, nested node script, section names + thresholds (§7.16)  [WP2]
@@ -364,7 +371,8 @@ src/runfleet/
               save_view.py (palette › Save view as…: the name prompt, §7.6)
               gpu_watch.py (palette › Watch free GPUs… prompt and the Watches list, §7.14)
               log_search.py (palette › Search logs… / ^f in Jobs: the prompt and the results, §4.7.1)
-              found_logs.py (other log files of a job under its workdir: pick one and follow it, §4.7.2)  [WP3]
+              found_logs.py (other log files of a job under its workdir: pick one and follow it, §4.7.2)
+              account.py (`$`: account balances, usage per window and where it went, per Slurm cluster, §7.17)  [WP3]
     widgets/  header.py hintbar.py tabs.py fleet_view.py host_card.py jobs_view.py job_table.py job_preview.py
               gpus_view.py gpu_panel.py proc_table.py node_table.py log_view.py filter_bar.py
               attach_panel.py (Attach status line + live GPU rows, §7.16)
@@ -410,11 +418,14 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal, TypeVar
 
 T = TypeVar("T")
+
+DETECT_REV = 3      # bump when detection learns something new: cached capabilities of an older revision are re-detected
+                    # (2: priority settings, §5.2.10; 3: Account — QOS UsageFactor and partition charges, §5.2.11)
 
 # ---------- hosts ----------
 class ConnState(StrEnum):
@@ -470,6 +481,16 @@ class SectionStatus:
     error: HostError | None = None
 
 @dataclass(frozen=True, slots=True)
+class PartitionCharge:                       # Account (§5.2.11): how one partition charges, from `slurm.parts` (§5.1)
+    partition: str
+    billing_weights: str = ""                # raw TRESBillingWeights ("cpu=1,gres/gpu:L40S=32"); "" = none (billing
+                                             # = CPUs, Slurm's default)
+    qos: str | None = None                   # the partition QOS (`QoS=`; `N/A` -> None)
+    allow_qos: tuple[str, ...] | None = None # AllowQos; None = ALL
+    def_cpu_per_gpu: int | None = None       # DefCpuPerGPU (None: not set; lyra prints none)
+    def_mem_per_cpu_mb: int | None = None    # DefMemPerCPU (None: not set or DefMemPerNode)
+
+@dataclass(frozen=True, slots=True)
 class Capabilities:
     remote_user: str
     uid: int | None
@@ -491,6 +512,9 @@ class Capabilities:
     node_ssh: Literal["adopt", "denied"] | None = None   # Attach (§7.16), learned via caps_patch by the first node
                                              # ssh: "adopt" = login→node ssh lands in a job (pam_slurm_adopt);
                                              # "denied" = refused before/at auth (lyra). None = not tried yet
+    qos_usage_factor: Mapping[str, float] = field(default_factory=dict)   # Account (§5.2.11): QOS name -> UsageFactor
+                                             # (`slurm.qos`); {} = not known (job cost shows the factor as `×1?`)
+    partition_charges: tuple[PartitionCharge, ...] = ()   # Account: every partition line of `slurm.parts`
 
 @dataclass(frozen=True, slots=True)
 class HostMetrics:
@@ -959,6 +983,86 @@ class AttachState:                       # FleetAPI.attach_state; one per job at
     node: str | None = None              # node pinned by attach_start(node=...); None = backend default
     failures: int = 0                    # consecutive failed samples (auto-refresh stops at 3)
 
+# ---------- account usage (§5.2.11; Account, additive after 0.8.0) ----------
+UsageWindow = Literal["7d", "30d", "90d", "period"]
+USAGE_WINDOWS: tuple[UsageWindow, ...] = ("7d", "30d", "90d", "period")   # `[`/`]` order
+WINDOW_DAYS: Mapping[str, int] = {"7d": 7, "30d": 30, "90d": 90}         # "period": per account (§5.2.11)
+
+@dataclass(frozen=True, slots=True)
+class AccountBalance:                    # one Slurm account's budget
+    account: str
+    limit_su: float | None = None        # account row GrpTRESMins billing / 60 (sshare), else sbank "Account Limit";
+                                         # None = no SU limit known — never "unlimited"
+    used_su: float | None = None         # account row GrpTRESRaw billing / 60 (sshare), else sbank "Usage"; scaled by
+                                         # UsageFactor (charged), so never comparable with sreport billing-h
+    used_basis: Literal["since_reset", "decayed", "unknown"] = "unknown"   # PriorityDecayHalfLife 0 / > 0 / unknown
+    limit_source: Literal["sshare", "sbank"] | None = None
+    used_source: Literal["sshare", "sbank"] | None = None
+    other_limits: Mapping[str, float] = field(default_factory=dict)   # GrpTRESMins keys other than billing, in hours
+                                         # ("gres/gpu" -> 2000.0): own units, never SU
+    next_realloc: date | None = None     # sbank "Next reallocation" (cluster-local date)
+    realloc_known: bool = False          # True with next_realloc None: sbank answered "No data found."
+    read_at: datetime | None = None      # when used_su was read
+    my_used_su: float | None = None      # the user's own sshare row(s) GrpTRESRaw billing / 60, same basis as used_su
+                                         # (usage only: the "recent … (decays)" next to the user's other numbers)
+
+    @property
+    def available_su(self) -> float | None: ...   # limit_su - used_su when both are known, else None
+
+@dataclass(frozen=True, slots=True)
+class AccountUse:                        # one account over one window: CPU-h / GPU-h / billing-h, NOT charged
+    account: str
+    scope: Literal["me", "account"]      # "account": the whole account's total (on-demand report only)
+    cpu_h: float | None
+    gpu_h: float | None
+    billing_h: float | None              # sreport billing is not scaled by UsageFactor: never "SU"
+    source: Literal["sreport", "sacct"] = "sreport"   # "sacct": no sreport, summed from the job rollup
+    start: datetime | None = None        # this account's window start (the period window differs per account)
+    start_inferred: bool = False         # period start = next_realloc - allocation_period (an assumption, labelled)
+
+@dataclass(frozen=True, slots=True)
+class AccountSummary:                    # HostSnapshot.account (periodic `slurm.account`) and AccountReport.summary
+    window: UsageWindow                  # of `usage` ("period" only in an on-demand report)
+    read_at: datetime                    # the last sshare reading that produced `balances`
+    mode: Literal["limits", "usage_only"]   # "limits": >= 1 account has an SU limit
+    balances: tuple[AccountBalance, ...] = ()   # one per account, sorted by name
+    usage: tuple[AccountUse, ...] = ()   # scope "me", one per account
+    usage_at: datetime | None = None     # the last sreport reading that produced `usage`
+    sbank_at: datetime | None = None     # the last sbank reading (None: never / no sbank)
+    half_life_s: float | None = None     # PriorityDecayHalfLife (0 = usage does not decay; None = unknown)
+    reset_period: str | None = None      # PriorityUsageResetPeriod unless NONE: "MONTHLY", "WEEKLY", …
+    notes: tuple[str, ...] = ()          # fixed texts: "sreport not installed: totals from your job records", …
+    errors: tuple[HostError, ...] = ()   # failing sections; the last good values above are kept (with their ages)
+
+@dataclass(frozen=True, slots=True)
+class UsageCell:                         # rollup atom: my jobs of one (name, account, partition, qos, GPU model)
+    name: str                            # job name (grouping keys are derived from it, util/usage.py)
+    account: str
+    partition: str
+    qos: str
+    gpu_model: str                       # normalised gres type ("rtx6000", "nvidia_a100-sxm4-40gb"); "" = no GPU or
+                                         # untyped
+    jobs: int
+    running: int                         # of them running at report time (their hours so far are included)
+    cpu_h: float
+    gpu_h: float
+    billing_h: float
+    charged_su: float | None             # billing_h × UsageFactor(qos); None when that QOS's factor is unknown
+
+@dataclass(frozen=True, slots=True)
+class AccountReport:                     # FleetAPI.account_report: one host, one window, fetched on demand
+    host: str
+    window: UsageWindow
+    fetched_at: datetime
+    summary: AccountSummary              # balances + my usage for this window (fresh, so `r` really refreshes)
+    window_start: datetime | None = None # earliest start over the accounts (None: no usage window, e.g. no period)
+    account_totals: tuple[AccountUse, ...] = ()   # scope "account" (sreport account rows)
+    cells: tuple[UsageCell, ...] = ()
+    jobs_seen: int = 0                   # distinct allocations in the rollup
+    truncated: bool = False              # a sacct chunk was cut (max_stdout / INCOMPLETE), refused, failed or not run:
+                                         # the rollup is a lower bound
+    errors: tuple[HostError, ...] = ()   # failing report sections (classified, never raw stderr in the UI)
+
 # ---------- snapshot ----------
 @dataclass(frozen=True, slots=True)
 class HostSnapshot:
@@ -971,6 +1075,7 @@ class HostSnapshot:
     nodes: tuple[Node, ...]
     partitions: tuple[PartitionSummary, ...]
     metrics: HostMetrics | None
+    account: AccountSummary | None = None   # Account (§5.2.11): periodic summary; None = never read / not applicable
 
 # ---------- actions, import, doctor ----------
 @dataclass(frozen=True, slots=True)
@@ -1009,7 +1114,8 @@ class DoctorReport:
     warnings: tuple[str, ...] = ()
 
 def to_json(obj: Any) -> Any:
-    """Dataclass/enum/datetime/timedelta/frozenset -> JSON-compatible value (datetimes ISO 8601 UTC)."""
+    """Dataclass/enum/datetime/date/timedelta/frozenset -> JSON-compatible value (datetimes ISO 8601 UTC, dates
+    "YYYY-MM-DD")."""
     ...
 
 def from_json(cls: type[T], data: Any) -> T:
@@ -1068,7 +1174,8 @@ class SectionResult:
 class ProbeScript:
     sections: tuple[Section, ...]
     nonce: str                   # 12 hex chars, secrets.token_hex(6)
-    purpose: Literal["poll", "detect", "detail", "action", "log", "doctor", "attach"] = "poll"
+    purpose: Literal["poll", "detect", "detail", "action", "log", "doctor", "attach", "account"] = "poll"
+                                 # "account": an on-demand account report (§5.2.11; Account, additive)
 
 @dataclass(frozen=True, slots=True)
 class StreamSpec:
@@ -1158,8 +1265,8 @@ from typing import ClassVar, Literal
 
 from runfleet.config import GeneralSettings, HostConfig
 from runfleet.errors import AttachBlocked
-from runfleet.models import (GPU, ActionResult, AttachMode, Capabilities, HostError, HostMetrics, Job, JobDetail,
-                             JobKey, JobLive, Node, PartitionSummary, Proc)
+from runfleet.models import (GPU, AccountReport, AccountSummary, ActionResult, AttachMode, Capabilities, HostError,
+                             HostMetrics, Job, JobDetail, JobKey, JobLive, Node, PartitionSummary, Proc, UsageWindow)
 from runfleet.probe.section import ProbeScript, Section, SectionResult
 
 class Role(StrEnum):
@@ -1216,6 +1323,7 @@ class CollectorOutput:
     followups: frozenset[str] = frozenset()        # cadence groups (event or interval) to run at the next tick
     handled: frozenset[str] = frozenset()          # sections whose non-zero exit the collector read as an answer
                                                    # (sprio: no job pending / not multifactor): ok, no backoff
+    account: AccountSummary | None = None          # Account (§5.2.11): scheduler only; None = unchanged
 # Merge rule (poller, one tick): EVERY collector of the profile has ingest() called on EVERY tick, with an empty
 # results map when none of its sections ran. Outputs are applied monitors first (profile order), scheduler last; for
 # every Optional field the last non-None value wins; errors are concatenated; followups and handled are unioned.
@@ -1327,6 +1435,29 @@ class SchedulerCollector(Collector):
         GPU model from nvidia-smi becomes the job's alloc.gpu_type, gpu_type_source="nvidia-smi", on later ticks)."""
         raise NotImplementedError(f"{self.name}: attach is not supported")
 
+    # ---- Account (§5.2.11). Not abstract: the defaults mean "no scheduler accounting" (workstations, third-party
+    # collectors). Core calls these only for FleetAPI.account_report; both are sans-IO.
+    def account_sections(self, window: UsageWindow, ctx: HostContext) -> list[Section]:
+        """Sections of one on-demand account report for `window`, rendered as ONE probe (purpose="account");
+        [] = nothing to read (no accounting, disabled in config, no account). A "period" without a known start is
+        planned as "30d" (the report's `window` says so)."""
+        return []
+
+    def ingest_account(self, window: UsageWindow, results: Mapping[str, SectionResult],
+                       ctx: HostContext) -> AccountReport | None:
+        """Parse one report. Never raises for remote failures (they become AccountReport.errors); None only when
+        account_sections gave []. May refresh the collector's own summary state (balances, sbank dates), so the next
+        tick publishes them in CollectorOutput.account."""
+        return None
+
+    def restore_account(self, summary: AccountSummary | None) -> None:
+        """Warm start: core hands over the persisted HostSnapshot.account when the poller (re)builds its collectors
+        and before every account_sections call. Slurm takes from it the time of the last sshare reading (the periodic
+        `slurm.account` group plans nothing while that is younger than its period: a restart or `agent --refresh`
+        does not re-read a fresh summary) and the sbank readings with their time (reallocation dates, sbank usage /
+        limits), so SBANK_PERIOD holds across processes and the "period" window is known at once. Default: nothing."""
+        return None
+
     @abstractmethod
     def actions(self, jobs: Sequence[Job], ctx: HostContext) -> list[ActionSpec]: ...
         # every action this backend offers for these jobs; disabled_reason from state/ownership/protection.
@@ -1390,6 +1521,10 @@ class SlurmSettings:
     protected_qos: tuple[str, ...] = ()
     attach: AttachSetting = "ssh+srun"   # Attach (§7.16): "ssh" | "ssh+srun" | "srun" | "off"
     attach_refresh: float = 15       # floor 10; ssh auto-refresh period (srun never auto-refreshes)
+    account_usage: bool = True       # Account (§5.2.11): False = no `slurm.account` group and no on-demand report
+    poll_account: float = 1800       # floor 900; the account summary period (×2 hidden)
+    allocation_period: float = 365 * 86400   # the "period" window starts at next reallocation minus this (sbank);
+                                             # 0 = unknown: no period window from sbank dates
 
 @dataclass(frozen=True, slots=True)
 class WorkstationSettings:
@@ -1431,6 +1566,8 @@ class GeneralSettings:
     pager: str = ""                  # "" -> $PAGER, else "less -R +G"
     remember_hosts: bool = True      # hosts named on the command line are saved once they answer (§8.4)
     update_check: bool = True        # once a day, ask GitHub for the newest RunFleet version (§8.6)
+    usage_window: Literal["7d", "30d", "90d", "period"] = "30d"   # Account (§5.2.11): default window of the Account
+                                     # screen, the periodic summary ("period" -> "30d" there) and `agent usage`
 
 @dataclass(frozen=True, slots=True)
 class UISettings:
@@ -1525,6 +1662,7 @@ class ChangeSet:
     metrics: bool = False
     paused: bool = False                         # idle pause toggled (host == "*")
     live: frozenset[str] = frozenset()           # job ids whose AttachState changed (§7.16): re-read attach_state()
+    account: bool = False                        # Account (§5.2.11): snapshot.account changed or a report arrived
 
 class FleetStore:
     hosts: dict[str, HostState]                  # insertion order = config order = scope numbers 1..9
@@ -1545,6 +1683,10 @@ class FleetStore:
     def notify_live(self, host: str, job_ids: Iterable[str]) -> ChangeSet: ...   # Attach (§7.16): ChangeSet(host,
                                                  # live=ids); no-op for no ids / unknown host; the store holds no
                                                  # attach data (FleetAPI.attach_state does)
+    def notify_account(self, host: str) -> ChangeSet: ...   # Account (§5.2.11): ChangeSet(host, account=True) when an
+                                                 # on-demand report arrived (reports live in FleetService, not here);
+                                                 # no-op for an unknown host. apply() sets account=True itself when
+                                                 # CollectorOutput.account differs from snapshot.account
 
 def job_material_eq(a: Job, b: Job) -> bool:
     """== ignoring observed_at and elapsed, so a pure time tick does not repaint rows."""
@@ -1569,8 +1711,8 @@ from runfleet.config import FleetConfig, HostConfig
 from runfleet.core.cache import Cache
 from runfleet.core.clock import Clock
 from runfleet.core.store import FleetStore
-from runfleet.models import (ActionResult, AttachMode, AttachState, DetectReport, DoctorReport, JobDetail, JobKey,
-                             JobLive, LogRef, Visibility)
+from runfleet.models import (AccountReport, ActionResult, AttachMode, AttachState, DetectReport, DoctorReport,
+                             JobDetail, JobKey, JobLive, LogRef, UsageWindow, Visibility)
 from runfleet.transport.base import Transport
 
 TransportFactory = Callable[[HostConfig], Transport]     # cli.py picks OpenSSH / Local / Demo per host
@@ -1744,6 +1886,20 @@ class FleetAPI(Protocol):
         # `a`: ssh auto-refresh on/off for this job (session only); srun ignores it (never auto-refreshes)
     def attach_state(self, key: JobKey) -> AttachState | None: ...
         # None = never attached this session; otherwise the latest state (also after stop)
+    # Account (§5.2.11, §7.17; additive after 0.8.0: a FakeService gains these two methods)
+    async def account_report(self, host: str, window: UsageWindow | None = None, *,
+                             max_age_s: float = 600) -> AccountReport: ...
+        # on demand only (Account screen open / `r` / window switch, `agent usage --refresh`; never a timer): a
+        # report of this (host, window) younger than max_age_s is returned as is, else ONE probe (purpose "account")
+        # on the host's on-demand lane with the scheduler's account_sections(window); an identical request in
+        # flight is awaited, not duplicated. window None = general.usage_window; a "period" the host has no start
+        # for falls back to "30d" (AccountReport.window says which). The result is kept per (host, window) in memory
+        # and in the cache (`account_reports`, §5.5), then store.notify_account(host). Read-only: allowed with
+        # --readonly. Never raises for remote failures (AccountReport.errors); a host without scheduler accounting
+        # (workstation, account_usage = false, no account) gets an empty report (no summary balances, errors=())
+    def account_cached(self, host: str, window: UsageWindow) -> AccountReport | None: ...
+        # sync, never I/O (the event loop calls it): the last report of this session, else the cached one start()
+        # loaded off-loop with the snapshots (any age; the caller shows it); None = never fetched
 
 class FleetService(FleetAPI):
     def __init__(self, config: FleetConfig, transports: TransportFactory, clock: Clock,
@@ -2428,11 +2584,12 @@ The **detect probe** (one round trip, purpose `detect`) holds the generic sectio
 | Section | Command | Parsed into |
 |---|---|---|
 | `detect.id` | `printf 'user=%s\nuid=%s\nhost=%s\ntz=%s\nepoch=%s\n' "$(id -un)" "$(id -u)" "$(hostname)" "$(date +%z)" "$(date +%s)"` | remote_user, uid, login_host, tz_offset, clock_skew |
-| `detect.tools` | `for c in squeue sacct sinfo scontrol sstat scancel sacctmgr nvidia-smi timeout less stat ps pgrep srun ssh sprio sshare; do command -v "$c" >/dev/null 2>&1 && echo "$c"; done; true` | tools |
+| `detect.tools` | `for c in squeue sacct sinfo scontrol sstat scancel sacctmgr nvidia-smi timeout less stat ps pgrep srun ssh sprio sshare sreport sbank; do command -v "$c" >/dev/null 2>&1 && echo "$c"; done; true` | tools (`sreport`, `sbank`: Account, §5.2.11) |
 | `slurm.version` (req `sinfo`) | `sinfo --version` | `slurm 25.05.8` → "25.05.8" |
 | `slurm.config` (req `scontrol`) | `scontrol show config \| grep -E '^(ClusterName\|AccountingStorageType\|JobAcctGatherType\|JobAcctGatherFrequency\|PreemptMode\|PrologFlags\|LaunchParameters\|MinJobAge\|PrivateData\|PriorityType\|PriorityWeight[A-Za-z]*\|PriorityFlags\|PriorityDecayHalfLife\|PriorityMaxAge\|PriorityUsageResetPeriod) '` | cluster_name, slurm_config (incl. the priority settings of §5.2.10), acct_gather_freq_s |
 | `slurm.assoc` (req `sacctmgr`) | `sacctmgr -n -P show assoc where user="$(id -un)" format=Cluster,Account,Partition,QOS` | associations |
-| `slurm.parts` (req `scontrol`) | `commands.PARTS_CMD`: `groups=` (comma-separated names from the group database via `getent`, not the session's groups), `parent=cluster\|account\|parent` lines walking up from the user's accounts (account-level `sacctmgr show assoc` rows, ≤ 6 levels, `root` left out), `parents=complete` when every sacctmgr call worked and the chain ended, then `scontrol show partition -o` (a value runs to the next ` Key=`, so names with spaces stay whole) | gpu_partitions: partitions with `gres/gpu` in TRES, not `Hidden`, `RootOnly`, `INACTIVE` or `DRAIN`, whose AllowGroups holds one of your groups and where, for some account, the association of this cluster for that partition (else the one for all partitions, as Slurm picks) passes AllowAccounts/DenyAccounts with the account or a parent (the lists are hierarchical; a DenyAccounts list needs `parents=complete`) and has a QOS passing AllowQos/DenyQos (an empty QOS list passes only unrestricted partitions). No association data at all: only partitions open to every account and QOS; associations on other clusters only: none |
+| `slurm.parts` (req `scontrol`) | `commands.PARTS_CMD`: `groups=` (comma-separated names from the group database via `getent`, not the session's groups), `parent=cluster\|account\|parent` lines walking up from the user's accounts (account-level `sacctmgr show assoc` rows, ≤ 6 levels, `root` left out), `parents=complete` when every sacctmgr call worked and the chain ended, then `scontrol show partition -o` (a value runs to the next ` Key=`, so names with spaces stay whole) | gpu_partitions: partitions with `gres/gpu` in TRES, not `Hidden`, `RootOnly`, `INACTIVE` or `DRAIN`, whose AllowGroups holds one of your groups and where, for some account, the association of this cluster for that partition (else the one for all partitions, as Slurm picks) passes AllowAccounts/DenyAccounts with the account or a parent (the lists are hierarchical; a DenyAccounts list needs `parents=complete`) and has a QOS passing AllowQos/DenyQos (an empty QOS list passes only unrestricted partitions). No association data at all: only partitions open to every account and QOS; associations on other clusters only: none. **partition_charges** (Account, §5.2.11): one `PartitionCharge` per partition line whose name passes the partition validator (`scontrol` without `-a` already leaves hidden partitions and those closed to the user's groups out), from the same lines: `TRESBillingWeights`, `QoS` (`N/A` → None), `AllowQos` (`ALL` → None), `DefCpuPerGPU`, `DefMemPerCPU` (`UNLIMITED` / absent → None) |
+| `slurm.qos` (req `sacctmgr`; Account) | `sacctmgr -n -P show qos format=Name,UsageFactor` (timeout 15 s, max_stdout 64 KB) | qos_usage_factor: `name\|factor` rows; a row whose factor is not a number is skipped, > 50 % bad rows is a PARSE error and leaves the field unset (the cached value stays) |
 | `slurm.sacctfmt` (req `sacct`) | `sacct --helpformat` | sacct_fields (enables `StdOut,StdErr` when present) |
 | `slurm.gputres` (req `sacct`) | `j=$(sacct -u "$(id -un)" -S now-14days -E now -X -n -P --format=JobIDRaw,AllocTRES,State \| awk -F'\|' '$2 ~ /gres\/gpu/ && $3 !~ /^(RUNNING\|PENDING)/ {j=$1} END {print j}'); [ -n "$j" ] && sacct -j "$j" -n -P --format=JobID,TRESUsageInMax%400; true` | gpu_tres seed |
 | `nvidia.version` (req `nvidia-smi`) | `nvidia-smi --version` | driver_version: key `KMD version`, fallback `DRIVER version` |
@@ -2446,6 +2603,14 @@ with `alloc.gpus > 0` count: key present → True; False only after **two distin
 **Priority settings** (§5.2.10): the same `slurm.config` grep brings `PriorityType`, every `PriorityWeight*`,
 `PriorityFlags`, `PriorityDecayHalfLife`, `PriorityMaxAge` and `PriorityUsageResetPeriod` into `caps.slurm_config`
 (no extra RPC, cached with the other capabilities); `DETECT_REV` 2 re-detects capabilities cached without them.
+
+**Charging rules** (Account, §5.2.11): `qos_usage_factor` (one more sacctmgr RPC per detection) and
+`partition_charges` (parsed from the `slurm.parts` output already fetched: no new command) are what job cost, the SU
+column and the estimate need, so those cost **no remote command** at all. Both are `detect._CAP_FIELDS` and checked by
+`_check_types` (`Mapping`, `tuple`). `DETECT_REV` 3 re-detects older cached capabilities once (one extra detect probe
+per host after the upgrade). A re-detection whose `slurm.qos` gave no factors (failed, mostly bad rows) keeps the
+previous factors of the same cluster (`core/poller.STICKY_CAPS`); the demo lyra has the real cluster's free
+(`AllowQos=low,guest`) and charged (weighted) partitions on the same nodes.
 
 Profile selection (`backends/detect.py: choose_profile(caps, host_cfg) -> tuple[str, ...]`):
 1. `backend = "slurm"` in config, or `auto` and `squeue` ∧ `sinfo` ∈ tools → `("slurm", "procfs")` + `"nvidia"` if
@@ -2495,10 +2660,13 @@ def choose_profile(caps: Capabilities, host: HostConfig) -> tuple[str, ...]: ...
 | `slurm.names` (event) | `slurm.names` | — | users in the last `slurm.occupants` reading never looked up (≤ 200 per probe) |
 | — (on demand, any host kind) | `log.search` | never on a timer: palette › Search logs… / `^f`, one probe per host | the user asked; ≤ 20 own recent log files (§4.7.1) |
 | `slurm.priority` (interval) | `slurm.sprio` + `slurm.sshare` | 600 s / 600 s / ×6 / ×1 (failure backoff up to 1 h) | ≥ 1 own job PENDING/REQUEUED and not held, `PriorityType=priority/multifactor` with some `PriorityWeight*` > 0, sprio or sshare present; `slurm.sshare` only when `PriorityWeightFairShare` > 0 (§5.2.10) |
+| `slurm.account` (**piggyback**; Account) | `slurm.acct_share` + `slurm.acct_sreport` (+ `slurm.acct_sbank` at most every 6 h) | `poll_account` 1800 s / 900 s / ×2 / ×1 (failure backoff up to 2 h) | `account_usage = true`, `AccountingStorageType` is `accounting_storage/slurmdbd`, `caps.associations` names ≥ 1 account of this cluster (§5.2.11) |
+| — (on demand, Account) | the account report: `slurm.acct_share`, `slurm.acct_sreport[.p<i>]`, `slurm.acct_jobs.c<i>`, (`slurm.acct_sbank`) | never on a timer: Account screen open / `r` / window switch, `agent usage --refresh`; one probe, cached 10 min per (host, window) | `FleetAPI.account_report` (§5.2.11) |
 
 All due groups ride **one** probe per tick, and groups are only evaluated at ticks (§5.4), so a visible Slurm host
 costs 4 round trips/min (1.3 hidden); an open host detail adds nothing but two more sections every 30 s, and a pending
-job of yours two sections every 10 min (hidden: every hour). Job detail is a separate on-demand probe (`detail_sections`: `slurm.scontrol` for
+job of yours two sections every 10 min (hidden: every hour). `slurm.account` is piggyback: it rides a regular tick
+every 30 min (hidden: 1 h) and never adds a round trip. Job detail is a separate on-demand probe (`detail_sections`: `slurm.scontrol` for
 that id if older than 30 s, `slurm.steps`, `slurm.sstat` if running, `slurm.logstat`).
 
 #### 5.2.2 Exact commands (`backends/slurm/commands.py`)
@@ -2572,6 +2740,42 @@ SPRIO_CMD = f'sprio -h -u "$(id -un)" -o {shlex.quote(SPRIO_FORMAT)}'          #
 SSHARE_CMD = 'sshare -h -U -u "$(id -un)" -P -o Account,User,RawShares,NormShares,RawUsage,EffectvUsage,FairShare,LevelFS'
                                                                                 # max_stdout 64 000
 
+# account usage (§5.2.11; Account). <accts> = shlex.quote(",".join(shell.name(a) for a in accounts)), ≤ MAX_ACCOUNTS
+# (12); <a>/<b> are integers RunFleet computes; <start> is `now-<N>days` or a YYYY-MM-DD formatted from a date object.
+# Nothing taken from remote data is interpolated without the validators below or reformatting. No --json (lyra).
+def _accts(accounts: list[str]) -> str:           # util/shell.name() each (ValueError on a bad name, an empty list
+    return shlex.quote(",".join(shell.name(a) for a in accounts))   # or more than MAX_ACCOUNTS), one quoted list
+def check_start(start: str) -> str: ...           # ValueError unless `now-<N>days` or `YYYY-MM-DD`
+def acct_chunks(days: int) -> list[tuple[int, int]]: ...   # (older, newer) ≤ ACCT_CHUNK_DAYS each, oldest first:
+                                                  # 7 -> [(7, 0)]; 90 -> [(90, 60), (60, 30), (30, 0)]
+QOS_CMD = "sacctmgr -n -P show qos format=Name,UsageFactor"        # detection: slurm.qos (§5.1), max_stdout 64 000
+def acct_share_cmd(accounts: list[str]) -> str:   # slurm.acct_share — one ctld RPC; account rows (User empty) = the
+    # account's limit (GrpTRESMins) and charged usage (GrpTRESRaw); without -a only the user's own rows, which start
+    # with a space (" pilab_02|alice07|…"): strip
+    return f"sshare -h -P -A {_accts(accounts)} -o Account,User,RawUsage,GrpTRESMins,GrpTRESRaw"
+def acct_sreport_cmd(accounts: list[str], start: str, *, totals: bool) -> str:   # slurm.acct_sreport — one dbd RPC
+    # columns Cluster|Account|Login|Proper Name|TRES Name|Used; Proper Name (GECOS) is cut remotely, never read.
+    # totals=False (periodic summary): my rows only
+    #   sreport -n -P cluster AccountUtilizationByUser user="$(id -un)" start=<start> end=now -t Minutes \
+    #       --tres=cpu,gres/gpu,billing | cut -d'|' -f1-3,5-
+    # totals=True (on-demand report): the accounts' total rows (Login empty) and my rows; other members' rows never
+    # leave the host
+    #   sreport -n -P cluster AccountUtilizationByUser accounts=<accts> start=<start> end=now -t Minutes \
+    #       --tres=cpu,gres/gpu,billing | awk -F'|' -v me="$(id -un)" '$3 == "" || $3 == me' | cut -d'|' -f1-3,5-
+def acct_sbank_cmd(accounts: list[str]) -> str:   # slurm.acct_sbank — a site wrapper (lyra), one call per account,
+    # never without -a (that lists every member of every account)
+    return "for a in " + " ".join(shlex.quote(shell.name(a)) for a in accounts) + \
+           '; do echo "@@acct $a"; sbank balance statement -a "$a" 2>&1; done; true'
+ACCT_JOBS_FIELDS = ["JobIDRaw", "Account", "Partition", "QOS", "State", "ElapsedRaw", "Start", "End", "AllocTRES",
+                    "JobName"]                                    # JobName last: free text (split with maxsplit)
+ACCT_CHUNK_DAYS = 30   # k2 rejects sacct ranges of ~60 days and more ("Too wide of a date range in query", rc 0)
+def acct_jobs_cmd(older_days: int, newer_days: int, sep: str = SEP) -> str:   # slurm.acct_jobs.c<i> — one dbd RPC
+    # my allocations overlapping [now - older_days, now - newer_days] (≤ ACCT_CHUNK_DAYS); never-started rows
+    # (ElapsedRaw 0) dropped remotely
+    end = "now" if newer_days == 0 else f"now-{newer_days}days"
+    return (f'sacct -u "$(id -un)" -S now-{older_days}days -E {end} -X -n -P --delimiter={shlex.quote(sep)} '
+            f"--format={','.join(ACCT_JOBS_FIELDS)} | awk -F{shlex.quote(sep)} '$6 != \"0\"'")
+
 # on-demand cross-job log search (§4.7.1; every host kind, core/logsearch.py: search_command, not a Slurm command):
 # per file  tail -c +<b+1> -- <path> | head -c <n> | grep -a -n -b -o [-i] -E -m <left> -e '.{0,60}(PAT).{0,60}'
 #           | head -n <left> | cut -b 1-600      n = min(size, 256 KiB, budget left of 1 MiB); ≤ 20 paths, ≤ 200 lines
@@ -2582,6 +2786,8 @@ Validators (`util/shell.py`): `JOBID_RE = r"^\d+(_(\d+|\[[\d,\-%]+\]))?(\.(batch
 `^[A-Za-z0-9_.\-]+$`, paths absolute without NUL/newline. Anything else is rejected before rendering. Timeouts: squeue
 20 s, sacct 30 s, scontrol loop 15 s, sstat 15 s, logstat 10 s, sinfo 20 s, occupants 20 s, names 10 s, sprio 15 s,
 sshare 15 s, log.search 30 s (on demand only; cost per search and host: one round trip, no Slurm RPC, ≤ 1 MiB read).
+Account sections (timeout / max_stdout): `slurm.qos` 15 s / 64 KB, `slurm.acct_share` 15 s / 64 KB,
+`slurm.acct_sreport*` 20 s / 64 KB, `slurm.acct_sbank` 20 s / 32 KB, each `slurm.acct_jobs.c<i>` 60 s / 2 MiB.
 
 #### 5.2.3 Parsing rules
 - **Rows** are split on `"\n"` only (a trailing `\r` dropped) in every Slurm and ps parser: `str.splitlines()` also
@@ -2868,6 +3074,261 @@ itself says about the job's priority. **Evidence, never a promise**: no start ti
   (`prio not ranked here: submit order as resources free up (+ backfill)`; `prio not read yet …`). `snapshot --json`
   carries it as `jobs[].priority` (additive; `runfleet.snapshot/1` unchanged).
 
+#### 5.2.11 Account usage and job cost (`account.py`, `util/cost.py`, `util/usage.py`; Account)
+"How much has my lab spent, how much is left, what does this job cost, and which experiment used the GPU-hours?" —
+answered from Slurm's own accounting, read-only, cheapest tier first. **Evidence** (account field probes, 2026-10,
+names anonymised as everywhere in this document):
+
+| Fact | Evidence | Consequence |
+|---|---|---|
+| The SU limit is the account row's `GrpTRESMins` billing / 60 | lyra `sshare -A` account row (User empty) `billing=5873100` = sbank "Account Limit" 97,885 SU; `pilab_02_gpu` 5820 → 97 | limits come from sshare; sbank is optional, sacctmgr is not needed |
+| Used SU is the account row's `GrpTRESRaw` billing / 60 | `pilab_02` 17887 → 298 = sbank "Usage"; `pilab_03` 158595 → 2,643 | one ctld RPC gives limit and use |
+| sshare / sbank usage is **after** UsageFactor, sreport is not | alice07's own account: sreport 7,759 billing-h in a month (all under QOS `low` ×0), sshare billing 0 and cpu 0, sbank 0 | used SU never comes from sreport; sshare TRES minutes never serve as CPU-h / GPU-h |
+| The **job's** QOS sets the factor | jobs on `free-gpuxl` ran under QOS `low` (×0) while the partition QOS `free-gpuxl-part` is ×1, and the account usage stayed 0 | factor = `caps.qos_usage_factor[job.qos]` |
+| Decay differs per cluster | lyra `PriorityDecayHalfLife=00:00:00`, reset NONE (sshare equals sbank); k2 half-life 7 d, NONE; vega 14 d, MONTHLY | on k2 / vega sshare usage is "recent (decays)", never "used" or a window total |
+| Limits, weights and sbank exist on lyra only | k2 / vega: `GrpTRESMins` empty, no sbank, every UsageFactor 1, no `TRESBillingWeights` | "usage only" mode |
+| Billing weights live on partitions | lyra `gpu` `cpu=1,gres/gpu=32`; `gpuxl` `cpu=1,gres/gpu:L40S=32,gres/gpu:RTX6000=64` (capitalised, while sacct prints `gres/gpu:rtx6000`); `free*` none, `AllowQos=low,guest` (both ×0); `DefCpuPerGPU` not printed | weights matter only for estimates; TRES keys compare case-insensitively |
+| Jobs carry their billing | squeue `tres-alloc` has `billing=` for running and pending jobs on all three; the typed `gres/gpu:<model>` key is sometimes missing | `Job.alloc.tres["billing"]` (already collected); the GPU model falls back to `alloc.gpu_type` |
+| sreport is fast and stable | 0.2–0.5 s; `start=now-30days end=now -t Minutes` and `start=YYYY-MM-DD` accepted on 25.05 / 25.11 / 26.05; account total rows have an empty Login | fits a piggyback section |
+| k2 refuses wide sacct ranges | ≥ ~60 days: `sacct: error: Too wide of a date range in query`, empty stdout, rc 0 through a pipe; 45 d worked (2,734 rows); lyra 90 d 459 rows / 80 KB, vega 601 rows / 100 KB | the rollup queries ≤ 30-day chunks; that line is an error, never "no jobs" |
+| sbank is a per-account wrapper | `sbank balance statement -a X` 0.18 s, only that account's row (its name upper-cased), then `Next reallocation: YYYY-MM-DD` or `No data found.`; without `-a` it lists every lab member | one call per account, never without `-a`; names compare case-insensitively |
+
+**Units.** Never mixed:
+- **billing**: Slurm's per-job billing TRES, a rate per hour of wall time and already the job total (never × nodes).
+- **billing-h** = billing × elapsed_h. **SU** (charged) = billing-h × UsageFactor(job QOS): what sshare and sbank
+  count; 1 SU = 60 billing-minutes, the unit of `GrpTRESMins`.
+- **CPU-h** = AllocTRES `cpu` × elapsed_h. **GPU-h** = AllocTRES `gres/gpu` × elapsed_h, split by model through the
+  typed keys `gres/gpu:<model>=N` (normalised lower-case; a MIG slice is a model of its own and counts as one GPU,
+  as Slurm counts it); no typed key → `alloc.gpu_type`, else the model is unknown (shown `GPU`).
+- **elapsed_h**: ended jobs `ElapsedRaw` / 3600 (or `Job.elapsed`); ACTIVE jobs `Job.elapsed + (now − observed_at)`,
+  the ELAPSED column's extrapolation (`ui.query.elapsed_s`; the agent does not extrapolate data older than 5 min);
+  pending 0. Inside a window: the overlap of `[Start, Start + ElapsedRaw]` with `[window start, now]`.
+- "Used SU" comes from sshare (else sbank); "CPU-h / GPU-h / billing-h in a window" from sreport (else the job
+  rollup). sreport billing is never called SU.
+
+**UsageFactor of a job** = `caps.qos_usage_factor.get(job.qos)`; an unknown QOS (or no `slurm.qos`) → None: sums
+count it ×1 and it shows as `×1?`. This is the job-QOS rule the lyra evidence supports. Slurm documents the partition
+QOS as overriding the job QOS (unless the job QOS has `OverPartQOS`), but lyra's `free-gpuxl` jobs were not charged
+under a ×1 partition QOS, so the partition QOS factor is not used; a cluster that contradicts this is a field-probe
+fact and wins (Appendix C).
+
+**Three tiers, cheapest first:**
+1. **Charging rules** — `caps.qos_usage_factor` and `caps.partition_charges` (§5.1): job cost, the SU column and the
+   estimate cost no remote command.
+2. **Account summary** — cadence group `slurm.account` (§5.2.1), piggyback every `poll_account` (30 min; hidden 1 h),
+   on `HostSnapshot.account`: persisted for warm start and read by `runfleet agent` from the cache.
+3. **Account report** — `FleetAPI.account_report` (§3.7): other windows, account totals and the per-experiment rollup,
+   one probe on demand, cached 10 min per (host, window).
+
+**Accounts** = the distinct accounts of `caps.associations` whose cluster is `caps.cluster_name` (or empty), sorted,
+at most `MAX_ACCOUNTS` = 12; each passes `util/shell.name` (a name that does not is skipped and logged).
+
+**Periodic summary** (`SlurmCollector`, `slurm.account`):
+- Sections `slurm.acct_share` (req `sshare`) and `slurm.acct_sreport` (req `sreport`, `totals=False`, `start=now-<N>days`
+  for `general.usage_window`; `period` → `30d` here), plus `slurm.acct_sbank` (req `sbank`) only when the last
+  successful sbank reading is older than `SBANK_PERIOD` = 6 h (collector state, forgotten on restart; the snapshot
+  keeps the dates): a reallocation date changes about once a year, and sbank is a site wrapper of unknown cost.
+- The controller slowdown applies (a `slurm.*` group). `MISSING` is an answer, not an error: no sreport → no
+  `usage` and the note "sreport not installed"; no sbank → no reallocation dates.
+- A failing section keeps its last values (their `read_at` / `usage_at` / `sbank_at` age) and adds a classified
+  `HostError` to `AccountSummary.errors`. `CollectorOutput.account` is set on every tick where one of the group's
+  sections ran, else None (unchanged). `FleetStore.apply` merges it with the stored summary (`merged_account`, as
+  the `snapshot` merge does), so a failing first tick after a restart keeps the warm-start balances (with their
+  own `read_at`) instead of unknown ones stamped "now".
+- Warm start / throwaway collectors (`restore_account`): the persisted summary's sshare time and sbank readings seed
+  the collector; while the summary is younger than the group's period the group plans nothing (so `agent <verb>
+  --refresh` and `snapshot` with a fresh cached summary run no sshare / sreport / sbank), and sbank keeps its 6 h
+  period across processes.
+
+**Derivation rules** (pure, `backends/slurm/account.py`):
+1. **Used SU** per account: the sshare row with `User` empty and `Account` = the account (own user rows start with a
+   space: stripped) → `GrpTRESRaw` key `billing` / 60, `used_source="sshare"`; that row absent → sbank "Usage";
+   else None. The user's own rows give `my_used_su` the same way (sshare only): on a usage-only cluster the account
+   row is the whole account (k2: 2,503,304 billing-h for the university account, the user's own row 5,859), so the
+   "recent" next to the user's `30d me …` is `my_used_su`, and wherever the account's figure is shown it is labelled
+   (`recent me 5,859 · account 2,503,304`, the Account screen's `ACCT RECENT` under `u`). **Basis** from
+   `caps.slurm_config`: `PriorityDecayHalfLife` 0 → `since_reset` ("used, since the last reset"); > 0 → `decayed`
+   ("recent (decays, half-life 7d)", "· resets monthly" when `PriorityUsageResetPeriod` is not NONE) — never "used",
+   in limits mode too (`298 SU recent (decays, half-life 7d) / 97,885 limit`: GrpTRESMins usage decays unless the
+   NoDecay flag is set); unknown → `unknown`.
+2. **Limit**: the same row's `GrpTRESMins` key `billing` / 60, `limit_source="sshare"`; else sbank "Account Limit";
+   else None ("no SU limit"). Other `GrpTRESMins` keys (`cpu`, `gres/gpu`) go to `other_limits` in hours, shown in
+   their own unit (`limit 2,000 GPU-h`), never as SU.
+3. **sbank** (`@@acct <a>` blocks): the table row whose first column equals the account ignoring case, numbers with
+   thousands separators; `Next reallocation: YYYY-MM-DD` → `next_realloc`; `No data found.` → `realloc_known=True`,
+   no date. An unknown layout is a PARSE error for that account only, never a crash.
+4. **Mode**: `limits` when ≥ 1 account has `limit_su`, else `usage_only`. **Weights**: any `PartitionCharge` with
+   `billing_weights`. In `usage_only` mode without weights, billing-h are labelled `billing-h (= CPU-h here)`.
+5. **Free partitions** (`util/cost.classify_partitions(caps, cells)`, pure; UI and agent), first match wins:
+   `allow_qos` is a list and every QOS in it has factor 0 → `free` (lyra `free*`: `low,guest`); else ≥ 1 own job in
+   the window ran there and every such job's QOS has factor 0 → `free (observed: qos low ×0)`; else weights present,
+   or some QOS that may run there has factor > 0 → `charged`; else `charged (billing = CPUs)`. The partition QOS
+   factor alone never decides (`free-gpuxl-part` is ×1).
+
+**Period window** (`account.period_starts(summary, caps, host_cfg, now)`):
+- A known `next_realloc` (sbank) and `allocation_period` > 0: per account, start = `next_realloc − allocation_period`
+  (cluster-local midnight), `start_inferred=True`, labelled `since 2026-01-14 (inferred: next reallocation − 365d)`.
+  `No data found.` → that account has no period (`—`).
+- Else `PriorityUsageResetPeriod` DAILY / WEEKLY (Sunday) / MONTHLY / QUARTERLY / YEARLY: the last boundary at
+  00:00 in the cluster's offset (`caps.tz_offset`), labelled `since the monthly reset` (vega).
+- Else (k2) no period: `[`/`]` skip it and `account_report("period")` answers `30d`.
+- After a restart the sbank dates come from the persisted summary (`SchedulerCollector.restore_account`, §3.6) until
+  this run's first sbank reading, so a lyra-like cluster has its period at once. Should a period report still come
+  back as `30d` on a host that has a period, the Account screen says "period not known yet: showing 30d (r reads
+  again)"; on a host without one, "no period window on k2 …: showing 30d".
+- A start in the future gives no period; a start more than 390 days back is clipped there (13 chunks) and the report
+  marked `truncated`. At most `MAX_PERIOD_STARTS` = 4 distinct starts; accounts beyond them show `—`.
+
+**On-demand report** (`account_sections(window, ctx)`, one probe, purpose `account`):
+- `slurm.acct_share` (fresh balances: `r` really refreshes);
+- `slurm.acct_sreport` (`totals=True`, start `now-<N>days`); for `period` one `slurm.acct_sreport.p<i>` per distinct
+  start with `meta.accounts`, start `YYYY-MM-DD`;
+- `slurm.acct_jobs.c<i>`: ≤ 30-day chunks `[now − a, now − b]` covering the window, oldest first (7d / 30d: 1, 90d:
+  3, period: ⌈days / 30⌉ ≤ 13). Rows are split with `slurmfmt.split_rows` and `maxsplit` (JobName last), parsed like
+  `parse_sacct` (> 50 % bad → PARSE), deduplicated by `JobIDRaw` (a job crossing a chunk boundary is listed twice;
+  the larger `ElapsedRaw` wins) and clipped to the window (per account start for `period`). Empty stdout with
+  `Too wide of a date range` on stderr is a REMOTE error ("sacct refused the date range"), never "no jobs"; a cut
+  chunk (`max_stdout`, INCOMPLETE), and one refused, failed or never run (NOT_RUN: the probe stopped before it),
+  marks the report `truncated` (the sreport totals stay authoritative);
+- `slurm.acct_sbank` when sbank ∈ tools and the last sbank reading is older than 1 h.
+
+`ingest_account` builds the cells — one per (name, account, partition, QOS, GPU model): jobs, running, CPU-h, GPU-h,
+billing-h (AllocTRES `billing`, else `billing_rate` over the partition weights, else CPUs) and charged SU; a job with
+GPUs of several models (or a typed and an untyped part) adds each model's GPU-h to that model's cell (the untyped
+rest under "", as `cost._gpu_split` splits the Job detail's) and counts its job, CPU-h and billing once, on its main
+model — the account totals (an account sreport printed no row for, after sreport answered, used 0, for the total as
+for "me"), and a fresh summary for the window, which also refreshes the collector's own summary state (the next
+tick publishes it). Without sreport, `AccountUse(source="sacct")` is summed from the cells, with the note "sreport not
+installed: totals from your job records". **Cost per report**: +1 round trip; 30d = sshare (ctld) + sreport + 1 sacct
+= 3 RPCs, 90d = 5, period ≤ 4 sreport + 13 sacct chunks (each ≤ 0.1 s on the probed clusters), sbank ≤ 1 call per
+account per hour; never on a timer, cached 10 min per (host, window), `r` at most every 60 s.
+
+**Failed parts** (`service.report_failures` / `merged_report`, the service and `agent usage --refresh` alike): a
+report whose sshare, sreport and every chunk failed is never kept or stored (the last good report of that window
+comes back with the errors, else an empty one); a partly failed one takes the failed parts from the last good report
+of the window, each with its own time — balances (`merged_account`), usage and account totals (sreport), the rollup
+(every chunk failing: the old cells, and the report keeps the old `fetched_at`, so its age shows and it is asked
+again). A rollup that could not be read is "rollup unknown (sacct failing | jobs not read | incomplete)" — a sacct
+error, a transport error, a cut / partly unreadable set of chunks — never "no jobs of yours".
+
+**Job cost** (`util/cost.py`, pure; computed, never stored on `Job` — it changes every second and would break
+`job_material_eq`):
+
+```python
+@dataclass(frozen=True, slots=True)
+class JobCost:
+    cpu_h: float | None
+    gpu_h: float | None
+    gpu_h_by_model: Mapping[str, float]       # normalised gres type -> hours; "" = model unknown
+    billing: float | None                     # per hour
+    billing_basis: Literal["tres", "weights", "cpus"] | None   # tres = Slurm's own; weights / cpus = estimate
+    usage_factor: float | None                # None = QOS unknown (sums use ×1, shown ×1?)
+    qos: str | None
+    billing_h: float | None                   # billing × elapsed_h
+    charged_su: float | None                  # billing_h × factor
+    projected_su: float | None                # ACTIVE / PENDING with a time limit: billing × limit_h × factor
+    free: bool                                # factor == 0
+    live: bool                                # ACTIVE: accrues with now
+
+@dataclass(frozen=True, slots=True)
+class Estimate:                               # `agent cost` (§8.7)
+    partition: str
+    billing_per_h: float
+    billing_terms: tuple[tuple[str, float, float], ...]   # (tres key, count, weight) — `gres/gpu:L40S 1×32`
+    billing_basis: Literal["weights", "cpus"]
+    qos: str | None
+    usage_factor: float | None
+    usage_factor_basis: str                   # "--qos" | "AllowQos" | "your last job on gpuxl" | "default normal" | ""
+    hours: float | None
+    su: float | None                          # billing_per_h × hours × factor
+    alternatives: tuple[str, ...] = ()        # ≤ 2 free partitions with the requested GPU type
+    notes: tuple[str, ...] = ()               # every assumption ("8 cpus from DefCpuPerGPU", "no time: per hour only")
+
+@dataclass(frozen=True, slots=True)
+class PartitionClass:
+    partition: str
+    charged: bool
+    basis: Literal["allow_qos", "observed", "weights", "qos", "cpus"]
+    weights: str = ""                         # raw TRESBillingWeights, for display
+    qos: tuple[tuple[str, float], ...] = ()   # the QOS (and factors) the verdict rests on
+
+def job_cost(job: Job, now: datetime, caps: Capabilities | None, *, extrapolate: bool = True) -> JobCost | None:
+    """None for workstation tasks and pending array ranges."""
+def billing_rate(charge: PartitionCharge | None, tres: Mapping[str, float], *, max_tres: bool,
+                 gpu_type: str | None = None) -> float:
+    """Slurm's rule: sum of weight × TRES over the weighted keys (PriorityFlags MAX_TRES: the max over node-level
+    TRES plus the global ones); keys case-insensitive; `mem=0.25G` = per GiB; a typed GPU weight with only an untyped
+    `gres/gpu` count uses gpu_type; no weights -> CPUs."""
+def estimate(caps: Capabilities, *, partition: str, cpus: int | None, gpus: int, gpu_type: str | None,
+             mem_gb: float | None, nodes: int, hours: float | None, qos: str | None,
+             recent: Sequence[Job] = (), partition_gpus: Mapping[str, Collection[str]] | None = None) -> Estimate:
+    """Pre-submit calculator: billing per hour and its terms, SU for `hours`, the factor and its basis, free
+    alternatives, every assumption as text. `partition_gpus` (partition -> GPU types, from the snapshot's
+    `PartitionSummary.gpu_types`) finds the alternatives: free partitions have no typed weights to read them from.
+    ValueError for a partition the charging rules do not know."""
+def classify_partitions(caps: Capabilities, cells: Sequence[UsageCell] = ()) -> list[PartitionClass]: ...
+```
+- **billing**: `alloc.tres["billing"]` → `"tres"`; else `billing_rate` over the job's TRES and its partition's
+  weights → `"weights"`; else `alloc.cpus` → `"cpus"`.
+- **Projection** (`≈`, "at most, if it runs to its limit") for ACTIVE and PENDING jobs with a known limit.
+- **Estimate defaults**, each stated in the notes: CPUs = gpus × `def_cpu_per_gpu`, else 1 per node; QOS, first
+  match: `--qos`; the partition's `allow_qos` when it holds one QOS; the QOS of the user's most recent job on that
+  partition (`recent`); `normal` if it exists; unknown. Free alternatives: ≤ 2 free partitions whose GPU types
+  include the requested one (evidence for the agent; RunFleet never chooses or submits), only when the requested
+  partition is not free.
+- **Helpers** (same module): `tres_counts` (raw TRES -> numbers, mem in MiB), `parse_weights`, `partition_charge`,
+  `usage_factor`, `max_tres`; formatters `fmt_su` (SU, billing-h), `fmt_hours` (CPU-h, GPU-h), `fmt_pct`, `fmt_rate`,
+  `fmt_factor`, `fmt_projection`, `json_amount`, all with a `dash=` for "unknown" (`—` UI, `unknown` agent).
+
+**Rollup grouping** (`util/usage.py: group(cells, by: GroupBy = "experiment") -> list[RollupRow]`, shared by the UI
+and the agent; `GroupBy` = `experiment|task|name|account|partition|gpu`, `GROUP_BYS` the `z` order; a `RollupRow`
+holds the key, jobs, running, CPU-h, GPU-h, GPU-h by model (largest first), billing-h, charged SU (a cell with an
+unknown factor counts ×1 and sets `factor_unknown`) and its accounts; rows by GPU-h, then billing-h, descending). Keys
+come from the job name, following the run skills' convention `<task>--<stage>--<variant>--<origin>--s<seed>--a<attempt>`:
+
+| Grouping | Rule | `mytask-v3--train--lr-cosine--scratch--s0--a01` | `jupyter` |
+|---|---|---|---|
+| **experiment** (default) | strip the trailing `--s\d+` and `--a\d+` fields | `mytask-v3--train--lr-cosine--scratch` | `jupyter` |
+| task | the first `--` field | `mytask-v3` | `jupyter` |
+| name | the full name | as is | as is |
+| account / partition / GPU model | the cell's field | — | — |
+
+Array elements share a name and collapse naturally. Seeds and attempts of one hypothesis answer "which experiment
+spent most" together; a prefix grouping would lose the variant, and a configurable regex is a setting nobody needs
+yet (a later `[general] usage_group_regex` needs no model change).
+
+**Degradation:**
+
+| Situation | Account screen | Host detail line | Job cost / SU column |
+|---|---|---|---|
+| lyra (sbank, limits, weights, free QOS) | full | `pilab_02 298/97,885 SU · …` | SU with factor; free jobs a dim `0` + "free" |
+| limits in `GrpTRESMins`, no sbank | full, no REALLOC column; a period only from a usage reset period | same | same |
+| k2 / vega (no limits, no weights, factor 1) | "usage only — no SU limits on this cluster"; LIMIT / AVAIL / REALLOC hidden; `MY RECENT (decays …)` instead of USED; SU columns titled `BILL-h` | `usage only · 30d 171,881 CPU-h · 15,434 GPU-h · recent 5,859 billing-h (decays)` (the user's own row) | billing-h; the Jobs `SU` column shows them muted with an `h` (`576h`, `≈576h`); help says "= CPU-h here" |
+| no sreport | window totals from the report's rollup, note "sreport not installed: totals from your job records" | balances only | unaffected |
+| no sacctmgr / no slurmdbd | "Slurm accounting not available on this cluster" | nothing | billing from TRES; factor unknown → `×1?` |
+| slurmdbd down | last data dimmed with its age; red line `sreport: slurmdbd not responding · 12m ago · r retries` | last data + age | unaffected (caps) |
+| host stale / retrying | last data dimmed, `as of 2h ago` | same | unaffected |
+| `account_usage = false` | "account usage is off for k2 in config" | nothing | unaffected (caps) |
+| workstation | one dim line `labstation · workstation: no scheduler accounting` | nothing | `—` |
+
+**Display and precision** (`util/cost.py` formatters; values stay floats, rounded only for display; sbank's integers
+are shown as is where sbank is the only source):
+
+| Quantity | Display | JSON |
+|---|---|---|
+| SU, billing-h | ≥ 10: integer with thousands separators (`97,885`, as sbank prints); 0.05 – 10: one decimal; > 0 and < 0.05: `<0.1`; 0: `0` | float, 2 decimals |
+| CPU-h, GPU-h | ≥ 100: integer with separators; 0.05 – 100: one decimal; > 0 and < 0.05: `<0.1` | float, 2 decimals |
+| used % | < 10 %: one decimal; else integer | float, 1 decimal |
+| billing rate | `8/h`, `40/h`, `0.5/h` | float |
+| factor | `×0`, `×1`, `×2`, `×0.5`, `×1?` (unknown) | float or null |
+| projection | `≈ 576 SU at limit` | `projected_su` |
+| unknown | `—` (UI), `unknown` (agent text), `null` (JSON) — never 0 | null |
+
+**Where it shows:** the Account screen (`$`, §7.17); one `account` line in the cluster host detail (§7.3 H); the job
+detail `cost` line, the GPU tab's Cost box and the compact one-liner (§7.3 E, §7.17); the Jobs `su` / `gpuh` columns,
+sort keys and filter terms (§7.5, §7.6); `runfleet agent usage` / `cost`, `job.cost`, `host.account` and
+`snapshot --json` `hosts[].account` (§8.7).
+
 ### 5.3 Workstations (`backends/process/`, `backends/common/nvidia.py`, `backends/common/procfs.py`)
 
 #### 5.3.1 Sections and cadence
@@ -3053,6 +3514,8 @@ Default load per host (steady state, visible):
 | Slurm, hidden | 1.3 | ÷3 | |
 | Workstation | 12 (focused 20) | nvidia-smi 2 + ps 0.5–1 + procfs 1 per tick | ≈ 0.04 CPU-core on labstation |
 | Any host, Search logs… (§4.7.1) | +1 per search the user starts (none otherwise) | `stat` + `tail`/`head`/`grep` over ≤ 20 files, ≤ 1 MiB read, no Slurm RPC | on demand only, never repeated by a timer |
+| Slurm, account summary (`slurm.account`, §5.2.11) | +0 (piggyback) | sshare + sreport per 30 min (hidden: 1 h), sbank per account per 6 h ⇒ ≤ 0.1 RPC/min | rides a regular tick |
+| Slurm, Account screen / `agent usage --refresh` (§5.2.11) | +1 per open, `r` (≥ 60 s apart) or window switch whose report is older than 10 min | sshare + sreport + 1–3 sacct chunks (period: ≤ 4 sreport + ≤ 13 chunks), each chunk ≤ 2 MiB | on demand only, never repeated by a timer |
 
 **Busy controller** (`ControllerBackoff` in the poller): after every tick the controller sections `slurm.squeue`,
 `slurm.sacct`, `slurm.sacct_ids` and `slurm.sinfo` are checked. Stderr matching `Socket timed out|Rate limit|
@@ -3081,7 +3544,15 @@ CREATE TABLE ended_tasks (host TEXT, job_id TEXT, ended_at REAL, json TEXT,     
 CREATE TABLE host_status (host TEXT PRIMARY KEY, at REAL, state TEXT,                -- for `runfleet status` only
                           error_kind TEXT, error TEXT);
 CREATE TABLE host_health (host TEXT PRIMARY KEY, at REAL, json TEXT);                -- for `runfleet agent` only
+CREATE TABLE account_reports (host TEXT, window TEXT, at REAL, json TEXT,            -- Account (§5.2.11): on-demand
+                              PRIMARY KEY (host, window));                           -- reports, one per (host, window)
 ```
+**Account** (additive after 0.8.0): the periodic summary needs no table — it is part of the `snapshots` JSON
+(`HostSnapshot.account`; older rows decode with `account=None`). `account_reports` holds the last `AccountReport` per
+(host, window) as `to_json`: written by FleetService when a report arrives (same 10 s batch), loaded lazily by
+`account_cached`, pruned after 30 days, and dropped with caps / jobmeta / ended tasks on a `dest_hash` change.
+`runfleet agent usage --refresh` upserts its single row directly (an on-demand result: harmless next to a TUI writing
+the same key, newest `at` wins); cache-only readers treat a missing table as empty (caches of 0.8.0 and older).
 `host_status` holds each host's `ConnState` since `at` (with the error's kind and one-liner): FleetService subscribes
 to the store and queues a row when (state, error kind, error summary) changes — never NEW / CONNECTING, which are no
 observation — so the 10 s batch carries at most one row per host; nothing reads it back into the TUI. Caches of
@@ -3245,6 +3716,7 @@ added; `tests/integration/test_signal_script.py` runs the real one.
 | SearchPromptScreen (modal) | `screens/log_search.py` | palette › Search logs…, `ctrl+f` in the Jobs view, `/` in the results | pattern, regex / match-case options, what would be read per host (keymap context `search_prompt`, §4.7.1) |
 | LogSearchScreen (modal) | `screens/log_search.py` | the prompt's `enter` | what was read and every cap; matches per job file with the excerpt highlighted; `enter` pushes LogScreen above it, landed on the hit (keymap context `log_hits`, §4.7.1) |
 | FoundLogsScreen (modal) | `screens/found_logs.py` | `f` in the job detail or the log viewer (own jobs with a workdir) | the log-like files written under the job's workdir while it ran (one `log.find` probe in a worker): path relative to the workdir, size, age, newest first; the job's own stdout/stderr (also as job detail resolved them, carried into the log viewer) and other jobs' logs marked; cursor on the file shown, else `logs.suggest`, never another job's log while another row is left; what was searched and whether the walk was capped or incomplete. `enter` follows the file in the Logs tab / viewer, `r` looks again (keymap context `found_logs`, §4.7.2) |
+| AccountScreen | `screens/account.py` | `$` (global; from a cluster's host detail: that cluster first), palette › Account usage / Account: <host> | per Slurm cluster in scope: balances (used / limit / available SU, reallocation), my usage in the window, charged vs free partitions, and "where it went" — the rollup by experiment / task / name / account / partition / GPU model; `[`/`]` window, `u` me ↔ whole account (§7.17) |
 | SettingsScreen (modal) | `screens/settings.py` | `,`, header `⚙`, palette › Settings, start with a config without hosts | herdr-style panel: Hosts (save / remove / test / add / reorder), General, About (§7.13) |
 
 ### 7.3 Mockups (120×35 unless stated)
@@ -3467,11 +3939,12 @@ lines come from a cached one-shot peek after 1 s of dwell (§4.7), not a stream.
 │ user       alice          account  lab             ││ nodes   1  n-40-01            cpus 8 (64-71)   mem 48G         │
 │ partition  gpu-preempt        qos      gpu-priority││ gpus    1× nvidia_a100-sxm4-40gb   node n-40-01  IDX 2         │
 │ submitted  09-06 11:14 (18h ago)                   ││ tres    cpu=8,mem=48G,node=1,billing=8,gres/gpu=1              │
-│ started    09-07 01:50 (4h07m ago, waited 14h36m)  │├ GPU · source: sstat (Slurm accounting, every 60 s) ────────────┤
-│ ends by    09-10 01:50                             ││ util  ▕█████████▊▏ 98%  (peak 99%)                             │
-│ restarts   0          requeue  yes                 ││ mem   ▕██████    ▏ 24.3 / 40.0 G  (peak 24.3 G)                │
-│ workdir    /shared/lab/alice/orb                   ││ cpu   AveCPU 4:20:02 (≈ 1.05 of 8 cores)   rss 9.9 / 48 G      │
-│ command    /shared/lab/alice/orb/jobs/train.sbatch ││ hints none                                                     │
+│ started    09-07 01:50 (4h07m ago, waited 14h36m)  ││ cost    33.0 CPU-h · 4.1 GPU-h · 33 billing-h (= CPU-h here)   │
+│ ends by    09-10 01:50                             │├ GPU · source: sstat (Slurm accounting, every 60 s) ────────────┤
+│ restarts   0          requeue  yes                 ││ util  ▕█████████▊▏ 98%  (peak 99%)                             │
+│ workdir    /shared/lab/alice/orb                   ││ mem   ▕██████    ▏ 24.3 / 40.0 G  (peak 24.3 G)                │
+│ command    /shared/lab/alice/orb/jobs/train.sbatch ││ cpu   AveCPU 4:20:02 (≈ 1.05 of 8 cores)   rss 9.9 / 48 G      │
+│                                                    ││ hints none                                                     │
 └────────────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
 ┌ stdout · /shared/lab/alice/orb/logs/orb-swp--train--cifar-warmup--s43--a02_2332861.out · 663 B · 12s ago ───── ▌o▐ e ┐
 │ [2026-09-07 01:50:39] host n-40-01  CUDA_VISIBLE_DEVICES=0  torch 2.9.1+cu130                                        │
@@ -3482,7 +3955,6 @@ lines come from a cached one-shot peek after 1 s of dwell (§4.7), not a stream.
 │ [2026-09-07 05:57:01] epoch 43/300  train_loss 0.3087  vs_base -2.47%  212 it/s                                      │
 │ [2026-09-07 05:57:22] epoch 44/300  train_loss 0.3071  vs_base -2.50%  210 it/s                                      │
 │                                                                                                    ── following ──   │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -3555,7 +4027,6 @@ lines come from a cached one-shot peek after 1 s of dwell (§4.7), not a stream.
 │  n-32-03   mixed-      36/28/64       368/503G          8/8  ████████        3090        bob×4 · grace×~4            │
 │  n-38-01   mixed       …              …                 4/4  ████            H200        2333760 · heidi×2           │
 │  n-40-01   mixed       …              …                 3/4  ███░            A100-40G    2332861 · 2332862 +1        │
-│  …                                                                                                                   │
 ├ Jobs on n-31-01 ─────────────────────────────────────────────────────────────────────── next GPU frees in ≤ 2h17m ─┤
 │  JOB        USER       NAME               ACCOUNT        PARTITION    GPU  ELAPSED / LIMIT     LEFT     JOB NAME     │
 │  2333115    carol      Carol Example      lab            gpu-preempt  3    1:42:30 / 4:00:00   2:17:30  llama-ft-lora│
@@ -3566,6 +4037,7 @@ lines come from a cached one-shot peek after 1 s of dwell (§4.7), not a stream.
 ├ Capabilities / connection ───────────────────────────────────────────────────────────────────────────────────────────┤
 │  tools squeue sacct sinfo scontrol sstat less · GPU accounting ✓ (sstat gres/gpuutil) · nvidia-smi ✗ (login node)    │
 │  accounting ✓ · PreemptMode REQUEUE · MinJobAge 300 · assoc lab (gpu-priority, normal, labpi*) *protected            │
+│  account  usage only (no SU limits) · 30d 171,881 CPU-h · 15,434 GPU-h · recent 5,859 billing-h (decays) · $ more    │
 │  ssh k2 · mux: user ~/.ssh/cm-alice@k2…:22 · probe 0.23s · sections ok 4/4 · next poll 7s                            │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -3656,6 +4128,96 @@ Starting RunFleet …
 Lines appear as each probe finishes (at most `max_parallel_ssh` at a time). Hosts that did not answer are followed by
 `Not saved (no answer now): jumpvm. Add later with \`runfleet hosts import jumpvm --write\` (slow logins: raise
 connect_timeout in the config).`
+
+**O. Account screen** (`$`, §7.17; window 30d; demo-shaped data, lyra limits + sbank, k2 usage only). Account rows
+first, then "where it went"; a box that does not fit collapses to its title and a one-line summary (vega).
+
+```
+ RunFleet ▏ALL▕ › Account                                     window ◀ 30d ▶ (since 09-30)              ⟳ fetched 2m ago
+┌ lyra · limits from sshare · sbank 3h ago · usage 2m ago ─────────────────────────────────────────────────────────────┐
+│  ACCOUNT          USED SU   LIMIT SU   AVAIL SU   USED                  REALLOC       MY CPU-h   MY GPU-h  MY BILL-h │
+│  pilab_02             298     97,885     97,587   ▕          ▏  0.3%    2027-01-14         205        2.9        298 │
+│  pilab_02_gpu           0         97         97   ▕          ▏  0.0%    2027-04-02           0          0          0 │
+│  alice                  0      1,000      1,000   ▕          ▏  0.0%    — none set      27,554      3,256     27,554 │
+│  used = since the last reset (no decay) · MY = your usage in the window (sreport, ≤ 1 h behind) · u: whole account   │
+│  charged  gpu  cpu=1 · gpu=32 per hour                                          (qos normal ×1, high ×2)             │
+│  free     free-gpu · free-gpuxl            (AllowQos low ×0, guest ×0: billing-h are recorded but not charged)       │
+├ Where it went · 30d · by experiment · 214 jobs · GPU-h ▼ ───────────────────────────────────────── z group · o sort ─┤
+│  EXPERIMENT                                   JOBS  RUN    CPU-h    GPU-h  BY MODEL                   SU  ACCOUNT    │
+│▶ orb-swp--train--cifar-warmup--scratch          96    3    7,412    1,190  RTX6000 802 · L40S 388      0  alice      │
+│  orb-swp--eval--cifar--fork-warmup              40    0    2,054      512  A30 512                     0  alice      │
+│  lmft-x0--train--lr1e-5--finetune-base           3    0     23.2      2.9  V100 2.9                  116  pilab_02   │
+│  jupyter                                         6    1      182        —  —                         182  pilab_02   │
+│  … 7 more (↓)                                                                                                        │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ k2 · usage only: no SU limits on this cluster · billing = CPUs (no weights) · usage 2m ago ──────────────────────────┐
+│  ACCOUNT          MY CPU-h    MY GPU-h   MY BILL-h   MY RECENT (decays, half-life 14d)                               │
+│  lab               171,881      15,434     171,881   5,859 billing-h                                                 │
+│  partitions  gpu-preempt · cpu-preempt · tmw (qos ×1 everywhere)                                                     │
+├ Where it went · 30d · by experiment · 1,212 jobs · GPU-h ▼ ──────────────────────────────────────────────────────────┤
+│  EXPERIMENT                                   JOBS  RUN    CPU-h    GPU-h  BY MODEL                      BILL-h      │
+│▶ orb-swp--train--cifar-warmup--scratch         640    4   96,210    9,021  3090 6,010 · A100-40G 3,011  96,210       │
+│  … 18 more (↓)                                                                                                       │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ vega: usage only (collapsed, ↓) · labstation, lynx: workstations, no scheduler accounting
+
+
+
+
+
+
+
+ esc back  [ ] window  z group  o sort  u me/account  ↵ jobs  r refresh  ? help
+```
+
+**O2. Account screen at 80×24** — the account table drops the USED bar, MY BILL-h, MY CPU-h, then REALLOC; the
+rollup keeps EXPERIMENT, GPU-h and SU (BILL-h in usage-only mode); other boxes collapse to two lines until focused.
+
+```
+ RunFleet ▏ALL▕ › Account                                     ◀ 30d ▶   ⟳ 2m ago
+┌ lyra · sbank 3h ago · 2m ago ────────────────────────────────────────────────┐
+│  ACCOUNT        USED SU  LIMIT SU  AVAIL SU    MY GPU-h  REALLOC             │
+│  pilab_02           298    97,885    97,587         2.9  2027-01-14          │
+│  pilab_02_gpu         0        97        97           0  2027-04-02          │
+│  alice                0     1,000     1,000       3,256  —                   │
+│  charged gpu · free free-gpu, free-gpuxl (qos low ×0)                        │
+├ 30d · by experiment · GPU-h ▼ ───────────────────────────────────────────────┤
+│  EXPERIMENT                         GPU-h      SU                            │
+│▶ orb-swp--train--cifar-warmup…      1,190       0                            │
+│  orb-swp--eval--cifar--fork-wa…       512       0                            │
+│  lmft-x0--train--lr1e-5--fine…        2.9     116                            │
+│  … 8 more                                                                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ k2 · usage only (no SU limits) · 2m ago ─────────────────────────────────────┐
+│  lab   171,881 CPU-h · 15,434 GPU-h · 171,881 billing-h (= CPU-h)            │
+│  top: orb-swp--train--cifar-warmup… 9,021 GPU-h                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ vega: usage only (↓) · labstation, lynx: no accounting
+
+
+
+
+ esc  [ ] window  z group  r refresh  ? help
+```
+
+**P. Job detail — GPU tab, Cost box** (`cost_box_lines(job, cost, caps, summary)`, above the Attach box; the k2 job of
+mockup E, usage only). On lyra the `usage` line reads `charged   33 SU so far        ≈ 576 SU at limit (3-00:00:00)`,
+a free job `free (qos low ×0) · 33 billing-h not charged`, and `account` adds the balance when `snapshot.account`
+knows the job's account, the verdict first (a narrow box cuts the balance, never the verdict): `pilab_02: this job ≈
+0.6% of what is left · 298 / 97,885 SU used` (muted; ≥ 80 % warning); a projection above what is left `this job
+exceeds what is left (97 SU)` and an exhausted account `no SU left`, both error-coloured.
+
+```
+┌ Cost · as of now (running, accrues every second) ────────────────────────────────────────────────────────────────────┐
+│ elapsed   4:07:12 of 3-00:00:00          account  lab          partition  gpu-preempt                                │
+│ cpu       8 × 4.12 h = 33.0 CPU-h                                                                                    │
+│ gpu       1 × A100-40G × 4.12 h = 4.1 GPU-h                                                                          │
+│ billing   8 per hour (Slurm AllocTRES)    weights of gpu-preempt: none (billing = CPUs)                              │
+│ factor    qos gpu-priority ×1 (UsageFactor)                                                                          │
+│ usage     33 billing-h so far (= CPU-h here)      ≈ 576 billing-h if it runs to its limit (3-00:00:00)               │
+│ account   lab: usage only, no SU limit on k2                                                                         │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
 
 ### 7.4 Responsive rules
 - Header: full form ≥ 110 columns; < 110 drops ages; < 90 shows dots + names only; < 70 dots with numbers (`●1 ●2 ◐3`).
@@ -3787,7 +4349,18 @@ connect_timeout in the config).`
   Header and status line share one sort-direction helper (▲ ascending, ▼ descending; elapsed/GPUs/GPU%/submit sort
   largest-first by default) and the header arrow is never truncated away.
 - **Preview pane**: one-line metadata, resource line, GPU line, last 4–8 log lines from `peek_log` (requested after
-  1 s of cursor dwell; cached; never a stream). Hidden below 20 rows, one summary line below 30.
+  1 s of cursor dwell; cached; never a stream). Hidden below 20 rows, one summary line below 30. The metadata line
+  adds `· 33 SU` (usage-only clusters: `· 33 billing-h`) for a Slurm job with a known cost (Account, §5.2.11).
+- **Cost columns** (Account, §5.2.11; off by default, via `ui.jobs_columns` or Settings): `COLUMNS["su"] =
+  Column("su", "SU", 8, 4, "su")`, `COLUMNS["gpuh"] = Column("gpuh", "GPU-h", 7, 4, "gpuh")`, right-aligned. ACTIVE rows
+  tick at 1 Hz on the ELAPSED path; PENDING rows show the projection dim (`≈576`); unknown `—`; free jobs a dim `0`; on
+  a usage-only cluster the value is billing-h, shown muted with an `h` (`576h`, `≈576h`; `RowContext.usage_only_hosts`)
+  so it is never read as charged SU next to a limits cluster's (help: "SU = charged billing-hours; = CPU-h where a
+  cluster has no billing weights"). Sort keys `su` / `gpuh` (`SortColumn`, `SORT_LABELS` `SU` / `GPU-h`, both in `DESC_DEFAULT`,
+  unknowns last) are **not** in `SORT_CYCLE` (`o` keeps its rhythm): a header click or the palette's `Sort by SU` /
+  `Sort by GPU-h`. `sort_jobs(…, cost=None)` and `matches(job, query, now, cost=None)` take an optional
+  `cost: Callable[[Job, datetime], JobCost | None]` that the screen builds from the store's caps, so `query.py` stays
+  pure; saved views accept the new sort values as they are.
 
 ### 7.6 Filter (`ui/query.py`, pure)
 `/` opens the filter bar (live, 100 ms debounce; `enter`/`tab` returns focus to the table, `esc` clears). Terms are
@@ -3799,6 +4372,9 @@ space-separated and all must match:
 | `host:k2` `h:k2,vega` | host in list |
 | `state:R` `st:pd,f` / `state:failed` / `st:running` | state code, group name (`queued active done failed cancelled ended`) or state name (`running pending completed timeout cancelled`, aliases `oom canceled done`) |
 | `user:me` / `user:alice` | owner |
+| `acct:lab` / `account:lab,pilab_02` | Slurm account in list (Account, §5.2.11) |
+| `part:free-gpu` / `p:gpu,gpuxl` | partition in list |
+| `su:>10` `su:<=0` `gpuh:>=5` | the job's cost (`> >= < <= =`; SU = billing-h on usage-only clusters); `=` compares at the precision the column shows (`su:=33` matches 32.5 … 33.49, `su:=2.9` one decimal below 10, `gpuh` integers from 100); the first numeric terms: a malformed number is a text term, a job with an unknown cost never matches (`!su:>10` keeps it) |
 | `!term` | negation of any term |
 
 State presets (`f` cycles, palette `State: …`): fresh (default) → active → queued → failed (FAILED + ENDED) → all. The
@@ -3869,13 +4445,14 @@ and detail screens keep Textual's focus traversal. `→`/`right` keeps DataTable
 
 | Context | Keys |
 |---|---|
-| Global | `?`/`F1` help · `ctrl+p` or `:` command palette · `,` settings · `q` back (MainScreen: quit) · `ctrl+c` quit now · `esc` close overlay → clear filter → clear marks → back · `0` all hosts · `1`–`9` host N · `/` filter · `r` refresh scope (≥ 3 s per host) · `ctrl+r` refresh all · `+`/`-` poll faster/slower (0.5×…4×, floors apply) · `ctrl+z` suspend · `D` since you were away (§7.14) |
+| Global | `?`/`F1` help · `ctrl+p` or `:` command palette · `,` settings · `$` account usage (§7.17; Textual key `dollar_sign`, in `_KEY_NAMES`) · `q` back (MainScreen: quit) · `ctrl+c` quit now · `esc` close overlay → clear filter → clear marks → back · `0` all hosts · `1`–`9` host N · `/` filter · `r` refresh scope (≥ 3 s per host) · `ctrl+r` refresh all · `+`/`-` poll faster/slower (0.5×…4×, floors apply) · `ctrl+z` suspend · `D` since you were away (§7.14) |
 | MainScreen | `tab`/`shift+tab` next/previous view (Fleet → Jobs → GPUs) |
 | Fleet view | arrows/`hjkl` move between cards · `enter`/double-click host detail · click selects (on a card's job row or a panel activity row: opens that job) · `a` needs you: what needs the user fleet-wide (§7.4) · `space` (or a header chip click) scopes · `c` connect · `C` log in to every host needing auth (§7.15) · `s` host shell · `t` enable/disable polling · `e` error details |
 | Jobs view | `j`/`k`/arrows/wheel move · `g`/`G`/`home`/`end` first/last · `ctrl+d`/`ctrl+u`/`pgdn`/`pgup` half page · `enter`/double-click detail · `l` log viewer · `p` log in `$PAGER` · `ctrl+f` search the logs of your recent jobs in scope (§4.7.1) · `x`/right-click action menu · `ctrl+k` cancel (Slurm) / terminate (task) · `space` mark and move down · `V` mark all visible / clear · `A` mark / clear the row's whole array · `y`/`Y` copy id / copy menu (`Y Y` = stdout path, §7.15) · `s` shell · `P` forward a port · `c` connect the row's host · `f` next state preset · `o` next sort column · `O` reverse sort · `z` cycle grouping · `u` toggle other users' GPU processes · `w` watch / unwatch the row or the marked rows (§7.14) |
 | GPUs view | navigation as Jobs · `enter` owning job/task (or host) · `x` actions of the owning task · `ctrl+k` terminate owning own task · `c` connect the row's host · `a` copy `CUDA_VISIBLE_DEVICES` for N free GPUs (workstations) · `o`/`O` sort |
 | Job detail | `[`/`]` previous/next tab · `o`/`e` stdout/stderr · `F` follow on/off · `l` full log viewer · `L` log viewer landed on the cause chip's line (§5.2.8) · `/` search the log (opens the log viewer with its search box; never the Jobs filter) · `p` pager · `r` refresh detail (reopens a dead stream) · `f` other log files (picked already: switch to it; on it: pick another; §4.7.2) · `x`, `ctrl+k`, `s`, `c`, `y`, `Y`, `P`, `w` as in Jobs · `esc`/`q` back |
-| Host detail | `enter` on a process opens its task · `ctrl+k` terminate task · `x` actions · `u` other users · `o`/`O` sort · `s` shell · `c` connect · `t` enable/disable · workstation: `a` free-GPU picker · cluster: `f` nodes with free GPUs only, `[`/`]` previous/next partition |
+| Host detail | `enter` on a process opens its task · `ctrl+k` terminate task · `x` actions · `u` other users · `o`/`O` sort · `s` shell · `c` connect · `t` enable/disable · workstation: `a` free-GPU picker · cluster: `f` nodes with free GPUs only, `[`/`]` previous/next partition, `$` the Account screen with this cluster first |
+| Account (§7.17) | `j`/`k`/arrows, `g`/`G` move between rows of the focused box (accounts, then rollup) · `tab`/`shift+tab` between boxes · `[`/`]` previous/next window (7d · 30d · 90d · period; unavailable ones skipped) · `z` rollup grouping (experiment → task → name → account → partition → GPU model) · `u` me ↔ whole account · `o`/`O` rollup sort (GPU-h ▼ → SU ▼ → CPU-h ▼ → jobs ▼ → name ▲) / reverse · `enter` on a rollup row: Jobs view filtered to it (state preset `all`) · `r` refresh the focused cluster (≥ 60 s apart) · `ctrl+r` all · `esc`/`q` back (`$` here does nothing) |
 | Log viewer | `F` follow on/off · `G` bottom + follow · `g` top of the buffer · `o`/`e` stream · `/` search the buffer, `n`/`N` next/previous match (`esc` clears) · `]`/`[` next/previous error or warning line (§5.2.8) · `f` other log files (picked already: switch to it; on it: pick another) · `p` pager · `R` reopen the stream · `y` copy path · `c` connect |
 | Modals | Confirm: `y` / `enter` on Confirm, `n`/`esc` cancel, `tab` moves between params and buttons · Action menu: `j`/`k`/`enter` · Notifications: `j`/`k`, `enter` opens the job (a GPU watch: its host) · Since you were away: `j`/`k`, `enter` opens a failed job, `f` filters the Jobs view to it · Needs you: `j`/`k`, `enter` opens the job · GPU watches: `j`/`k`, `n` new watch, `d`/`delete` removes one · Port forwards: `enter` copies the URL again, `ctrl+k` cancels · Prompt: `enter` uses the value, `esc` cancels · Search logs: `tab` to the options, `space` toggles, `enter` in the pattern searches; results: `j`/`k`, `enter` opens the log viewer at the match (`esc` there comes back), `/` edits the search · Other log files: `j`/`k`, `enter` follows the file, `r` looks again, `esc` closes · `F1` in any dialog: help with the dialog's keys · Help: typing filters (`q` included); `?`, `F1` and `esc` close; a glyph legend sits under the keys |
 | Settings | `tab`/`→` and `shift+tab`/`←` section · `j`/`k`/arrows/wheel move · `space`/`enter` toggle host / next value / open · `t` test host · `a` add ssh target · `p` poll a saved host this run left out · `J`/`K` or `shift+↓`/`↑` reorder saved hosts · `/` filter · `e` config in `$EDITOR` · `?` these keys · `esc`/`q`/`,` close (`esc` first leaves the input line or a pending confirm) |
@@ -3896,7 +4473,8 @@ fuzzy-matched commands — no command grammar: `Fleet view`, `Jobs view`,
 `Enable <host>` / `Disable <host>`, `State preset: fresh|active|queued|failed|all`, `Sort by <column>`, `Group by
 none|host|array`, `Save view as…` / `View: <name>` / `Delete view: <name>` (saved Jobs views, §7.6), `Doctor <host>` (runs `FleetAPI.doctor`, shows the report in a modal), `Settings` / `Settings:
 general` / `Settings: about`, `Update RunFleet` (§8.6), `Fleet: roomy cards` /
-`Fleet: compact cards` (§7.4, §7.13), `Search logs…` (§4.7.1), `Action log`, `Notifications` / `Since you were away` / `Watch free GPUs…` / `Watches` (§7.14), `Log in to all hosts
+`Fleet: compact cards` (§7.4, §7.13), `Search logs…` (§4.7.1), `Account usage` / `Account: <host>` / `Sort by SU` /
+`Sort by GPU-h` (§7.17, §7.5), `Action log`, `Notifications` / `Since you were away` / `Watch free GPUs…` / `Watches` (§7.14), `Log in to all hosts
 needing auth` / `Forward a port…` / `Forwards` (§7.15), `RunFleet log`
 (`run_external(service.local_pager_argv())`: the local pager on `runfleet.log`, not LogScreen), `Help`, `Quit`.
 
@@ -4420,6 +4998,79 @@ Nested node sections (owner `node`, each `timeout -k 2 5` via framing; order fix
   `tests/fixtures/attach/` (cases: k2 3 jobs on one node, vega one idle GPU, lyra SLUID cgroup path, `--gres=none` "No
   devices found", pam_slurm_adopt deny, lyra publickey deny).
 
+### 7.17 Account usage screen and job cost (`ui/screens/account.py`, `ui/screens/job_detail.py`; Account)
+The presentation of §5.2.11. Nothing here starts a probe on a timer: the screen reads `FleetAPI.account_cached` and
+asks `account_report` only when opened, on `r` and on a window switch.
+
+**Account screen** (`AccountScreen(FleetScreen)`, mockups O / O2):
+- `$` opens it from any screen (on it, `$` does nothing); the palette has `Account usage` and `Account: <host>`; from a
+  cluster's host detail `$` puts that cluster first and focuses it.
+- One box per **Slurm** host in `rf.scope_hosts()`, in config order; workstations share one dim line at the end.
+  `0`–`9` re-scope as everywhere (`set_scope` posts `ScopeChanged` to an open AccountScreen too).
+- Data flow: on mount and on a scope change it renders at once from `account_cached(host, window)` (else the
+  snapshot's summary), then starts one worker per host: `run_worker(self._fetch(host, window), group=f"acct-{host}",
+  exclusive=True, exit_on_error=False)` calling `account_report(host, window)` — which answers from its cache when
+  the report is younger than 10 min. `r` forces it (`max_age_s=0`) for the focused box, `ctrl+r` for all, at most
+  once per 60 s per (host, window) (else the toast "fetched 20 s ago"). A `ChangeSet(account=True)` repaints.
+- The window (`[`/`]`) starts at `general.usage_window` and is persisted in ui.json `account_window` (never in config;
+  `--demo` and tests do not write it). A host without a period window skips `period`; the header says what the
+  window means: `◀ 30d ▶ (since 09-30)`, `period (since 2026-01-14, inferred: next reallocation − 365d)`,
+  `period (since the monthly reset)`.
+- `refresh_time()` (1 Hz) updates ages only; running jobs' hours in the rollup are a report-time number (`as of`).
+- A stale or retrying host keeps its last report dimmed with `as of 2h ago` (the `stale_banner` pattern). Section
+  errors are one red line inside the box worded from the error kind (`sreport: slurmdbd not responding · 12m ago · r
+  retries`, `sacct refused the date range`), never raw stderr; `account_usage = false` says so.
+- Box: the title carries sources and ages. Account rows: USED SU / LIMIT SU / AVAIL SU, a USED bar (`render.gpu_bar`
+  over the used %, with the GPU-memory thresholds: ≥ 80 % warning, ≥ 95 % error; hidden without a limit), REALLOC (sbank), MY CPU-h /
+  GPU-h / BILL-h; `u` swaps the MY columns for the account totals (the rollup stays "me"). Usage-only clusters hide
+  LIMIT / AVAIL / REALLOC and show `MY RECENT (decays, half-life 14d)` (the user's own sshare row, `my_used_su`;
+  `u`: `ACCT RECENT`, the account row) instead of USED; a usage basis line says what "used" means. Then the charged and free partitions (§5.2.11 rule 5) and "where it went": ≤ 12 rollup rows then
+  `… N more (↓)`, scrolled inside a `VerticalScroll`; `RUN` = jobs running at report time. Boxes beyond the screen
+  height collapse to their title plus a one-line summary; focus or `enter` expands one. At 80 columns the account
+  table drops the USED bar, MY BILL-h, MY CPU-h, then REALLOC (`job_table.fit_columns`).
+- Drawing and layout (as built): the boxes are drawn by the screen into one `Static` inside a non-focusable
+  `VerticalScroll` (the rollup sits under a `├ … ┤` divider of its cluster's box, which Textual borders cannot do).
+  `plan_layout` places them within the screen height, the focused box first, then by `layout_rank`: clusters with
+  SU limits (the most used account first), then the others in config order — so a cluster with SU limits stays
+  expanded (or at least collapsed) when space is short, while the boxes are still drawn in config order. The screen
+  opens with the focus on the first cluster with SU limits (once its summary or report is there), so at 80×24 that
+  one is full; `$` from a host detail focuses that host, and once the user moves the focus (`tab`, j/k across boxes)
+  new data never takes it back. Full with
+  ≥ 3 rollup rows, else collapsed (4 rows: the title as wide as the screen allows, the balances — ≥ 80 % warning,
+  ≥ 95 % error, as on the host detail — or usage in one line, then `top SU: <group> <SU>` on a limits cluster
+  (what spent SU; free GPU-h spend none), else `top: <group> <GPU-h>`, or the first error), else only a mention in
+  the line under the boxes (`vega: usage only (collapsed, ↓)`, at 80 columns `(↓)`; a limits cluster names its most
+  used account: `lyra: pilab_02 97,587 SU left`); the rows left over go to the rollups (focused first, ≤ 12). Only
+  the focused box draws its `▶` cursor row (the others keep their position), so the target of j/k/enter shows
+  without colour too. `tab` / `shift+tab` move the focus between boxes (the focused border is the
+  accent colour); `j` / `k` past a box's last (first) row move on to the next (previous) box, which opens. The
+  rollup window scrolls with the cursor (`… 3 above · 7 more (↓)`). `r` is refused (toast `fetched 20s ago` /
+  `asked 20s ago`) while the report is younger than 60 s or the last `r` of that (host, window) was.
+- `enter` on a rollup row opens the Jobs view with the group as filter (experiment / task / name as a text term,
+  `acct:`, `part:`) and state preset `all`. As built the filter also carries `host:<cluster>`, an account row gives
+  `acct:<account>`, and a GPU-model group (no filter term for it) shows the cluster's jobs with a toast.
+- Keymap context `account` (title "Account usage ($)", §7.8); `test_keymap.OWNERS['account'] = (AccountScreen,)`;
+  every bound action exists on the screen; USER_GUIDE regenerated (`gen_docs --check`).
+
+**Host detail** (cluster): `capability_lines` adds a pure `account_summary_line(summary, width)` after the `assoc …`
+text, from `snapshot.account` only (no probe): `account  pilab_02 298/97,885 SU · pilab_02_gpu 0/97 · alice 0/1,000 ·
+30d 27,759 CPU-h 3,259 GPU-h · $ more`; usage only: `account  usage only (no SU limits) · 30d 171,881 CPU-h · 15,434
+GPU-h · recent 5,859 billing-h (decays) · $ more` (recent = the user's own sshare row, `my_used_su`, like the `30d`
+figures; `agent host` the same); never read: `account  not read yet (every 30 min; $ reads it now)`.
+An account at ≥ 80 % of its limit is warning-coloured; accounts are cut with `…+N` and the line wraps (`#caps-box`
+wraps already). Workstations unchanged.
+
+**Job detail** (Slurm jobs; `util/cost.job_cost` with the host's caps, re-rendered by `refresh_time()` for ACTIVE
+jobs):
+- Summary › Resources: a `cost` line under `tres` (mockup E): `33.0 CPU-h · 4.1 GPU-h · 8/h × normal ×1 = 33 SU ·
+  ≈ 576 SU at limit`; free: `4.1 GPU-h RTX6000 · free (qos low ×0) · 33 billing-h not charged`; usage only: `33.0
+  CPU-h · 4.1 GPU-h · 33 billing-h (= CPU-h here)`; pending: `≈ 576 SU if it runs to its limit (billing from weights:
+  estimate)`; unknown QOS: `… × qos? ×1? …`.
+- Compact layout (< 110×30, 80×24 included): one line next to `efficiency_summary` / `priority_summary`: `cost 4.1
+  GPU-h · 33 SU (≈ 576 by limit)`, never longer than one line (the log keeps its minimum height of 6).
+- GPU tab: the Cost box (mockup P), above `#attach-box`; its `account` line only when `snapshot.account` knows the
+  job's account.
+
 ---
 
 ## 8. Configuration
@@ -4467,6 +5118,7 @@ refresh_multiplier = 1.0
 pager = ""                     # default: $PAGER, else "less -R +G"
 remember_hosts = true          # `runfleet k2` saves k2 here once it answers (Settings › General)
 update_check = true            # once a day, ask GitHub for the newest RunFleet version (§8.6)
+usage_window = "30d"           # Account (§5.2.11): 7d | 30d | 90d | period — Account screen, summary, agent usage
 
 [ui]
 gpu_util_thresholds = [10, 75]
@@ -4483,6 +5135,9 @@ sacct_window = "3d"
 log_templates = []             # e.g. ["{workdir}/logs/{name}_{jobid}.out"]
 attach = "ssh+srun"            # Attach (§7.16): "ssh" | "ssh+srun" | "srun" | "off"
 attach_refresh = "15s"         # floor 10s; ssh auto-refresh only (srun never auto-refreshes)
+account_usage = true           # Account (§5.2.11): balances + usage summary and the Account screen's reports
+poll_account = "30m"           # floor 15m; ×2 when the host is not on screen
+allocation_period = "365d"     # period window = next reallocation (sbank) − this; "0" = unknown (no such window)
 
 [defaults.workstation]         # → HostConfig.workstation
 poll_gpu = "5s"                # floor 2s
@@ -4541,6 +5196,9 @@ name = "lynx"
 | `poll_*` | duration | from defaults | clamped to floors with a warning |
 | `log_templates` | list[str] | [] | placeholders `{workdir} {name} {jobid} {array_job} {task} {user}` |
 | `protected_partitions`, `protected_qos` | list[str] | [] | mutating actions disabled on matching jobs |
+| `account_usage` | bool | true | Slurm: the account summary (`slurm.account`) and on-demand reports (§5.2.11); false = neither, the Account screen says so |
+| `poll_account` | duration | 30m | Slurm: account summary period, floor 15m (`SLURM_FLOORS["poll_account"] = 900`) |
+| `allocation_period` | duration | 365d | Slurm: the `period` window starts this long before the next reallocation (sbank); `"0"` = unknown, no period from sbank (a usage reset period still gives one) |
 | `task_min_age`, `task_min_cpu`, `ignore`, `kill_grace` | see defaults | | workstation only |
 
 Slurm/workstation keys written flat in `[[host]]` (`users`, `partitions`, `poll_jobs`, `kill_grace`, …) override the
@@ -4744,6 +5402,10 @@ runfleet agent log    HOST:ID [--stream out|err] [--lines N≤400] [--bytes N≤
 runfleet agent gpus   [HOST…] [--type T] [--min N]
 runfleet agent host   HOST
 runfleet agent events --since DUR|ISO [HOST…]
+runfleet agent usage  [HOST…] [--window 7d|30d|90d|period] [--by experiment|task|name|account|partition|gpu]
+                      [--scope me|account]          SU balances, my / the account's usage, where it went (Account)
+runfleet agent cost   HOST --partition P [--gpus N] [--gpu-type T] [--cpus N] [--mem 64G] [--nodes N] [--time DUR]
+                      [--qos Q] [--account A]       pre-submit estimate: pure calculation, never ssh, never submits
 runfleet agent help   [VERB]
 common: --json  --refresh  --timeout SEC (whole call, default 30)  --limit N; global -c, --demo, --demo-seed, --debug
 ```
@@ -4819,6 +5481,80 @@ big; JSON `other_logs`). MCP `read_log` takes `list_files` and `file`. One end-t
 it) and the probe; past it plus 5 s the answer is a no-data document. `--demo` polls the simulated fleet in memory
 (instant probes, no lock, no cache).
 
+**Account usage and job cost** (§5.2.11; additive after 0.8.0, AGENT_INTERFACE §3.14–§3.15):
+- `usage` reads `snapshot.account` (the default window) and `account_reports` rows (other windows, `--by`,
+  `--scope account`) from the cache. A window or rollup never fetched is problem `no_data` (reason
+  `usage_window_not_cached`) with the exact `next` (`runfleet agent usage lyra --window 90d --refresh`). `--refresh`
+  first runs the usual bounded refresh (which runs a due `slurm.account` group), then, when `--window` is not the
+  default or `--by` / `--scope account` is given, one `FleetAPI.account_report` per selected Slurm host through
+  `source.read_usage` (built like `read_log`: a throwaway read-only FleetService, `lock_path=False`, `wait_for`, AUTH
+  without network for a session host waiting for a login); the report is upserted into `account_reports`; a report
+  younger than 10 min is used as is (not `stale`). Text budget 4096: per host the mode and ages, one line per account
+  (`pilab_02  298 / 97,885 SU used · 97,587 left · realloc 2027-01-14 · 30d me 205 CPU-h 2.9 GPU-h`; sbank's "No data
+  found." is `realloc none set`; a decayed basis `298 SU recent (decays, half-life 7d) / 97,885 limit · …`; usage only
+  `recent me 5,859 · account 2,503,304 billing-h (decays, half-life 7d)`), the charged and free partitions, the top
+  rollup rows (none read: `rollup unknown (sacct failing | jobs not read | incomplete)`; "(last good values kept)" only after
+  the periodic summary's errors, which keep them). JSON `runfleet.agent.usage/1` (budget 12288): `window`, `by`,
+  `hosts_usage[]{host, mode, summary_at, summary_age_s, sbank_at, accounts[]{account, limit_su, used_su, my_used_su,
+  available_su, used_basis, limit_source, next_realloc, realloc_known, period_start, period_inferred, me{cpu_h, gpu_h,
+  billing_h}, account_total}, partitions{
+  charged[], free[]}, rollup{at, jobs, truncated, rows[]{key, jobs, running, cpu_h, gpu_h, gpu_h_by_model, billing_h,
+  charged_su}}, notes[], errors[]}`. `limit_su: null` means "no limit known", never "unlimited". Exit 0 ok, 4 partial
+  (a host's sections failing or stale), 1 no data (`usage_window_not_cached` everywhere, or no Slurm host).
+- `cost` is pure: cached caps (`partition_charges`, `qos_usage_factor`, `PriorityFlags`) and the user's cached jobs
+  (QOS default) through `util/cost.estimate`; `--refresh` only refreshes caps (re-detect when older than 6 h); caps
+  older than 24 h add "charging rules as of 2d ago". Validated before any IO (`build_request`, UsageError exit 2):
+  `--time` a positive duration, `--gpu-type` a typed key seen in weights or GPU types; an unknown partition is exit 1,
+  `not_found` with the known partitions. Text budget 2048 (`lyra gpuxl · 1× L40S · 8 cpus (--cpus) · 24h · qos normal
+  ×1 (your last job on gpuxl)` / `billing 40/h = cpu 8×1 + gres/gpu:L40S 1×32` / `cost 960 SU for 24h · pilab_02:
+  97,587 SU left → 1.0 %` / `cheaper free-gpuxl has L40S, qos low ×0 (preemptible)`); JSON `runfleet.agent.cost/1`
+  (budget 4096): `host, partition, request{…}, billing_per_h, billing_terms[{tres, count, weight}], billing_basis,
+  qos, usage_factor, usage_factor_basis, hours, su, su_min, su_max, account{account, basis, available_su, share_pct,
+  exceeds, as_of}, candidate_accounts[{account, available_su, share_pct, exceeds}], alternatives[], notes[],
+  caps_age_s`. Account names compare ignoring case (sbank prints them upper-cased; the output echoes the canonical
+  name). An estimate above what is left says so (`account.exceeds: true`, a first note `exceeds what is left on
+  pilab_02_gpu (97 SU)`, text `account pilab_02_gpu: EXCEEDS what is left (1,560 > 97 SU left)`). No account picked
+  (no `--account`, no job of the user's on the partition, more than one limited account) on a cluster with SU limits:
+  `candidate_accounts` lists every limited account that may run there (its associations name the partition, or name
+  none), the least left first (text `accounts pilab_02_gpu 97 left (EXCEEDS) · alice 1,000 left (EXCEEDS) · …`).
+  No `--gpu-type` on a partition whose weights name typed GPUs only (gpuxl: `gres/gpu:L40S=32,gres/gpu:RTX6000=64`;
+  Slurm charges the typed key of the GPU it allocates): the cost is the range over those models, `su_min` / `su_max`
+  with `su` the highest (text `cost 792-1,560 SU for 24h (L40S…RTX6000; pass --gpu-type)`), never the CPU-only
+  figure.
+- `job_json(job, now, *, caps=None)` gains `cost{cpu_h, gpu_h, gpu_h_by_model, billing, billing_basis, qos,
+  usage_factor, billing_h, charged_su, projected_su, free, live, as_of}` (null for tasks and other users' rows:
+  `_OTHER_NULL`; data older than 5 min: `as_of` = observed_at, nothing extrapolated); the card adds `  cost     4.1
+  GPU-h (A100-40G) · 33 CPU-h · 8/h × normal ×1 = 33 SU so far · ≈ 576 at limit`, in `_CARD_OPTIONAL` (cut first).
+  `agent jobs` gains `--sort su|gpuh` (no SU column in text: the 8 KB budget); `agent host` an `account` line (as the
+  host detail's) and JSON `host.account`; `runfleet snapshot --json` `hosts[].account` (additive, `runfleet.snapshot/1`).
+- MCP tools `account_usage` (verb `usage`: `hosts`, `window` enum, `by` enum, `scope` enum, `limit`, `refresh`,
+  `timeout`) and `estimate_cost` (verb `cost`: `host`, `partition` required; `gpus`, `gpu_type`, `cpus`, `mem`,
+  `nodes`, `time`, `qos`, `account`, `refresh`, `timeout`), both read-only like every tool; INSTRUCTIONS map `usage|cost
+  = account_usage, estimate_cost`. The skill (`metadata.runfleet-skill: "3"`, still ≤ 80 lines: lines are merged, not
+  added) gets one command line for both verbs and one rule: before a large launch, `agent cost` and `agent usage`;
+  when SU is low, offer a free partition from `alternatives` — hpc-run chooses the account / partition and submits.
+  `references/with-run-skills.md` gets "Budget before a launch", `references/reading-output.md` the summary's age,
+  "limit null = no limit known" and "SU = billing × hours × QOS UsageFactor". `agent help` ≤ 2 lines per verb.
+- As built: `hosts_usage[]` also has `state` (`ok`, `usage_window_not_cached`, `not_read` — a summary never read;
+  its `next` is the plain `--refresh` —, `off`, `no_accounting`, `workstation`, `no_data`), `next` (the exact refresh
+  command; JSON: with `--json`), `report_at` / `report_age_s` and `window_start`; `mode` is `none` where nothing is
+  read. Without `--by`, a cached report of the asked window still adds its rollup (by experiment); `--limit` is
+  rollup rows per host (default 5, ≤ 50), a cut ends in `# +N more → … --by B --limit N`. Account errors leave as
+  `{section, kind, at, age_s}` (`sreport failing (remote, 12m ago)`), never the HostError text. `cost` JSON adds
+  `unit` (`SU` / `billing-h`), `account.basis` (`--account`, "your last job on P", "your only account with an SU
+  limit": the default account in that order), `share_pct` and `known_partitions`. `cost --refresh` is the usual
+  bounded refresh (detection re-reads caps older than `CAPS_MAX_AGE`, not 6 h); an unknown `--gpu-type` is a usage
+  error raised after the cache read (the known types are the cached rules'). `usage --refresh` fetches through
+  `source.read_usage`: a throwaway read-only FleetService seeded with the cached snapshot (`FleetService.seed_host`,
+  not in FleetAPI: caps and the summary's sbank dates reach the collector without a probe; `restore_account` gives the
+  period at once), stored with `core.cache.upsert_account_report` (reports where something was read only; a
+  transport failure, or every section failing, answers the cached report with the errors; a partial failure is
+  merged with the cached report like the service's, `merged_report`). `--demo` fetches the asked window's report in memory. Array members
+  listed under an array parent carry `cost: null` (the 6 KB budget holds the members; `agent job HOST:ID_N` has it).
+  The help overview prints two lines per verb, `help VERB` the whole entry. `util.cost.estimate` never defaults to a
+  QOS the partition's AllowQos refuses: `normal` only when allowed, else AllowQos's first QOS when all of them charge
+  alike (basis `AllowQos (all alike)`).
+
 **`host_health`** (§5.5) is what makes per-data ages honest: the poller rewrites one row per host with each snapshot
 (state, section `ok`/`last_ok`/`error_kind`, latency, failures, controller slowdown, tick, `dest_hash`,
 `remote_user`; never summaries). Caches without it fall back to the snapshot's `taken_at` for jobs and unknown for the
@@ -4838,7 +5574,7 @@ the job list is current and the id is inside what the data covers), `outside_cov
 `no_log_path`, `not_listed` (`log --file`: not a file the find lists under the job's workdir; reason `outside` / `workdir` / `directory`: refused before it), `partial`, `cache_busy`, `config_mismatch`, `no_ssh`, `error`, `internal`.
 
 **Budgets** (serialized bytes; text / JSON): brief 2 / 6 KB, jobs 8 / 40 KB (40 rows), job 3 / 6 KB each, log 24 /
-32 KB, host and gpus 4 / 12 KB, events 6 / 24 KB (≤ 100), help 6 / 8 KB. A cut keeps problems, then attention, then
+32 KB, host and gpus 4 / 12 KB, events 6 / 24 KB (≤ 100), usage 4 / 12 KB, cost 2 / 4 KB, help 6 / 8 KB. A cut keeps problems, then attention, then
 rows, and ends in `# +N more → <exact command>` / `truncated{shown,total,next}`. Per field: names 160, paths 240,
 hints 120, log lines 400 characters, marked `…[+N]`.
 
@@ -4953,7 +5689,7 @@ the client's if supported, else the newest; `instructions` point to `fleet_brief
 `notifications/*` (no reply), `ping`, `tools/list`, `tools/call`; a JSON array is a batch under 2025-03-26 only;
 anything else -32601, malformed JSON -32700, a malformed envelope -32600. Tools, all
 `readOnlyHint`/`idempotentHint`/`openWorldHint`: `fleet_brief` `list_jobs` `job_detail` `read_log` `gpu_availability`
-`host_health` `fleet_events` `runfleet_help`; their `inputSchema`s (`additionalProperties: false`) mirror the verb's
+`host_health` `fleet_events` `account_usage` `estimate_cost` `runfleet_help`; their `inputSchema`s (`additionalProperties: false`) mirror the verb's
 CLI flags in snake_case (`timeout` ≤ 120 s; `--limit` only where it limits rows; a test checks the mirror; a null
 argument counts as omitted). Arguments outside the schema are -32602; each call is `commands.run` with the server's
 `-c` / `--demo` (config re-read per call) in a daemon thread capped at timeout + 15 s, so the loop keeps answering
@@ -5006,6 +5742,8 @@ the UI. Each row names the detection rule implemented in `transport/classify.py`
 | 28 | MaxSessions / too many sessions | stderr #7; lane limits | — | — | ≤ 3 sessions on a user master, global cap 8, lane drops to 1 on refusal |
 | 29 | Second RunFleet instance | a host's `instance.lock.*` held | — | toast once | none (user decides) |
 | 30 | Unattended for hours | no input for `idle_pause_after` | all hosts paused | header "paused (idle)" | any key/mouse resumes and refreshes |
+| 31 | Account sections fail (Account, §5.2.11) | `slurm.acct_*` outcome / stderr (slurmdbd as #11) | DEGRADED (account) | summary and report keep their last values with ages; one red line in the Account box | `slurm.account` backoff ×2 ≤ 2 h; reports only on demand |
+| 32 | sacct refuses a wide date range (k2) | empty stdout + `Too wide of a date range` on stderr (rc 0 through a pipe → STDERR_ONLY) | report error (REMOTE) | "sacct refused the date range" — never "no jobs" | none needed: chunks are ≤ 30 days; a cluster refusing even those keeps the error |
 
 ---
 
@@ -5028,7 +5766,8 @@ config evaluation, no network) in the jump-rewrite golden test.
 `tests/conftest.py` provides `sample(host: str, name: str) -> str` reading `tests/fixtures/samples/<host>/<name>.txt`
 byte-exact (no copies). `meta(host, probe) -> dict` parses `_meta*.txt` (rc, ms, stderr); when a probe name appears in
 several meta files (`sacct_completed_gpu_tres`: rc 1 `sacct -j NONE` in `_meta_followup`, the real rc 0 run in
-`_meta_followup2`), the **last entry in file order** (`_meta`, `_meta_followup`, `_meta_followup2`) wins. Helper
+`_meta_followup2`), the **last entry in file order** (`_meta`, `_meta_followup`, `_meta_followup2`, `_meta_account`
+— the account field probes, §5.2.11) wins. Helper
 `frame(sections: dict[str, tuple[str, int, str]], nonce) -> str` builds framed probe output. Collector tests that need
 stderr inline (the scontrol loop uses `2>&1`) build stdout = fixture stdout + meta stderr (e.g. k2
 `scontrol_show_job_finished.txt` is empty because the error went to stderr). A coverage test asserts that every sample
@@ -5056,6 +5795,15 @@ Mandated parser assertions (minimum; Appendix B lists file → test module):
   `%i|%j|%T|%M|%l|%D|%R|%b|%C|%m|%P|%V|%S|%Z|%o` (the legacy parser takes the spec as a parameter).
 - `*/sacct_ext`: `CANCELLED by 2100007` → CA + uid; `None assigned` → no nodes; `Start None`; `FAILED 2:0` →
   exit 2; `End Unknown` for RUNNING.
+- Account (§5.2.11; fixtures from the account field probes, anonymised like the rest: real accounts → `pilab_02`,
+  `pilab_02_gpu`, `pilab_03`, the probing user's own account → `alice07` on lyra, `campus01` on k2, `pilab` / `dept`
+  on vega; logins → `alice07` / `alice0001`; sreport's Proper Name column never kept; sbank member rows dropped):
+  `lyra/acct_share` → `pilab_02` limit 97,885 SU, used 298, a leading-space own row stripped; `k2/acct_share` →
+  no limit (usage only); `*/acct_sreport` minutes → hours per account and TRES; `*/acct_sreport_totals` the account rows (Login
+  empty) and my rows, the real combined output (`-t Minutes`); `lyra/acct_sbank` → `Next reallocation: 2027-01-14` and `No data found.`, upper-case names matched;
+  `*/acct_jobs` → typed GPU keys case-insensitive, `ElapsedRaw` 0 absent, JobName last; `k2/acct_jobs_too_wide`
+  (empty stdout, the stderr in `k2/_meta_account`) `Too wide of a date range` → REMOTE error, not empty; `lyra/scontrol_partitions_charges` (`TRESBillingWeights`,
+  `QoS`, `AllowQos`) → `partition_charges`; `*/sacctmgr_qos` → `qos_usage_factor` (`low` 0, `high` 2).
 - `lyra/sacct_failed_job_steps`: allocation PREEMPTED, batch `FAILED 143:0` → explanation "SIGTERM (128+15)" +
   "PreemptMode CANCEL: killed, resubmit".
 - `k2/sstat_running`: util mean 98 (1 GPU, NTasks 1, Tot = Ave), peak 99, mem 24870 MiB, extern ignored.
@@ -5123,6 +5871,22 @@ Mandated parser assertions (minimum; Appendix B lists file → test module):
   line → cut with marker; multi-byte UTF-8 split across chunks.
 - Store diffs: `job_material_eq` ignores elapsed-only changes; `HostState.stale` uses the effective tick.
 - ActionService: re-plan on param change, readonly/host/stale disabled reasons, ≤ 1 on-demand probe on a user master.
+- Account (§5.2.11): the politeness test still holds with `slurm.account` enabled (piggyback: no extra probe); hidden
+  ×2, controller slowdown and backoff on a failing sreport; `merge_outputs` / `store.apply` keep the last non-None
+  `account` and set `ChangeSet.account`; `notify_account`; `FleetService.account_report`: cache hit under `max_age_s`,
+  one probe (purpose `account`) on the on-demand lane, never raises (a transport error → report with errors), allowed
+  read-only, a workstation → empty report, persisted in and reloaded from `account_reports`, dropped on a `dest_hash`
+  change; snapshot JSON without `account` decodes; the table is created on an old cache. Pure: `util/cost`
+  (`job_cost` running / ended / pending / free / unknown QOS / MIG / multi-node, `billing_rate` incl. typed and
+  case-insensitive weights, `mem=0.25G`, MAX_TRES, `estimate` defaults, the display table), `util/usage` grouping keys.
+- Account, agent (§8.7; `tests/agent/test_usage_cost.py`): `job.cost` keys and values, the card's `cost` line
+  (charged, free, pending, as of an old sighting) cut first, other users' `cost` null, `jobs --sort su|gpuh`; `cost`
+  against the mockup lines, defaults and notes, old charging rules, unknown partition / workstation / no rules,
+  usage-only billing-h; `usage` from the summary, `usage_window_not_cached` with its exact `next`, a cached report's
+  rollup and `--limit` cut, period fallbacks, failing sections as fixed texts, the off / no-accounting / not-read
+  states, both budgets; the `host` account line; validation before any IO; on a cache written by the demo fleet:
+  cache-only answers, `read_usage` upserting a report and reusing it within 10 min, a login-waiting session host
+  never probed; the upsert keeps the newest report; CLI and the MCP tools `account_usage` / `estimate_cost`.
 
 ### 10.4 Shell integration with mock Slurm (turm's idea)
 `tests/mockbin/{squeue,sacct,scontrol,sinfo,sstat,scancel,sprio,sshare,nvidia-smi}` are small `sh` scripts that print a fixture
@@ -5163,7 +5927,11 @@ real stack afterwards:
    target; `J`/`K` reorder the cards; General values change by key and by click; a broken config shows its error.
 Snapshots (SVG): fleet, jobs, job detail, host (ws), host (cluster), log viewer, help, confirm, settings at 120×35;
 fleet, jobs, job detail and settings at 80×24; fleet at 100×30 (compact, no wrapped lines), 120×40 and 172×62 (roomy),
-and 172×62 with a Slurm host needing auth over its cached data. A stability test runs the demo stack for 60 simulated
+and 172×62 with a Slurm host needing auth over its cached data. Account (§7.17): `account` (120×35, `$`),
+`account_80x24`, `account_7d` (`$ [`), `account_rollup_task` (`$ z`), `account_scope_k2` (`$ 1`),
+`host_cluster_account` (k2's host detail with its summary read: the `account` line), `jobs_su` (columns
+`su`, `gpuh`), `job_detail_cost_gpu_tab` (k2:2332861, `]`); `FakeService` gains `account_report` / `account_cached`
+(lyra limits + reallocation + a free and a charged row, k2 / vega usage only, one slurmdbd-down case). A stability test runs the demo stack for 60 simulated
 minutes in 5 s steps at 172×62 and 120×40: the plan, card and panel heights never change and no line is wider than its
 card.
 
@@ -5193,6 +5961,21 @@ card.
   (half-life 0, reset monthly; age, fair share and QOS weighted), lyra has every weight 0 (not ranked: no sprio/sshare).
   `render.sprio` weights the user's pending jobs from the cluster's own `PriorityWeight*` (age over 7 days, fair share
   from `SimCluster.shares`, job size, `partition_tier`, QOS) and refuses a non-multifactor cluster like the real one.
+  Account (§5.2.11): lyra is the lyra of the field probes — tools `sreport`, `sbank`; account limits (billing minutes)
+  `pilab_02` 5873100, `pilab_02_gpu` 5820, `alice` 60000; reallocations 2027-01-14, 2027-04-02, none (`No data
+  found.`); QOS factors `normal` 1, `low` 0, `guest` 0, `high` 2; `PriorityDecayHalfLife` 0 (usage since the last
+  reset); `free-gpu` / `free-gpuxl` with `AllowQos=low,guest` and no weights; a charged `gpu` partition
+  (`TRESBillingWeights=cpu=1,gres/gpu=32`, `AllowQos=normal,high`) on the V100 nodes as their second partition, with
+  one completed job of alice's on `pilab_02` there, so the rollup has a charged row. k2 and vega: `sreport`, no sbank,
+  no limits, no weights, every factor 1, `billing` = CPUs, sshare usage as their priority setups above say (k2
+  decays, half-life 14 days; vega does not decay and resets monthly, so its period window is the month). The user's
+  older allocations are synthetic (`SimCluster.history()`: seeded per cluster, generated on first use, named by the
+  run skills' convention, ending 4 days before the scenario so the Jobs table never lists them); sreport, the `sacct`
+  rollup and sshare are all computed from them plus the world's own jobs, so they agree with each other. The other
+  members' usage is fixed per account (`others_share` for sshare, `others_30d` for sreport, scaled linearly to the
+  window); sbank's reallocation is a month-day, printed as its next date after the demo's start. sreport and the
+  `acct_jobs` chunks fail with `slurmdbd_down` (sbank prints the error inside each account block); k2's sacct refuses
+  ranges over 45 days like the real one.
 - `demo/render.py` emits **byte-exact real formats** for every section in Appendix A (squeue `-O` with the separator
   suffix, sacct `--delimiter`, epoch timestamps, scontrol `-o` with `SubmitLine` spaces, sstat TRES incl. Tot, sinfo
   GRES with `mixed-`, nvidia-smi CSV with `[N/A]`, ps). A WP4 test feeds `render` output through WP2's parsers
@@ -5348,6 +6131,11 @@ Owner = `Section.owner` (name prefix). All `meta` values are also interpolated (
 | `slurm.names` | `users: list[str]` | GECOS names of those users |
 | `slurm.sprio` | `format: str` (`SPRIO_FORMAT`, a constant) | own pending jobs' weighted priority factors (§5.2.10) |
 | `slurm.sshare` | `fields: list[str]` (constant) | the user's fair share per account (§5.2.10) |
+| `slurm.qos` (Account) | — | QOS UsageFactor (detection, §5.1) |
+| `slurm.acct_share` (Account) | `accounts: list[str]` | account limits + charged usage, own rows (§5.2.11) |
+| `slurm.acct_sreport`, `slurm.acct_sreport.p<i>` (Account) | `accounts: list[str]`, `start: str` (`now-<N>days` or `YYYY-MM-DD`), `totals: bool` | CPU-h / GPU-h / billing-h per account in the window: mine (+ the accounts' totals) |
+| `slurm.acct_sbank` (Account) | `accounts: list[str]` | reallocation dates, sbank balances (≤ every 6 h; report: ≤ every 1 h) |
+| `slurm.acct_jobs.c<i>` (Account) | `older_days: int`, `newer_days: int`, `sep: str`, `fields: list[str]` | my allocations in one ≤ 30-day chunk (on-demand report) |
 | `slurm.act.cancel`, `slurm.act.hold`, `slurm.act.release` | `ids: list[str]` (display ids, throttle stripped) | actions |
 | `slurm.act.requeue` | `ids: list[str]`, `hold: bool` | action |
 | `procfs.host` | — | load, mem, cpu, uptime |
@@ -5379,7 +6167,8 @@ Owner = `Section.owner` (name prefix). All `meta` values are also interpolated (
 | `*/sinfo_nodes_O`, `*/sinfo_parts`, `*/sinfo_summary` | `tests/backends/slurm/test_parse_sinfo.py` |
 | `*/sstat_running` | `tests/backends/slurm/test_parse_sstat.py` |
 | `*/slurm_config_priority`, `*/sprio`, `*/sshare` | `tests/backends/slurm/test_priority.py` |
-| `*/slurm_config`, `*/slurm_env`, `*/sacctmgr_assoc`, `*/sinfo_version`, `*/stdout_path_stat` | `tests/backends/slurm/test_caps.py` |
+| `*/slurm_config`, `*/slurm_env`, `*/sacctmgr_assoc`, `*/sinfo_version`, `*/stdout_path_stat`, `*/sacctmgr_qos`, `lyra/scontrol_partitions_charges` | `tests/backends/slurm/test_caps.py` |
+| `*/acct_share`, `*/acct_sreport*`, `lyra/acct_sbank`, `*/acct_jobs`, `*/_meta_account` | `tests/backends/slurm/test_account.py` |
 | `labstation/*`, `lynx/*` (`gpu_query*`, `compute_apps*`, `nvidia_smi_version`) | `tests/backends/common/test_nvidia.py` |
 | `*/resources`, `*/proc_stat`, `*/meminfo` | `tests/backends/common/test_procfs.py` |
 | `*/gpu_pids_ps`, `*/my_procs` (+ `compute_apps`) | `tests/backends/process/test_tasks.py` |
@@ -5396,6 +6185,12 @@ Owner = `Section.owner` (name prefix). All `meta` values are also interpolated (
 5. `sacct --format=StdOut,StdErr` per cluster — capability-gated, no code risk.
 6. sstat on one's own lyra jobs: CPU/RSS without GPU TRES (M3, if a job is running).
 7. v0.2 gates, not v0.1: `srun --overlap` deep-inspect flags/latency on k2/vega; pam_slurm_adopt node ssh; slurmrestd.
+8. Account (§5.2.11; verified 2026-10: decay settings, sshare `-A` rows, sreport columns and starts, sbank, partition
+   charges, squeue billing, QOS UsageFactor, sacct range limits). Still open, read-only: `sacct -S now-<a>days -E
+   now-<b>days` (a relative end) on all three; the combined report sreport (`accounts=` + the `awk` keeping account
+   rows and mine) column positions after `cut`; whether any cluster charges by the partition QOS's UsageFactor
+   (lyra says no: the job-QOS rule); the sacct chunk size on clusters other than k2 (30 days everywhere is safe, at
+   most 13 RPCs for a one-year period).
 
 ## Appendix D — Critique disposition (revision 1 → 2)
 

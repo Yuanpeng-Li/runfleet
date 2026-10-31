@@ -1,0 +1,9 @@
+lyra|pilab_02|alice07|cpu|17888
+lyra|pilab_02|alice07|gres/gpu|0
+lyra|pilab_02|alice07|billing|17888
+lyra|pilab_03|alice07|cpu|158596
+lyra|pilab_03|alice07|gres/gpu|0
+lyra|pilab_03|alice07|billing|158596
+lyra|alice07|alice07|cpu|465520
+lyra|alice07|alice07|gres/gpu|69295
+lyra|alice07|alice07|billing|465520

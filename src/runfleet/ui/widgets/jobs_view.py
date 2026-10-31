@@ -23,12 +23,13 @@ from textual.widgets import DataTable
 from runfleet.core.service import LogPeek
 from runfleet.models import ConnState, Job, JobKey, StateGroup
 from runfleet.ui import keymap, query, saved_views, theme
-from runfleet.ui.query import PRESET_LABELS, SORT_LABELS, Preset, SortColumn
+from runfleet.ui.query import PRESET_LABELS, SORT_LABELS, CostFn, Preset, SortColumn
 from runfleet.ui.saved_views import GROUPS, SavedView
 from runfleet.ui.widgets.filter_bar import FilterBar
 from runfleet.ui.widgets.job_preview import JobPreview
 from runfleet.ui.widgets.header import FleetHeader
 from runfleet.ui.widgets.job_table import COLUMNS, ID_CAP, GroupRow, JobTable, Row, RowContext, layout
+from runfleet.util import cost as costs
 from runfleet.util import humanize
 
 SIDE_PREVIEW_WIDTH = 150
@@ -137,18 +138,39 @@ class JobsView(Widget):
         return max(40, width - 2)       # vertical scrollbar + 1 cell of air
 
     # ------------------------------------------------------------------ rows
+    def cost_fn(self) -> CostFn:
+        """Job cost with the host's cached charging rules (Account, §5.2.11): the SU / GPU-h columns, sort keys and
+        filter terms. No remote command; a host without caps gives billing from TRES and an unknown factor."""
+        caps = {name: st.snapshot.caps for name, st in self.rf.store.hosts.items() if st.snapshot is not None}
+        bill_h = self._usage_only_hosts()
+
+        def cost(job: Job, now: datetime) -> costs.JobCost | None:
+            c = costs.job_cost(job, now, caps.get(job.key.host))
+            return c.as_billing_h() if c is not None and job.key.host in bill_h else c
+        return cost
+
+    def _usage_only_hosts(self) -> frozenset[str]:
+        """Hosts whose `su` value is billing-h, not SU (no SU limits / weights, §7.5)."""
+        return frozenset(name for name, st in self.rf.store.hosts.items() if st.snapshot is not None
+                         and st.snapshot.caps is not None
+                         and costs.usage_only(st.snapshot.caps, st.snapshot.account.mode if st.snapshot.account
+                                              else None))
+
     def visible_jobs(self) -> tuple[list[Job], int]:
         now = self.rf.now()
         window = self.rf.service.config.general.recent_window
         jobs = [j for j in self.rf.store.jobs(self.rf.scope_hosts()) if self.show_others or j.is_mine]
         total = len(jobs)
+        cost = self.cost_fn()
         if self.ended_since is not None:
             since = self.ended_since
             jobs = [j for j in jobs if (end := query.ended_at(j)) is not None and end > since and j.is_mine
-                    and query.matches(self.parsed, j)]
-            return query.sort_jobs(jobs, self.sort, self.reverse, host_order=self.rf.host_names(), now=now), total
-        jobs = [j for j in jobs if query.preset_matches(self.preset, j, now, window) and query.matches(self.parsed, j)]
-        return query.sort_jobs(jobs, self.sort, self.reverse, host_order=self.rf.host_names(), now=now), total
+                    and query.matches(self.parsed, j, now, cost)]
+        else:
+            jobs = [j for j in jobs if query.preset_matches(self.preset, j, now, window)
+                    and query.matches(self.parsed, j, now, cost)]
+        return query.sort_jobs(jobs, self.sort, self.reverse, host_order=self.rf.host_names(), now=now,
+                               cost=cost), total
 
     def _group(self, jobs: list[Job]) -> list[Row]:
         if self.group == "none":
@@ -200,9 +222,11 @@ class JobsView(Widget):
         alerts = self.rf.alerts
         watched = frozenset(str(j.key) for j in self.rf.store.jobs(self.rf.scope_hosts()) if alerts.is_watched(j)) \
             if alerts.watch else frozenset()
+        bill_h = self._usage_only_hosts()
         return RowContext(now, colors, problems, frozenset(stale), frozenset(self.marks),
                           self.rf.service.config.ui.gpu_util_thresholds,
-                          name_starts=getattr(self, "_name_starts", {}), watched=watched)
+                          name_starts=getattr(self, "_name_starts", {}), watched=watched, cost=self.cost_fn(),
+                          usage_only_hosts=bill_h)
 
     def refresh_data(self) -> None:
         if not self.is_mounted:
@@ -255,6 +279,21 @@ class JobsView(Widget):
         self.active_view, self._view_basis = name, view
         self.rf.save_ui_state(filter=view.filter, preset=view.preset, sort=view.sort, reverse=view.reverse,
                               group=view.group, active_view=name)
+        self.refresh_data()
+        self.table.focus()
+
+    def set_filter(self, text: str, *, preset: Preset | None = None) -> None:
+        """The filter (and a state preset) set from elsewhere — the Account screen's `enter` (§7.17); the bar shows
+        it, `esc` clears it as usual."""
+        bar = self.query_one(FilterBar)
+        bar.value = text
+        bar.display = bool(text)
+        if preset is not None:
+            self.preset = preset
+            self.rf.save_ui_state(preset=preset)
+        self.ended_since = None
+        self.query_text, self.parsed = text, query.parse(text)
+        self.rf.save_ui_state(filter=text)
         self.refresh_data()
         self.table.focus()
 
@@ -417,11 +456,14 @@ class JobsView(Widget):
             cached = self._peeks.get((job.key.host, ref.path))
             peek = cached[0] if cached else None
         state = self.rf.store.hosts.get(job.key.host)
-        caps = state.snapshot.caps if state is not None and state.snapshot is not None else None
+        snap = state.snapshot if state is not None else None
+        caps = snap.caps if snap is not None else None
+        summary = snap.account if snap is not None else None   # HostSnapshot.account (Account, §5.2.11)
         ui = self.rf.service.config.ui
         preview.show_job(job, caps=caps, now=self.rf.now(), peek=peek,
                          peek_pending=self._peek_pending is not None, thresholds=ui.gpu_util_thresholds,
-                         mem_thresholds=ui.gpu_mem_thresholds)
+                         mem_thresholds=ui.gpu_mem_thresholds,
+                         usage_mode=summary.mode if summary is not None else None)
 
     # ------------------------------------------------------------------ selection
     def current_job(self) -> Job | None:

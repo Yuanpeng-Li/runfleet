@@ -10,6 +10,10 @@ screen holds ``FleetAPI.attach_start(key)``; hiding the tab, covering the screen
 ``FleetChanged.live_keys`` / the 1 Hz clock re-read ``attach_state(key)``. On those tabs ``r`` also reads the node now
 (``attach_now``; srun asks first in a three-choice dialog), ``a`` toggles auto-refresh, ``S`` reads with srun when ssh
 landed in another job. Workstation tasks keep their own GPU / Procs views.
+
+Job cost (Account, §5.2.11, §7.17): a Slurm job's `cost` line under `tres`, one line in the compact Summary and the GPU
+tab's Cost box, all from ``util.cost.job_cost`` with the host's cached charging rules (no remote command); the 1 Hz
+``refresh_time`` re-renders them while the job runs, so the hours accrue live.
 """
 
 from __future__ import annotations
@@ -29,8 +33,8 @@ from textual.widgets import DataTable, Static, TabbedContent, TabPane
 
 from runfleet.core.service import LogUpdate
 from runfleet.errors import AttachBlocked, AttachConsentRequired, AttachError
-from runfleet.models import (AttachMode, AttachState, ConnState, FairShare, Job, JobDetail, JobGpuUsage, JobKey,
-                             JobKind, JobState, JobStep, LogRef, StateGroup, Visibility)
+from runfleet.models import (AccountBalance, AccountSummary, AttachMode, AttachState, Capabilities, ConnState, FairShare, Job, JobDetail,
+                             JobGpuUsage, JobKey, JobKind, JobState, JobStep, LogRef, StateGroup, Visibility)
 from runfleet.ui import keymap, render, theme
 from runfleet.ui.messages import FleetChanged
 from runfleet.ui.query import elapsed_s, ended_at, left_s
@@ -44,7 +48,9 @@ from runfleet.ui.widgets.hintbar import HintBar
 from runfleet.ui.widgets.job_table import name_badges, runway_level
 from runfleet.ui.widgets.log_view import LogFollower, LogView
 from runfleet.ui.widgets.proc_table import ProcTable
+from runfleet.util import cost as costs
 from runfleet.util import humanize
+from runfleet.util.cost import JobCost
 from runfleet.util.efficiency import CPU_LOW, GPU_LOW, MEM_LOW, TIME_LOW, Efficiency, efficiency
 from runfleet.util.efficiency import rows as efficiency_rows
 from runfleet.util.logscan import EXIT_SCAN_LINES, TRIAGE_LINES, Cause, cause_of, exit_cause
@@ -214,7 +220,8 @@ def compact_lines(job: Job, detail: JobDetail | None, caps_gpu_tres: bool | None
     return [render.fit(x, width) for x in lines]
 
 
-def resources_lines(job: Job, detail: JobDetail | None, width: int) -> list[Text]:
+def resources_lines(job: Job, detail: JobDetail | None, width: int, cost: Text | None = None) -> list[Text]:
+    """The Summary's Resources box; ``cost`` (a Slurm job's `cost_line`) goes under `tres`."""
     a = job.alloc
     per_node = detail.per_node if detail is not None and detail.per_node else a.per_node
     lines: list[Text] = []
@@ -238,7 +245,282 @@ def resources_lines(job: Job, detail: JobDetail | None, width: int) -> list[Text
         tres = ",".join(f"{k}={v}" for k, v in a.tres.items())
         lines.append(render.label_value("tres", Text(humanize.truncate(tres, width - 8), style=theme.muted()),
                                         width=8))
+    if cost is not None:
+        lines.append(cost)
     return [render.fit(x, width) for x in lines]
+
+
+# ---------------------------------------------------------------- job cost (Account, §5.2.11, §7.17)
+_SEP = " · "
+
+
+def _num(value: float) -> str:
+    """A count or rate as printed: `8`, `0.5`, `1,234`."""
+    return f"{value:,.2f}".rstrip("0").rstrip(".")
+
+
+def _factor_text(cost: JobCost) -> str:
+    """`normal ×1`; `normal ×1?` (its UsageFactor unknown: counted ×1); `qos? ×1?` (no QOS known)."""
+    return f"{cost.qos or 'qos?'} {costs.fmt_factor(cost.usage_factor)}"
+
+
+def _estimate_note(cost: JobCost) -> str:
+    """Why a billing rate is RunFleet's estimate rather than Slurm's own AllocTRES `billing`."""
+    return {"weights": "billing from weights: estimate", "cpus": "billing = CPUs: estimate"}.get(
+        cost.billing_basis or "", "")
+
+
+def _gpu_h(cost: JobCost, *, model: bool = False) -> str | None:
+    """`4.1 GPU-h` (`4.1 GPU-h RTX6000` with ``model`` and one known model); None without GPU-hours."""
+    if not cost.gpu_h:
+        return None
+    text = f"{costs.fmt_hours(cost.gpu_h)} GPU-h"
+    models = costs.gpu_models(cost)
+    if model and len(models) == 1 and models[0][0]:
+        text += " " + humanize.gpu_label(models[0][0])
+    return text
+
+
+def _cpu_h(cost: JobCost) -> str | None:
+    return f"{costs.fmt_hours(cost.cpu_h)} CPU-h" if cost.cpu_h is not None else None
+
+
+def _cpu_equal(cost: JobCost, caps: Capabilities | None) -> bool:
+    """billing-h are CPU-h here: no partition weighs anything and the job's billing is its CPU count."""
+    return (not costs.has_weights(caps) and cost.cpu_h is not None and cost.billing_h is not None
+            and abs(cost.cpu_h - cost.billing_h) < 1e-6)
+
+
+def _fit_parts(parts: list[tuple[Text, int]], room: int) -> Text:
+    """Join ``(text, rank)`` parts with ` · ` (a part starting with a space joins its neighbour directly), dropping
+    the highest rank first (0 = never) until the line fits."""
+    def join(items: list[tuple[Text, int]]) -> Text:
+        out = Text()
+        for i, (t, _r) in enumerate(items):
+            if i and not t.plain.startswith(" "):
+                out.append(_SEP, style=theme.dim())
+            out.append_text(t)
+        return out
+
+    keep = list(parts)
+    while join(keep).cell_len > room and any(r for _t, r in keep):
+        worst = max(r for _t, r in keep)
+        keep = [(t, r) for t, r in keep if r != worst]
+    return join(keep)
+
+
+def cost_line(job: Job, cost: JobCost | None, caps: Capabilities | None, width: int, *, mode: str | None = None) -> Text | None:
+    """The Resources box `cost` line (mockup E): `33.0 CPU-h · 4.1 GPU-h · 8/h × normal ×1 = 33 SU · ≈ 576 SU at
+    limit`; free `4.1 GPU-h RTX6000 · free (qos low ×0) · 33 billing-h not charged`; usage only `33.0 CPU-h · 4.1 GPU-h
+    · 33 billing-h (= CPU-h here)`; pending `≈ 576 SU if it runs to its limit (billing from weights: estimate)`.
+    ``mode``: the host's `AccountSummary.mode` when read. None for workstation tasks (no cost)."""
+    if cost is None:
+        return None
+    only_usage = costs.usage_only(caps, mode)
+    unit = costs.su_unit(only_usage)
+    if only_usage:                           # billing-h are unscaled by the QOS factor (JobCost.as_billing_h)
+        cost = cost.as_billing_h()
+    parts: list[tuple[Text, int]] = []
+    note = _estimate_note(cost)
+    if cost.billing is None:
+        parts.append((Text(f"{humanize.NONE} (no billing and no CPU count known)", style=theme.dim()), 0))
+    elif job.state.group is StateGroup.QUEUED:
+        if cost.free:
+            parts.append((Text(f"free (qos {cost.qos} ×0)", style=theme.ok()), 0))
+            parts.append((Text("nothing charged if it runs", style=theme.muted()), 1))
+        elif cost.projected_su is not None:
+            parts.append((Text(f"≈ {costs.fmt_su(cost.projected_su)} {unit} if it runs to its limit"), 0))
+            if note:
+                parts.append((Text(f" ({note})", style=theme.muted()), 1))
+        else:
+            parts.append((Text(f"{costs.fmt_rate(cost.billing)} × {_factor_text(cost)}"), 0))
+            parts.append((Text("no time limit known", style=theme.muted()), 1))
+    elif cost.free:
+        hours = _gpu_h(cost, model=True) or _cpu_h(cost)
+        if hours:
+            parts.append((Text(hours), 0))
+        parts.append((Text(f"free (qos {cost.qos} ×0)", style=theme.ok()), 0))
+        parts.append((Text(f"{costs.fmt_su(cost.billing_h)} billing-h not charged", style=theme.muted()), 1))
+    else:
+        for i, hours in enumerate((_cpu_h(cost), _gpu_h(cost))):
+            if hours:
+                parts.append((Text(hours), 3 - i))      # CPU-h goes first when the line is short of room
+        if only_usage:
+            parts.append((Text(f"{costs.fmt_su(cost.billing_h)} billing-h"), 0))
+            if _cpu_equal(cost, caps):
+                parts.append((Text(" (= CPU-h here)", style=theme.muted()), 4))
+        else:
+            amount = Text(f"{costs.fmt_rate(cost.billing)} × ", style=theme.muted())
+            amount.append(_factor_text(cost), style=theme.warn() if cost.usage_factor is None else theme.muted())
+            amount.append(f" = {costs.fmt_su(cost.charged_su)} SU")
+            parts.append((amount, 0))
+            if note:
+                parts.append((Text(f" ({note})", style=theme.dim()), 5))
+            if cost.live and cost.projected_su is not None:
+                parts.append((Text(costs.fmt_projection(cost.projected_su), style=theme.muted()), 4))
+    return render.fit(render.label_value("cost", _fit_parts(parts, width - 8), width=8), width)
+
+
+def cost_summary(job: Job, cost: JobCost | None, caps: Capabilities | None, *, mode: str | None = None) -> Text | None:
+    """The compact Summary's one line: `cost 4.1 GPU-h · 33 SU (≈ 576 by limit)` (usage only: billing-h; free:
+    `free (qos low ×0)`; pending: `≈ 576 SU if it runs to its limit`). None without a cost."""
+    if cost is None or cost.billing is None:
+        return None
+    unit = costs.su_unit(costs.usage_only(caps, mode))
+    if unit != "SU":                         # billing-h are unscaled by the QOS factor (JobCost.as_billing_h)
+        cost = cost.as_billing_h()
+    out = Text("cost ", style=theme.label())
+    if job.state.group is StateGroup.QUEUED:
+        if cost.free:
+            out.append(f"free (qos {cost.qos} ×0)", style=theme.ok())
+        elif cost.projected_su is not None:
+            out.append(f"≈ {costs.fmt_su(cost.projected_su)} {unit} if it runs to its limit")
+        else:
+            return None
+        return out
+    hours = _gpu_h(cost) or _cpu_h(cost)
+    if hours:
+        out.append(hours)
+        out.append(_SEP, style=theme.dim())
+    if cost.free:
+        out.append(f"free (qos {cost.qos} ×0)", style=theme.ok())
+        return out
+    amount = cost.billing_h if unit != "SU" else cost.charged_su
+    out.append(f"{costs.fmt_su(amount)} {unit}")
+    if unit == "SU" and cost.usage_factor is None:
+        out.append(" ×1?", style=theme.warn())
+    if cost.live and cost.projected_su is not None:
+        out.append(f" (≈ {costs.fmt_su(cost.projected_su)} by limit)", style=theme.muted())
+    return out
+
+
+def cost_box_title(job: Job, cost: JobCost | None, now: datetime) -> str:
+    if cost is not None and cost.live:
+        return "Cost · as of now (running, accrues every second)"
+    if job.state.group is StateGroup.QUEUED:
+        return "Cost · pending: what it would cost"
+    end = ended_at(job)
+    return f"Cost · ended {humanize.ago(end, now)}" if end is not None else "Cost"
+
+
+def _balance(summary: AccountSummary | None, account: str | None) -> AccountBalance | None:
+    """The job account's `AccountBalance` in a host's `AccountSummary` (names compare ignoring case), else None."""
+    if summary is None or not account:
+        return None
+    return next((b for b in summary.balances if b.account.lower() == account.lower()), None)
+
+
+def cost_box_lines(job: Job, cost: JobCost | None, caps: Capabilities | None, summary: AccountSummary | None, *,
+                   host: str, now: datetime, width: int) -> list[Text]:
+    """The GPU tab's Cost box (mockup P): elapsed, CPU-h and GPU-h worked out, the billing rate and where it comes
+    from, the QOS factor, what is charged so far and at the limit, and — only when ``summary`` (the host's
+    `AccountSummary`) knows the job's account — that account's balance."""
+    if cost is None:
+        return [Text("no cost for a workstation task", style=theme.dim())]
+    only_usage = costs.usage_only(caps, summary.mode if summary is not None else None)
+    if only_usage:                           # billing-h are unscaled by the QOS factor (JobCost.as_billing_h)
+        cost = cost.as_billing_h()
+    queued = job.state.group is StateGroup.QUEUED
+    terminal = job.state.is_terminal
+    el = elapsed_s(job, now) or 0.0
+    h = el / 3600
+    limit = humanize.clock(job.time_limit) if job.time_limit is not None else None
+    lines: list[Text] = []
+
+    def row(label: str, value: Text) -> None:
+        lines.append(render.fit(render.label_value(label, value, width=LW), width))
+
+    head = Text((f"pending · limit {limit}" if limit else "pending · no time limit") if queued else
+                humanize.clock(el) + (f" of {limit}" if limit else ""))
+    head.append(" " * max(2, 30 - head.cell_len))
+    head.append_text(render.label_value("account", Text(job.account or humanize.NONE), width=9))
+    head.append(" " * max(2, 53 - head.cell_len))
+    head.append_text(render.label_value("partition", Text(job.partition or humanize.NONE), width=11))
+    row("elapsed", head)
+    counts = costs.tres_counts(job.alloc.tres)
+    cpus = counts.get("cpu", float(job.alloc.cpus) if job.alloc.cpus is not None else None)
+    if queued:
+        row("cpu", Text(f"{_num(cpus)} (not started)" if cpus is not None else humanize.NONE))
+    else:
+        row("cpu", Text(f"{_num(cpus)} × {h:.2f} h = {_cpu_h(cost)}" if cpus is not None and cost.cpu_h is not None
+                        else humanize.NONE))
+    models = costs.gpu_models(cost)
+    if queued and job.alloc.gpus:
+        row("gpu", Text(f"{job.alloc.gpus} × {humanize.gpu_label(job.alloc.gpu_type)} (not started)"))
+    elif models and h > 0:
+        gpu = Text(" + ".join(f"{_num(n / h)} × {humanize.gpu_label(m) if m else 'GPU'}" for m, n in models))
+        gpu.append(f" × {h:.2f} h = {costs.fmt_hours(cost.gpu_h)} GPU-h")
+        row("gpu", gpu)
+    else:
+        row("gpu", Text("none", style=theme.dim()))
+    if cost.billing is not None:
+        source = {"tres": "Slurm AllocTRES", "weights": "from the partition weights: estimate",
+                  "cpus": "= CPUs: estimate"}.get(cost.billing_basis or "", "")
+        billing = Text(f"{_num(cost.billing)} per hour")
+        billing.append(f" ({source})" if source else "", style=theme.muted())
+        charge = costs.partition_charge(caps, job.partition)
+        part = (job.partition or "").split(",", 1)[0] or humanize.NONE
+        weights = ("unknown" if charge is None else charge.billing_weights if costs.parse_weights(
+            charge.billing_weights) else "none (billing = CPUs)")
+        billing.append(" " * max(4, 38 - billing.cell_len))
+        billing.append(f"weights of {part}: {weights}", style=theme.muted())
+        row("billing", billing)
+    else:
+        row("billing", Text(f"{humanize.NONE} (no billing and no CPU count known)", style=theme.dim()))
+    if cost.usage_factor is None:
+        row("factor", Text(f"qos {cost.qos or '?'} ×1? (UsageFactor unknown: counted ×1)", style=theme.warn()))
+    else:
+        factor = Text(f"qos {cost.qos} {costs.fmt_factor(cost.usage_factor)} (UsageFactor)")
+        if cost.free:
+            factor.append(" · free", style=theme.ok())
+        row("factor", factor)
+    at_limit = f" ({limit})" if limit else ""
+    if cost.free:
+        row("charged", Text(f"free (qos {cost.qos} ×0) · {costs.fmt_su(cost.billing_h)} billing-h not charged",
+                            style=theme.ok()))
+    elif queued:
+        unit = costs.su_unit(only_usage)
+        row("usage" if only_usage else "charged",
+            Text(f"≈ {costs.fmt_su(cost.projected_su)} {unit} if it runs to its limit{at_limit}"
+                 if cost.projected_su is not None else "no time limit: per hour only"))
+    else:
+        unit = costs.su_unit(only_usage)
+        amount = cost.billing_h if only_usage else cost.charged_su
+        so_far = Text(f"{costs.fmt_su(amount)} {unit}" + ("" if terminal else " so far"))
+        if only_usage and _cpu_equal(cost, caps):
+            so_far.append(" (= CPU-h here)", style=theme.muted())
+        if not terminal and cost.projected_su is not None:
+            so_far.append(" " * max(4, 38 - so_far.cell_len))
+            so_far.append(f"≈ {costs.fmt_su(cost.projected_su)} {unit} if it runs to its limit{at_limit}",
+                          style=theme.muted())
+        row("usage" if only_usage else "charged", so_far)
+    bal = _balance(summary, job.account)
+    if bal is not None:
+        acct = Text(f"{bal.account}: ")
+        if bal.limit_su is None:
+            acct.append(f"usage only, no SU limit on {host}", style=theme.muted())
+        else:
+            left = bal.available_su
+            verdict: Text | None = None             # first, so a narrow box cuts the balance, never the verdict
+            if left is not None and left <= 0:
+                verdict = Text("no SU left", style=theme.error())
+            elif terminal and cost.charged_su is not None:
+                verdict = None
+            elif cost.projected_su is not None and left is not None:
+                pct = cost.projected_su / left * 100
+                if cost.projected_su > left:
+                    verdict = Text(f"this job exceeds what is left ({costs.fmt_su(left)} SU)", style=theme.error())
+                else:
+                    verdict = Text(f"this job ≈ {costs.fmt_pct(pct)} of what is left",
+                                   style=theme.warn() if pct >= 80 else theme.muted())
+            if verdict is not None:
+                acct.append_text(verdict)
+                acct.append(" · ", style=theme.dim())
+            acct.append(f"{costs.fmt_su(bal.used_su)} / {costs.fmt_su(bal.limit_su)} SU used")
+            if terminal and cost.charged_su is not None:
+                acct.append(f" · this job {costs.fmt_su(cost.charged_su)} SU", style=theme.muted())
+        row("account", acct)
+    return lines
 
 
 def gpu_box_title(job: Job, detail: JobDetail | None = None, now: datetime | None = None) -> str:
@@ -645,6 +927,7 @@ class JobDetailScreen(FleetScreen):
                     yield LogView(id="summary-log", classes="box")
             with TabPane("GPU", id="gpu"):
                 with VerticalScroll():
+                    yield Static("", id="cost-box", classes="box")        # Slurm jobs (Account, §7.17)
                     yield AttachPanel("", id="attach-box", classes="box")
                     yield Static("", id="gpu-tab", classes="box")
             with TabPane("Logs", id="logs"):
@@ -914,6 +1197,9 @@ class JobDetailScreen(FleetScreen):
     def refresh_time(self) -> None:
         self.query_one(FleetHeader).refresh_content()
         self._render_title()
+        job = self.job
+        if job is not None and job.kind is JobKind.SLURM and job.state.group is StateGroup.ACTIVE:
+            self._render_cost()            # the hours and SU accrue every second
         self._render_find_hint()
         if self._attached and self._live_tab():
             self._render_live()            # the next-sample countdown
@@ -935,6 +1221,73 @@ class JobDetailScreen(FleetScreen):
         widget.display = banner is not None
         widget.update(banner or "")
 
+    def _caps(self) -> Capabilities | None:
+        state = self.rf.store.hosts.get(self.key.host)
+        return state.snapshot.caps if state is not None and state.snapshot is not None else None
+
+    def _account_summary(self) -> AccountSummary | None:
+        """The host's `HostSnapshot.account` (Account, §5.2.11; None until read)."""
+        state = self.rf.store.hosts.get(self.key.host)
+        return state.snapshot.account if state is not None and state.snapshot is not None else None
+
+    def _usage_mode(self) -> str | None:
+        summary = self._account_summary()
+        return summary.mode if summary is not None else None
+
+    def _box_widths(self) -> tuple[int, int, int]:
+        total = self.size.width or self.app.size.width
+        if self.has_class("-narrow"):
+            return total, total - 4, total - 4
+        return total, max(30, total // 2 - 4), max(30, total - total // 2 - 4)
+
+    def _render_compact(self, job: Job, eff: Efficiency | None, cost: JobCost | None, now: datetime) -> None:
+        if self.summary_log:
+            return
+        detail, caps = self.detail, self._caps()
+        width = self._box_widths()[0] - 4
+        compact = self.query_one("#summary-compact", Static)
+        compact.border_title = "Task" if job.kind is JobKind.TASK else "Job"
+        clines = compact_lines(job, detail, caps.gpu_tres if caps else None, now, width)
+        if job.state.is_terminal and detail is not None and (summary := efficiency_summary(eff)) is not None:
+            clines.append(render.fit(summary, width))
+        if job.priority is not None:                     # pending: the priority evidence in one line (§5.2.10)
+            clines.append(render.fit(render.priority_summary(job.priority, job.account, now), width))
+        line = cost_summary(job, cost, caps, mode=self._usage_mode())
+        if line is not None:                             # one line, never more: the log keeps its 6 rows
+            clines.append(render.fit(line, width))
+        compact.update(Text("\n").join(clines))
+
+    def _render_resources(self, job: Job, cost: JobCost | None) -> None:
+        width = self._box_widths()[2]
+        mode = self._usage_mode()
+        res = self.query_one("#res-box", Static)
+        res.border_title = "Resources"
+        res.update(Text("\n").join(resources_lines(job, self.detail, width,
+                                                   cost_line(job, cost, self._caps(), width, mode=mode))))
+
+    def _render_cost_box(self, job: Job, cost: JobCost | None, now: datetime) -> None:
+        box = self.query_one("#cost-box", Static)
+        box.display = cost is not None
+        if cost is None:
+            return
+        box.border_title = cost_box_title(job, cost, now)
+        width = (self.size.width or self.app.size.width) - 6
+        box.update(Text("\n").join(cost_box_lines(job, cost, self._caps(), self._account_summary(),
+                                                  host=self.key.host, now=now, width=width)))
+
+    def _render_cost(self) -> None:
+        """1 Hz for a running Slurm job: the Resources `cost` line, the compact one-liner and the Cost box."""
+        job = self.job
+        if job is None or not self.is_mounted:
+            return
+        now = self.rf.now()
+        cost = costs.job_cost(job, now, self._caps())
+        if not self.summary_log:
+            self._render_compact(job, efficiency(job, self.detail.steps if self.detail is not None else ()), cost,
+                                 now)
+        self._render_resources(job, cost)
+        self._render_cost_box(job, cost, now)
+
     def _render_all(self) -> None:
         self._render_title()
         job = self.job
@@ -942,31 +1295,17 @@ class JobDetailScreen(FleetScreen):
             return
         now = self.rf.now()
         detail = self.detail
-        state = self.rf.store.hosts.get(self.key.host)
-        caps = state.snapshot.caps if state is not None and state.snapshot is not None else None
+        caps = self._caps()
         ui = self.rf.service.config.ui
-        total = self.size.width or self.app.size.width
+        total, left_w, right_w = self._box_widths()
         eff = efficiency(job, detail.steps if detail is not None else ())
-        if not self.summary_log:
-            compact = self.query_one("#summary-compact", Static)
-            compact.border_title = "Task" if job.kind is JobKind.TASK else "Job"
-            clines = compact_lines(job, detail, caps.gpu_tres if caps else None, now, total - 4)
-            if job.state.is_terminal and detail is not None and (summary := efficiency_summary(eff)) is not None:
-                clines.append(render.fit(summary, total - 4))
-            if job.priority is not None:                     # pending: the priority evidence in one line (§5.2.10)
-                clines.append(render.fit(render.priority_summary(job.priority, job.account, now), total - 4))
-            compact.update(Text("\n").join(clines))
-        if self.has_class("-narrow"):
-            left_w = right_w = total - 4
-        else:
-            left_w = max(30, total // 2 - 4)
-            right_w = max(30, total - total // 2 - 4)
+        cost = costs.job_cost(job, now, caps)
+        self._render_compact(job, eff, cost, now)
         job_box = self.query_one("#job-box", Static)
         job_box.border_title = "Task" if job.kind is JobKind.TASK else "Job"
         job_box.update(Text("\n").join(job_box_lines(job, detail, now, left_w)))
-        res = self.query_one("#res-box", Static)
-        res.border_title = "Resources"
-        res.update(Text("\n").join(resources_lines(job, detail, right_w)))
+        self._render_resources(job, cost)
+        self._render_cost_box(job, cost, now)
         gpu_box = self.query_one("#gpu-box", Static)
         if job.kind is JobKind.SLURM and job.state.is_terminal and detail is not None:
             gpu_box.border_title = "Efficiency"              # an ended job's GPU box only said "n/a — job ended"

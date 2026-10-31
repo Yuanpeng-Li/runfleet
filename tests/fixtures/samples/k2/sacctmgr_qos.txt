@@ -1,0 +1,7 @@
+normal|1.000000
+g1mig|1.000000
+gpu-preempt|1.000000
+cpu-preempt|1.000000
+high-throughput|1.000000
+labpi|1.000000
+gpu-priority|1.000000

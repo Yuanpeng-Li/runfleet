@@ -48,7 +48,8 @@ class SectionResult:
 class ProbeScript:
     sections: tuple[Section, ...]
     nonce: str                   # 12 hex chars, secrets.token_hex(6)
-    purpose: Literal["poll", "detect", "detail", "action", "log", "doctor", "attach"] = "poll"
+    purpose: Literal["poll", "detect", "detail", "action", "log", "doctor", "attach", "account"] = "poll"
+                                 # "account": an on-demand account report (§5.2.11; Account, additive)
 
 @dataclass(frozen=True, slots=True)
 class StreamSpec:

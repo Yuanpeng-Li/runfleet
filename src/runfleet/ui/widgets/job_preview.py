@@ -4,7 +4,8 @@ Follows the Jobs-table cursor (lazygit style). Full form: a title rule, a metada
 path, then the last log lines from a cached one-shot ``peek_log`` (requested by the Jobs view after 1 s of cursor
 dwell — never a stream). Compact form (< 30 rows): the title rule with the essentials plus one log line. An ended job
 shows its cause chip (``OOM-GPU`` + the peeked line that shows it), a pending one what to do about its reason and,
-for an own pending Slurm job, its priority evidence in one line (§5.2.10: polled, no extra remote command).
+for an own pending Slurm job, its priority evidence in one line (§5.2.10: polled, no extra remote command). The
+metadata line of a Slurm job ends in its cost (`· 33 SU`, Account §5.2.11: from the cached charging rules).
 """
 
 from __future__ import annotations
@@ -19,7 +20,9 @@ from runfleet.core.service import LogPeek
 from runfleet.models import Capabilities, Job, JobKind, StateGroup
 from runfleet.ui import render, theme
 from runfleet.ui.query import elapsed_s
+from runfleet.util import cost as costs
 from runfleet.util import humanize
+from runfleet.util.cost import JobCost
 from runfleet.util.logscan import cause_of
 
 Mode = Literal["full", "line", "hidden"]
@@ -59,7 +62,23 @@ def gpu_indices(job: Job) -> str:
     return ",".join(map(str, idx))
 
 
-def meta_line(job: Job) -> Text:
+def cost_meta(job: Job, cost: JobCost | None, only_usage: bool) -> str | None:
+    """The preview's cost part: `33 SU` (usage-only clusters `33 billing-h`), `free (qos low ×0)`, a pending job's
+    `≈ 576 SU at limit`; None when unknown."""
+    if cost is None:
+        return None
+    unit = costs.su_unit(only_usage)
+    if only_usage:                           # billing-h are unscaled by the QOS factor (JobCost.as_billing_h)
+        cost = cost.as_billing_h()
+    if job.state.group is StateGroup.QUEUED:
+        return costs.fmt_projection(cost.projected_su, unit) if cost.projected_su is not None else None
+    if cost.free:
+        return f"free (qos {cost.qos or '?'} ×0)"
+    amount = cost.billing_h if only_usage else cost.charged_su
+    return f"{costs.fmt_su(amount)} {unit}" if amount is not None else None
+
+
+def meta_line(job: Job, cost: str | None = None) -> Text:
     parts: list[str] = []
     if job.kind is JobKind.TASK:
         parts.append(f"root pid {job.job_id_raw}")
@@ -88,6 +107,8 @@ def meta_line(job: Job) -> Text:
             parts.append(f"{job.alloc.gpus}× {gpu}" + (f" idx {idx}" if idx else ""))
         if job.state.group is StateGroup.QUEUED and job.reason:
             parts.append(f"reason {render.reason_text(job.reason, short=False).plain}")
+        if cost:
+            parts.append(cost)
     out = Text(" · ".join(parts), style=theme.muted())
     return out
 
@@ -193,8 +214,11 @@ class JobPreview(Static):
         self.update(Text("\n").join([_rule(title, Text(""), width), *[render.fit(b, width) for b in body]]))
 
     def show_job(self, job: Job, *, caps: Capabilities | None, now: datetime, peek: LogPeek | None,
-                 peek_pending: bool, thresholds: tuple[float, float], mem_thresholds: tuple[float, float]) -> None:
+                 peek_pending: bool, thresholds: tuple[float, float], mem_thresholds: tuple[float, float],
+                 usage_mode: str | None = None) -> None:
+        """``usage_mode``: `AccountSummary.mode` of the job's host when read (SU or billing-h, §5.2.11)."""
         width = self.size.width or 120
+        meta = meta_line(job, cost_meta(job, costs.job_cost(job, now, caps), costs.usage_only(caps, usage_mode)))
         title = Text(f"{job.key.host}:{job.key.label}", style="bold")
         title.append(" · ", style=theme.dim())
         title.append(job.name)
@@ -224,9 +248,9 @@ class JobPreview(Static):
             self.update(Text("\n").join(lines[:2]))
             return
         if self.side:
-            self._show_side(job, title, caps, now, peek, peek_pending, thresholds, mem_thresholds, has_log)
+            self._show_side(job, title, meta, caps, now, peek, peek_pending, thresholds, mem_thresholds, has_log)
             return
-        lines = [_rule(title, _runtime(job, now), width), render.fit(meta_line(job), width)]
+        lines = [_rule(title, _runtime(job, now), width), render.fit(meta, width)]
         gl = gpu_line(job, caps, now, thresholds, mem_thresholds)
         if stdout is not None and (stdout.path or stdout.pattern):
             path = stdout.path or stdout.pattern or ""
@@ -247,13 +271,14 @@ class JobPreview(Static):
         lines += log_lines(peek, peek_pending, max(1, self.lines_budget - len(lines)), width, now, has_log)
         self.update(Text("\n").join(lines[: self.lines_budget]))
 
-    def _show_side(self, job: Job, title: Text, caps: Capabilities | None, now: datetime, peek: LogPeek | None,
+    def _show_side(self, job: Job, title: Text, meta: Text, caps: Capabilities | None, now: datetime,
+                   peek: LogPeek | None,
                    peek_pending: bool, thresholds: tuple[float, float], mem_thresholds: tuple[float, float],
                    has_log: bool) -> None:
         """Right-hand preview (>= 150 columns): the same facts, wrapped into a narrow, tall column."""
         width = self.size.width or 60
         lines = [render.fit(title, width), render.fit(_runtime(job, now), width), Text("")]
-        lines += wrap_parts(meta_line(job).plain.split(" · "), width, style=theme.muted())
+        lines += wrap_parts(meta.plain.split(" · "), width, style=theme.muted())
         lines.append(Text(""))
         bar = max(8, min(24, width - 18))
         lines += [render.fit(x, width) for x in gpu_parts(job, caps, now, thresholds, mem_thresholds, bar=bar)]

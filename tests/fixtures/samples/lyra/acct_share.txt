@@ -1,0 +1,8 @@
+pilab_02||1073256|billing=5873100|cpu=17887,mem=36633804,energy=0,node=745,billing=17887,fs/disk=0,vmem=0,pages=0,gres/gpu=0,gres/gpu:l40s=0,gres/gpu:rtx6000=0,gres/gpumem=0,gres/gpuutil=0
+ pilab_02|alice07|1073256||cpu=17887,mem=36633804,energy=0,node=745,billing=17887,fs/disk=0,vmem=0,pages=0,gres/gpu=0,gres/gpu:l40s=0,gres/gpu:rtx6000=0,gres/gpumem=0,gres/gpuutil=0
+pilab_02_gpu||0|billing=5820|cpu=0,mem=0,energy=0,node=0,billing=0,fs/disk=0,vmem=0,pages=0,gres/gpu=0,gres/gpu:l40s=0,gres/gpu:rtx6000=0,gres/gpumem=0,gres/gpuutil=0
+ pilab_02_gpu|alice07|0||cpu=0,mem=0,energy=0,node=0,billing=0,fs/disk=0,vmem=0,pages=0,gres/gpu=0,gres/gpu:l40s=0,gres/gpu:rtx6000=0,gres/gpumem=0,gres/gpuutil=0
+pilab_03||9528214|billing=6000000|cpu=158803,mem=650885393,energy=0,node=3726,billing=158803,fs/disk=0,vmem=0,pages=0,gres/gpu=0,gres/gpu:l40s=0,gres/gpu:rtx6000=0,gres/gpumem=0,gres/gpuutil=0
+ pilab_03|alice07|9528214||cpu=158803,mem=650885393,energy=0,node=3726,billing=158803,fs/disk=0,vmem=0,pages=0,gres/gpu=0,gres/gpu:l40s=0,gres/gpu:rtx6000=0,gres/gpumem=0,gres/gpuutil=0
+alice07||0|billing=60000|cpu=0,mem=0,energy=0,node=0,billing=0,fs/disk=0,vmem=0,pages=0,gres/gpu=0,gres/gpu:l40s=0,gres/gpu:rtx6000=0,gres/gpumem=0,gres/gpuutil=0
+ alice07|alice07|0||cpu=0,mem=0,energy=0,node=0,billing=0,fs/disk=0,vmem=0,pages=0,gres/gpu=0,gres/gpu:l40s=0,gres/gpu:rtx6000=0,gres/gpumem=0,gres/gpuutil=0

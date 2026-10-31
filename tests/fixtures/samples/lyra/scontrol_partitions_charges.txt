@@ -1,0 +1,10 @@
+groups=alice07
+parents=complete
+PartitionName=free AllowGroups=ALL AllowAccounts=ALL AllowQos=low,guest Default=NO QoS=free-part Hidden=NO MaxTime=3-00:00:00 State=UP TotalNodes=212 TRES=cpu=9992,mem=57211000M,node=212,billing=9992 
+PartitionName=free-gpu AllowGroups=ALL AllowAccounts=ALL AllowQos=low,guest Default=NO QoS=free-gpu-part Hidden=NO MaxTime=3-00:00:00 State=UP TotalNodes=36 TRES=cpu=1296,mem=11322000M,node=36,billing=1296,gres/gpu=136 
+PartitionName=free-gpuxl AllowGroups=ALL AllowAccounts=ALL AllowQos=low,guest Default=NO QoS=free-gpuxl-part Hidden=NO MaxTime=3-00:00:00 State=UP TotalNodes=10 TRES=cpu=368,mem=3342000M,node=10,billing=368,gres/gpu=40 
+PartitionName=gpu AllowGroups=ALL AllowAccounts=ALL AllowQos=normal,high Default=NO QoS=gpu-part Hidden=NO MaxTime=14-00:00:00 State=UP TotalNodes=35 TRES=cpu=1232,mem=8227000M,node=35,billing=5456,gres/gpu=132 TRESBillingWeights=cpu=1,gres/gpu=32 
+PartitionName=gpu-highmem AllowGroups=ALL AllowAccounts=ALL AllowQos=gpu-highmem,gpu-highmem-pi01 Default=NO QoS=gpu-highmem-part Hidden=NO MaxTime=1-00:00:00 State=UP TotalNodes=1 TRES=cpu=64,mem=3095000M,node=1,billing=192,gres/gpu=4 TRESBillingWeights=cpu=1,gres/gpu=32 
+PartitionName=gpuxl AllowGroups=ALL AllowAccounts=ALL AllowQos=normal,high Default=NO QoS=gpuxl-part Hidden=NO MaxTime=14-00:00:00 State=UP TotalNodes=10 TRES=cpu=368,mem=3342000M,node=10,billing=368,gres/gpu=40 TRESBillingWeights=cpu=1,gres/gpu:L40S=32,gres/gpu:RTX6000=64 
+PartitionName=standard AllowGroups=ALL AllowAccounts=ALL AllowQos=normal,high Default=YES QoS=normal Hidden=NO MaxTime=14-00:00:00 State=UP TotalNodes=181 TRES=cpu=8560,mem=43715000M,node=181,billing=8560 
+PartitionName=standard-mem AllowGroups=ALL AllowAccounts=ALL AllowQos=standard-mem,standard-mem-pi02 Default=NO QoS=standard-mem-part Hidden=NO MaxTime=1-00:00:00 State=UP TotalNodes=3 TRES=cpu=240,mem=381000M,node=3,billing=240 

@@ -434,7 +434,7 @@ def test_job_card_quiet_line_follows_the_tui_rule(env: Env, capsys: pytest.Captu
 
 def test_log_files_of_another_users_job_is_not_allowed(env: Env, capsys: pytest.CaptureFixture[str],
                                                       probes: list[str]) -> None:
-    _rc, doc = run_json(["--demo", "agent", "jobs", "--all-users", "--state", "all", "--limit", "400"], capsys)
+    _rc, doc = run_json(["--demo", "agent", "jobs", "--all-users", "--state", "active", "--limit", "400"], capsys)
     other = next(j["id"] for j in doc["jobs"] if not j["mine"] and j["group"] == "active")
     probes.clear()
     for flags in (["--files"], ["--file", "x.log"]):

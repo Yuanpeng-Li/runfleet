@@ -20,6 +20,7 @@ from runfleet.transport.mux import SESSION_NOTE, WINDOWS_NO_MUX
 from runfleet.ui import keymap, render, theme
 from runfleet.ui.messages import FleetChanged
 from runfleet.ui.screens import FleetScreen
+from runfleet.ui.screens.account import account_summary_line
 from runfleet.ui.screens.job_detail import stale_banner
 from runfleet.ui.widgets.gpu_panel import GPUPanel
 from runfleet.ui.widgets.header import FleetHeader
@@ -140,7 +141,26 @@ def capability_lines(state: HostState, width: int) -> list[Text]:
             second.append(" *protected", style=theme.warn())
     if second:
         lines.append(render.fit(second, width))
+    account = host_account_line(state, width)
+    if account is not None:
+        lines.append(account)                    # not cropped: the box wraps it (§7.17)
     return lines
+
+
+def host_account_line(state: HostState, width: int) -> Text | None:
+    """The `account` line of a cluster (§7.17), from `snapshot.account` only (no probe): balances / usage only, or
+    `not read yet` where the periodic summary runs (slurmdbd accounting and an association); None where it never
+    will (`account_usage = false`, no accounting)."""
+    snap = state.snapshot
+    caps = snap.caps if snap is not None else None
+    if caps is None or not state.config.slurm.account_usage:
+        return None
+    if snap is not None and snap.account is not None:
+        return account_summary_line(snap.account, width)
+    slurmdbd = caps.slurm_config.get("AccountingStorageType") == "accounting_storage/slurmdbd"
+    if not slurmdbd or not any(a[1] for a in caps.associations):
+        return None
+    return account_summary_line(None, width)
 
 
 def my_jobs_line(jobs: list[Job], width: int) -> Text:

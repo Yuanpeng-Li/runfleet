@@ -1,0 +1,2 @@
+campus01||9011893562||cpu=150123651,mem=602160530436,energy=0,node=3240773,billing=150198226,fs/disk=0,vmem=0,pages=0,gres/gpu=1316877,gres/gpu:nvidia_a100=0,gres/gpu:nvidia_a100-sxm4-40gb=30032,gres/gpu:nvidia_a100-sxm4-80gb=110518
+ campus01|alice0001|21040918||cpu=350681,mem=1869017688,energy=0,node=35393,billing=350681,fs/disk=0,vmem=0,pages=0,gres/gpu=34598,gres/gpu:nvidia_a100=0,gres/gpu:nvidia_a100-sxm4-40gb=6837,gres/gpu:nvidia_a100-sxm4-80gb=328,gres/gpu:nvidia_a100_3g.20gb=0

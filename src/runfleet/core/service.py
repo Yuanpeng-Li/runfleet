@@ -24,11 +24,11 @@ from runfleet.backends.base import ActionPlan, ActionSpec, HostContext, Schedule
 from runfleet.config import FleetConfig, GeneralSettings, HostConfig, NotifySettings, host_name_for
 from runfleet.core.cache import Cache, JobMeta
 from runfleet.core.clock import Clock
-from runfleet.core.store import ChangeSet, FleetStore
+from runfleet.core.store import ChangeSet, FleetStore, merged_account
 from runfleet.errors import ConfigError, RunFleetError
-from runfleet.models import (ActionResult, AttachMode, AttachState, Capabilities, ConnState,
-                             DetectReport, DoctorReport, ErrorKind, HostError, HostSnapshot, Job, JobDetail, JobKey,
-                             JobLive, LogRef, SectionStatus, Visibility)
+from runfleet.models import (AccountReport, AccountSummary, ActionResult, AttachMode, AttachState, Capabilities,
+                             ConnState, DetectReport, DoctorReport, ErrorKind, HostError, HostSnapshot, Job, JobDetail,
+                             JobKey, JobLive, LogRef, SectionStatus, UsageWindow, Visibility)
 from runfleet.probe.section import SectionResult
 from runfleet.transport.base import ProbeResult, Transport
 
@@ -196,6 +196,21 @@ class FleetAPI(Protocol):
     def attach_state(self, key: JobKey) -> AttachState | None: ...
         # None = never attached this session; otherwise the latest state (also after stop)
 
+    # Account (§5.2.11, §7.17; additive after 0.8.0: a FakeService gains these two methods)
+    async def account_report(self, host: str, window: UsageWindow | None = None, *,
+                             max_age_s: float = 600) -> AccountReport: ...
+        # on demand only (Account screen open / `r` / window switch, `agent usage --refresh`; never a timer): a
+        # report of this (host, window) younger than max_age_s is returned as is, else ONE probe (purpose "account")
+        # on the host's on-demand lane with the scheduler's account_sections(window); an identical request in
+        # flight is awaited, not duplicated. window None = general.usage_window; a "period" the host has no start
+        # for falls back to "30d" (AccountReport.window says which). The result is kept per (host, window) in memory
+        # and in the cache (`account_reports`, §5.5), then store.notify_account(host). Read-only: allowed with
+        # --readonly. Never raises for remote failures (AccountReport.errors); a host without scheduler accounting
+        # (workstation, account_usage = false, no account) gets an empty report (no summary balances, errors=())
+    def account_cached(self, host: str, window: UsageWindow) -> AccountReport | None: ...
+        # sync, no I/O after the first call per host: the last report of this session, else the cached one (any
+        # age; the caller shows it); None = never fetched
+
 class FleetService(FleetAPI):
     """The core facade: one HostPoller task per enabled host, plus on-demand details, logs, actions and doctor.
 
@@ -243,6 +258,8 @@ class FleetService(FleetAPI):
         self._activity = asyncio.Event()
         self._last_refresh: dict[str, float] = {}
         self._details: dict[JobKey, tuple[float, JobDetail]] = {}
+        self._reports: dict[tuple[str, str], AccountReport] = {}   # (host, window asked) -> last account report
+        self._report_tasks: dict[tuple[str, str], asyncio.Task[AccountReport]] = {}   # in flight
         self._cached_caps: dict[str, tuple[Capabilities, datetime | None]] = {}
         self._jobmeta: dict[str, dict[str, JobMeta]] = {}
         self._ended: dict[str, dict[str, Job]] = {}
@@ -452,16 +469,24 @@ class FleetService(FleetAPI):
             meta = {h: cache.load_jobmeta(h) for h in own}
             since = now - timedelta(seconds=self.config.general.recent_window)
             ended = {h: cache.load_ended_tasks(h, since) for h in own}
-            return {h: s for h, s in snaps.items() if h not in foreign}, caps, meta, ended
+            reports: dict[str, dict[str, AccountReport]] = {}
+            for h in own if snapshots is True else ():        # the TUI: account_cached never reads the cache itself
+                try:
+                    reports[h] = cache.load_account_reports(h)
+                except Exception as e:                 # a cache problem is never the screen's problem
+                    log.info("%s: cached account reports unreadable: %s", h, e)
+            return {h: s for h, s in snaps.items() if h not in foreign}, caps, meta, ended, reports
 
         try:
-            snaps, caps, meta, ended = await asyncio.to_thread(load)
+            snaps, caps, meta, ended, reports = await asyncio.to_thread(load)
         except Exception as e:                 # a broken cache must never block startup
             log.warning("cache load failed: %s", e)
             self.notices.append(f"cache could not be read ({e}); starting without it")
             return {}
         for host, snap in snaps.items():
             if host in self.store.hosts and host in wanted:
+                if snap.account is not None and not self.store.hosts[host].config.slurm.account_usage:
+                    snap = dataclasses.replace(snap, account=None)   # turned off in config since (§5.2.11)
                 self.store.set_snapshot(host, snap)
         for host, entry in caps.items():
             if entry is not None:
@@ -469,6 +494,9 @@ class FleetService(FleetAPI):
             elif host in snaps and snaps[host].caps is not None:
                 self._cached_caps[host] = (snaps[host].caps, None)   # profile known, re-detect soon
         self._jobmeta, self._ended = meta, ended
+        for host, stored in reports.items():
+            for w, report in stored.items():
+                self._reports.setdefault((host, w), report)
         return dict(snaps)
 
     @property
@@ -549,7 +577,7 @@ class FleetService(FleetAPI):
             with contextlib.suppress(Exception):
                 await t
         await self.attach.close()                      # attach samples first: their ssh dies with the task
-        tasks = [*self._tasks.values(), *self._bg]
+        tasks: list[asyncio.Task[Any]] = [*self._tasks.values(), *self._bg, *self._report_tasks.values()]
         for t in tasks:
             t.cancel()
         for t in tasks:
@@ -557,6 +585,7 @@ class FleetService(FleetAPI):
                 await t
         self._tasks.clear()
         self._bg.clear()
+        self._report_tasks.clear()
         await self.logs.close_all()
         if self.cache is not None:
             with contextlib.suppress(Exception):
@@ -659,7 +688,8 @@ class FleetService(FleetAPI):
         metrics with procfs.host, the process table with process.ps) and that the poll left empty comes back from
         the cached row. Per section, not per group: a login node's working nvidia-smi does not make a failing sinfo
         an answer. A field the poll did fill (an answer, or a failing section's partial output) stays the poll's,
-        as in the TUI. None: nothing to add."""
+        as in the TUI. The account summary takes the cached readings its failing sections lacked (`merged_account`,
+        §5.2.11). None: nothing to add."""
         if snap is old:
             return None
         out = self._merged_jobs(host, snap, old) or snap
@@ -668,6 +698,11 @@ class FleetService(FleetAPI):
             if self._sections_failed(host, sections):
                 carried.update({f: v for f in fields
                                 if _empty(getattr(snap, f)) and not _empty(v := getattr(old, f))})
+        account = snap.account
+        if self.store.hosts[host].config.slurm.account_usage:
+            account = merged_account(snap.account, old.account)
+        if account is not snap.account:
+            carried["account"] = account
         if carried:
             out = dataclasses.replace(out, **carried)
         return None if out is snap else out
@@ -1026,6 +1061,104 @@ class FleetService(FleetAPI):
     def attach_state(self, key: JobKey) -> AttachState | None:
         return self.attach.state(key)
 
+    # ================================================================ account usage (§5.2.11)
+    async def account_report(self, host: str, window: UsageWindow | None = None, *,
+                             max_age_s: float = 600) -> AccountReport:
+        """See FleetAPI. An unknown host raises RunFleetError (a caller error, not a remote failure)."""
+        self._host_cfg(host)
+        want: UsageWindow = window or self.config.general.usage_window
+        last = self.account_cached(host, want)
+        if last is not None and (self.clock.now() - last.fetched_at).total_seconds() < max_age_s:
+            return last
+        key = (host, want)
+        task = self._report_tasks.get(key)
+        if task is None:
+            task = self._report_tasks[key] = asyncio.ensure_future(self._fetch_report(host, want))
+
+            def done(t: asyncio.Task[AccountReport]) -> None:
+                if self._report_tasks.get(key) is t:
+                    del self._report_tasks[key]
+            task.add_done_callback(done)
+        return await asyncio.shield(task)      # a caller cancelled (a Textual worker replaced) leaves it to the others
+
+    def seed_host(self, host: str, snap: HostSnapshot, caps_at: datetime | None = None) -> None:
+        """`runfleet agent usage --refresh` (§8.7; not in FleetAPI): a throwaway service gets a host's cached
+        snapshot and its capabilities as start() would load them, without a probe, so that :meth:`account_report`
+        can run its one on-demand probe (the scheduler collector and context exist; the summary's sbank dates
+        reach `restore_account`)."""
+        self._host_cfg(host)
+        self.store.set_snapshot(host, snap)
+        if snap.caps is not None:
+            self._cached_caps[host] = (snap.caps, caps_at)
+            self._poller(host)
+
+    def account_cached(self, host: str, window: UsageWindow) -> AccountReport | None:
+        """No I/O (the event loop calls it): the reports start() loaded from the cache off-loop, and this run's."""
+        if host not in self.store.hosts:
+            return None
+        return self._reports.get((host, window))
+
+    async def _fetch_report(self, host: str, want: UsageWindow) -> AccountReport:
+        """One report probe (§5.2.11). A transport failure returns the last report of this (host, window) with the
+        error (its age shows), else an empty one; neither is kept. Not connected yet: the same with that error."""
+        from runfleet.probe import framing
+
+        cfg = self._host_cfg(host)
+        sched, ctx = self._scheduler(host), self._context(host)
+        caps = self._caps(host)
+        if cfg.backend == "workstation" or (caps is not None and caps.profile and "slurm" not in caps.profile):
+            return self._empty_report(host, want, note="workstation: no scheduler accounting")
+        if not cfg.slurm.account_usage:
+            return self._empty_report(host, want, note=f"account usage is off for {host} in config")
+        if sched is None or ctx is None:
+            return self._failed_report(host, want, HostError(ErrorKind.SSH, f"{host}: not connected yet"))
+        hs = self.store.hosts.get(host)
+        sched.restore_account(hs.snapshot.account if hs is not None and hs.snapshot is not None else None)
+        sections = sched.account_sections(want, ctx)
+        if not sections:            # no slurmdbd / no account of this cluster (cheap: no I/O, so never kept)
+            return self._empty_report(host, want, note="Slurm accounting not available on this cluster")
+        res = await self._on_demand(host, framing.make_script(sections, "account"))
+        if res.error is not None:
+            return self._failed_report(host, want, res.error)
+        try:
+            report = sched.ingest_account(want, res.sections, self._context(host) or ctx)
+        except Exception as e:
+            log.exception("%s: ingest_account failed", host)
+            return self._failed_report(host, want, HostError(ErrorKind.INTERNAL, f"internal error: {e}"[:80]))
+        if report is None:
+            return self._empty_report(host, want)
+        if report_read_nothing(report):        # every section failed: never stored over the last good report
+            return self._failed_report(host, want, *report.errors)
+        report = merged_report(report, self._reports.get((host, want)))
+        if hs is not None and hs.snapshot is not None:  # a failed read the last report could not fill: the snapshot's
+            report = dataclasses.replace(report, summary=merged_account(report.summary, hs.snapshot.account)
+                                         or report.summary)
+        self._reports[(host, want)] = report
+        self._reports[(host, report.window)] = report          # "period" answered as "30d" is that window's too
+        if self.cache is not None:
+            self.cache.put_account_report(report)
+            if want != report.window:                          # and the cache-only lookup of "period" finds it
+                self.cache.put_account_report(report, want)
+        self.store.notify_account(host)
+        return report
+
+    def _empty_report(self, host: str, want: UsageWindow, *, note: str | None = None,
+                      errors: tuple[HostError, ...] = ()) -> AccountReport:
+        """No accounting to read (or nothing read): the snapshot's summary when there is one, else an empty one."""
+        now = self.clock.now()
+        hs = self.store.hosts.get(host)
+        summary = hs.snapshot.account if hs is not None and hs.snapshot is not None else None
+        window: UsageWindow = "30d" if want == "period" else want
+        if summary is None or note is not None:
+            summary = AccountSummary(window=window, read_at=now, mode="usage_only", notes=(note,) if note else ())
+        return AccountReport(host=host, window=summary.window, fetched_at=now, summary=summary, errors=errors)
+
+    def _failed_report(self, host: str, want: UsageWindow, *errors: HostError) -> AccountReport:
+        last = self._reports.get((host, want))
+        if last is not None:
+            return dataclasses.replace(last, errors=errors)
+        return self._empty_report(host, want, errors=errors)
+
     # ================================================================ hosts import and diagnostics
     async def probe_alias(self, alias: str) -> DetectReport:
         from runfleet.probe import framing
@@ -1213,6 +1346,7 @@ class FleetService(FleetAPI):
                       self._jobmeta, self._ended):
                 d.pop(host, None)
             self._details = {k: v for k, v in self._details.items() if k.host != host}
+            self._reports = {k: v for k, v in self._reports.items() if k[0] != host}
             self.store.remove_host(host)
             for p in self._pollers.values():
                 p.n_hosts = len(self.store.hosts)
@@ -1502,6 +1636,44 @@ def _empty_answer(st: SectionStatus) -> bool:
     (NvidiaMonitor reports no GPUs for it), so the cached GPUs of a box whose GPUs went away do not come back."""
     return st.name == "nvidia.gpu" and (st.rc == 6 or (st.error is not None
                                                        and "No devices were found" in st.error.detail))
+
+
+def report_failures(report: AccountReport) -> frozenset[str]:
+    """The parts of an on-demand account report (§5.2.11) its failing sections left unread: "share" (balances),
+    "sreport" (usage and account totals), "rollup" (no cell, some sacct chunk failing)."""
+    sections = {e.section or "" for e in report.errors}
+    out: set[str] = set()
+    if "slurm.acct_share" in sections:
+        out.add("share")
+    if any(s.startswith("slurm.acct_sreport") for s in sections):
+        out.add("sreport")
+    if not report.cells and any(s.startswith("slurm.acct_jobs") for s in sections):
+        out.add("rollup")
+    return frozenset(out)
+
+
+def report_read_nothing(report: AccountReport) -> bool:
+    """Every part of the report failed (sshare, sreport and every sacct chunk): nothing to keep or store."""
+    return {"share", "sreport", "rollup"} <= report_failures(report)
+
+
+def merged_report(new: AccountReport, old: AccountReport | None) -> AccountReport:
+    """A partly failed report with the failed parts taken from the last good report of the same window, each with
+    its own time: the balances / usage through `merged_account`, the account totals when sreport failed, and the
+    rollup when every chunk failed (then the report keeps the old `fetched_at`: its age shows and it is asked
+    again)."""
+    if old is None or old.window != new.window:
+        return new
+    failed = report_failures(new)
+    if not failed:
+        return new
+    out = dataclasses.replace(new, summary=merged_account(new.summary, old.summary) or new.summary)
+    if "sreport" in failed and not new.account_totals:
+        out = dataclasses.replace(out, account_totals=old.account_totals)
+    if "rollup" in failed and old.cells:
+        out = dataclasses.replace(out, cells=old.cells, jobs_seen=old.jobs_seen, truncated=old.truncated,
+                                  fetched_at=old.fetched_at, window_start=old.window_start)
+    return out
 
 
 def _empty(value: object) -> bool:
