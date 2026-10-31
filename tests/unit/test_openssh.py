@@ -368,15 +368,16 @@ async def test_master_that_did_not_take_the_socket_is_an_error_and_reaped(
 @pytest.mark.posix                # ps and a symlinked python
 async def test_pids_with_args_finds_exact_command_lines() -> None:
     import subprocess as sp
+    import sys
 
     from runfleet.transport.openssh import _pids_with_args
 
-    fake = Path(shutil.which("sleep") or "/bin/sleep")
-    link = Path(__file__).parent / "__pycache__" / "fake-ssh-sleep"     # a program whose name contains "ssh"
+    # python, not sleep: a multi-call coreutils (uutils, Ubuntu 26.04) refuses to run under another name
+    link = Path(__file__).parent / "__pycache__" / "fake-ssh-py"        # a program whose name contains "ssh"
     link.parent.mkdir(exist_ok=True)
     link.unlink(missing_ok=True)
-    link.symlink_to(fake)
-    proc = sp.Popen([str(link), "61.25"], start_new_session=True)
+    link.symlink_to(sys.executable)
+    proc = sp.Popen([str(link), "-c", "import time; time.sleep(60)", "61.25"], start_new_session=True)
     try:
         assert await _pids_with_args(["ssh", "61.25"]) == [proc.pid]      # wrapper/full path: matched on the tail
         assert await _pids_with_args(["ssh", "61.2"]) == []
