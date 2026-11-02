@@ -463,6 +463,7 @@ def test_legend_shows_panel_glyphs_only_with_the_panel() -> None:
     starts = {x.index(" ", len("✖ ✓ ■ ◷ ↻ ◌")) for x in roomy}
     assert len(starts) == 1, roomy                                  # every description starts in the same cell
     assert any(x.startswith("◎ ") and "GPU watch fired" in x for x in roomy)   # review fix: the watches' glyph too
+    assert any(x.startswith("↪ ") and "resumes one that ended badly" in x for x in roomy)
 
 
 # ---------------------------------------------------------------- deep review (B E F G J K L U V)
@@ -640,7 +641,7 @@ def test_rank_cache_expires_when_a_failure_crosses_a_line() -> None:
     assert st.snapshot is not None
     crash = slurm_job("k2", "77", "crashed", JobState.FAILED, elapsed=timedelta(minutes=5), ended_ago=50, exit_code=1)
     st.snapshot = dataclasses.replace(st.snapshot, jobs={crash.key.id: crash})
-    view = SimpleNamespace(_ranks={})
+    view = SimpleNamespace(_ranks={}, _memo=fl.Memo())
     ranked, _ = FleetView._ranked(view, st, T0, 60.0)                 # type: ignore[misc]
     assert [r.job.key.id for r in ranked] == ["77"]
     ranked, _ = FleetView._ranked(view, st, T0 + timedelta(seconds=15), 60.0)    # same minute, out of the window
@@ -806,3 +807,77 @@ def test_attention_says_why() -> None:
     assert why["stalled"].startswith("log idle 51m · ")
     assert why["never"] == "never: dependency failed · no est."
     assert why["t1"].startswith("GPU idle 20m")
+
+
+# ---------------------------------------------------------------- resubmissions (§5.2.12)
+def _chain() -> list:
+    """A preempted run resubmitted 13 min later (same name), then a failure resubmitted twice (F → F → R)."""
+    pr = slurm_job("k2", "58717472", "orb-swp--train--s47--a01", JobState.PREEMPTED, elapsed=timedelta(hours=8),
+                   ended_ago=3600, submit_ago=10 * 3600)
+    rs = slurm_job("k2", "58721477", "orb-swp--train--s47--a01", JobState.RUNNING, elapsed=timedelta(minutes=45),
+                   submit_ago=2820)
+    f1 = slurm_job("k2", "301", "orb-eval--s45--a01", JobState.FAILED, elapsed=timedelta(minutes=2),
+                   ended_ago=3 * 3600, submit_ago=4 * 3600, exit_code=1)
+    f2 = slurm_job("k2", "302", "orb-eval--s45--a02", JobState.FAILED, elapsed=timedelta(minutes=2),
+                   ended_ago=2 * 3600, submit_ago=3 * 3600 - 60, exit_code=1)
+    f3 = slurm_job("k2", "303", "orb-eval--s45--a03", JobState.RUNNING, elapsed=timedelta(minutes=30),
+                   submit_ago=2 * 3600 - 60)
+    return [pr, rs, f1, f2, f3]
+
+
+def test_resubmitted_failures_rank_last_and_never_need_you() -> None:
+    ranked = fl.rank_slurm(_chain(), T0, DAY)
+    assert [(r.rank, r.job.key.id) for r in ranked] == [
+        (4, "58721477"), (4, "303"), (fl.SUPERSEDED, "58717472"), (fl.SUPERSEDED, "302"), (fl.SUPERSEDED, "301")]
+    by_id = {r.job.key.id: r for r in ranked}
+    assert [j.key.id for j in by_id["301"].after] == ["302", "303"]
+    assert by_id["58721477"].resumes is not None and by_id["58721477"].resumes.key.id == "58717472"
+    assert fl.attention([("k2", True, ranked)]) == []                     # history, not something to act on
+    detail = fl.row_cells(by_id["301"], T0).detail.plain
+    assert detail == "→ 302 F → 303 R" and fl.row_cells(by_id["58717472"], T0).detail.plain == "→ 58721477 R"
+    lines = [x.plain for x in fl.list_lines(ranked, 6, T0, inner=81, wide=True)]
+    assert any("orb-swp--train--s47--a01" in x and "→ 58721477 R" in x and "1h ago" in x for x in lines)
+    assert fl.rank_slurm(_chain(), T0, DAY, fl.lineage_of("k2", _snap(_chain()))) == ranked
+
+
+def _snap(jobs: list):
+    from runfleet.models import HostSnapshot
+    return HostSnapshot("k2", T0, None, {j.key.id: j for j in jobs}, (), (), (), (), None)
+
+
+def test_the_newest_job_of_a_chain_carries_the_attention() -> None:
+    """A chain whose newest job failed too: only that one needs the user, and it says what it resumes."""
+    *_rest, f1, f2, f3 = _chain()
+    f3 = dataclasses.replace(f3, state=JobState.OUT_OF_MEMORY, end_time=T0 - timedelta(minutes=10),
+                             raw={"reason_text": "out of memory"})
+    ranked = fl.rank_slurm([f1, f2, f3], T0, DAY)
+    entries = fl.attention([("k2", True, ranked)])
+    assert [(e.tier, str(e.key)) for e in entries] == [(0, "k2:303")]
+    why = fl.attention_why(entries[0], T0).plain
+    assert why == "out of memory · 10m ago · resumes 302 (FAILED)"
+
+
+def test_lineage_is_linked_once_per_jobs_mapping() -> None:
+    memo = fl.Memo()
+    snap = _snap(_chain())
+    first = fl.lineage_of("k2", snap, memo)
+    assert fl.lineage_of("k2", snap, memo) is first and first.superseded(JobKey("k2", "58717472"))
+    changed = dataclasses.replace(snap, jobs=dict(snap.jobs))
+    assert fl.lineage_of("k2", changed, memo) is not first
+
+
+def test_activity_rows_say_resubmitted_and_drop_the_bad_news() -> None:
+    jobs = _chain()
+    snap = _snap(jobs)
+    ended = fl.own_ended(snap)
+    key = JobKey("k2", "58721477")
+    hist = [JobEvent("resubmitted", key, "orb-swp--train--s47--a01", JobState.PENDING, T0 - timedelta(minutes=47),
+                     "resumes 58717472 (PREEMPTED)")]
+    rows = fl.activity_rows(ended, hist, T0, DAY, T0 - timedelta(hours=6), lineage=fl.lineage_of("k2", snap))
+    pr = next(r for r in rows if r.key == JobKey("k2", "58717472"))
+    assert pr.glyph == fl.GLYPHS["bad"] and not pr.bad and pr.summary.endswith("→ resubmitted as 58721477")
+    rs = next(r for r in rows if r.key == key)
+    assert (rs.glyph, rs.bad, rs.summary) == ("↪", False, "resumes 58717472 (PREEMPTED)")
+    plain = fl.activity_rows(ended, (), T0, DAY, T0 - timedelta(hours=6))          # no links known: bad news
+    assert next(r for r in plain if r.key == JobKey("k2", "58717472")).bad
+    assert fl.count_text(ended, hist, T0 - timedelta(hours=6)) == "2 failed · 1 preempted"   # counts stay history

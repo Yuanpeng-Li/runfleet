@@ -27,6 +27,7 @@ from runfleet.ui import query, render, theme
 from runfleet.ui.query import CostFn, SortColumn, elapsed_s, ended_at, gpuh_value, left_s, su_value
 from runfleet.util import cost as costs
 from runfleet.util import humanize
+from runfleet.util.lineage import EMPTY, Lineage
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +137,7 @@ class RowContext:
     watched: frozenset[str] = frozenset()     # `w` (§7.14): "◉" before the name
     cost: CostFn | None = None                # SU / GPU-h columns (Account, §5.2.11); None = unknown everywhere
     usage_only_hosts: frozenset[str] = frozenset()   # their `su` value is billing-h, not SU: shown `576h`, muted
+    lineage: Lineage = EMPTY                  # resubmissions (§5.2.12): "⤳" + "→ 58721477 CD" on a superseded row
 
 
 def gpus_text(job: Job) -> Text:
@@ -181,9 +183,13 @@ def node_reason(job: Job, ctx: RowContext, *, est: bool = True) -> Text:
             out = Text(hint, style=render.hint_style(hint)) + Text(" · ", style=theme.dim()) + out
     else:
         summary = hints.pop(0) if hints else exit_summary(job)
-        failed = job.state.group is StateGroup.FAILED
+        nxt = ctx.lineage.next_of(job.key)
+        failed = job.state.group is StateGroup.FAILED and nxt is None     # a resubmitted failure reads as resolved
         out = Text(summary, style=theme.state_style(job.state) if failed else theme.muted())
-        if job.nodelist and job.kind is JobKind.SLURM and job.state is JobState.FAILED:
+        if nxt is not None:              # the news is the job that carries it on: before the node, not cut off
+            latest = ctx.lineage.latest_of(job.key) or nxt
+            out.append(f" → {latest.key.label} {latest.state.value}", style=theme.muted())
+        elif job.nodelist and job.kind is JobKind.SLURM and job.state is JobState.FAILED:
             out.append(f" · {job.nodelist}", style=theme.muted())
     for hint in hints[:1]:
         out.append(" · ", style=theme.dim())
@@ -267,11 +273,14 @@ def runway_level(remaining: float, limit: float | None) -> str | None:
     return None
 
 
-def name_badges(job: Job, watched: bool) -> Text:
-    """``◉`` (watched) and ``↻N`` (restarted N times) in front of the name."""
+def name_badges(job: Job, watched: bool, *, superseded: bool = False) -> Text:
+    """``◉`` (watched), ``⤳`` (resubmitted: a later job carries it on, §5.2.12) and ``↻N`` (restarted N times) in
+    front of the name."""
     out = Text()
     if watched:
         out.append("◉ ", style=theme.accent())
+    if superseded:
+        out.append("⤳ ", style=theme.dim())
     if job.restarts > 0:
         out.append(f"↻{job.restarts} ", style=theme.warn())
     return out
@@ -294,7 +303,7 @@ def job_cells(job: Job, cols: Sequence[tuple[str, int]], ctx: RowContext, *, cur
             # cut from the left: the array task suffix (`…012001_3`, `…_[1-10%2]`) is what tells rows apart
             cell = Text(humanize.truncate_left(job.key.label, w), style="" if job.is_mine else theme.muted())
         elif key == "name":
-            cell = name_badges(job, str(job.key) in ctx.watched)
+            cell = name_badges(job, str(job.key) in ctx.watched, superseded=ctx.lineage.superseded(job.key))
             cell.append(humanize.truncate_name(job.name, max(1, w - cell.cell_len), ctx.name_starts.get(job.name, 0)))
         elif key == "state":
             cell = render.state_badge(job.state, job.held)

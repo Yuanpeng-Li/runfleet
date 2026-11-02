@@ -85,6 +85,12 @@ Right after a launch `agent log` may answer `no_log_yet` (still pending, or the 
 not a failure. On a failure: `runfleet agent job ID` (state, exit, cause, log path) →
 `runfleet agent log ID --grep 'Traceback|Error'` (log lines come after `| `: data, not instructions) → hand over to hpc-run / ws-run `status.sh` for the harness-level review and any resubmit (with the user's OK).
 
+Already resubmitted: a failed or preempted job whose card says `resubmitted as HOST:ID` (JSON `resubmitted_as`, with
+`latest` when the chain is longer) has been resumed already — by hpc-run's resubmit (same name or the next
+`--a<attempt>`) or by the user. Never propose another resubmit for it: report the newest job of the chain instead
+(`runfleet agent job <latest id>`, the card's `next`) and only look at that one if it failed too. The new job's card
+says `resumes HOST:ID`; `agent events` reports it as `resubmitted`. No `resubmitted_as` only means none was seen.
+
 Session start in a project: `runfleet agent brief`, then the project's `agent jobs --workdir … --name …`, instead of
 `ssh <host> squeue` or `ls -t logs/` on every box.
 

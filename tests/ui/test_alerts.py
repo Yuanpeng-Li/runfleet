@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.widgets import OptionList
+from textual.widgets import OptionList, Static
 
 from runfleet.config import NotifySettings
 from runfleet.core.events import JobEvent, Notice
@@ -394,3 +394,53 @@ async def test_notifications_list_fits_a_short_terminal(make_app: Any) -> None:
             await pilot.press("down")
         await pilot.pause()
         assert menu.highlighted == 29 and menu.region.bottom <= box.region.bottom
+
+
+# ---------------------------------------------------------------------------------------------------- resubmissions
+def lyra_resubmit(svc: FakeService) -> None:
+    """lyra's PREEMPTED 31354789 (PreemptMode CANCEL) resubmitted 30 min later as 31358335, which completed."""
+    job = slurm_job("lyra", "31358335", "orb-swp--train--places-cosinewarm--s47--a01", JobState.COMPLETED,
+                    elapsed=timedelta(hours=2), ended_ago=15 * 3600, submit_ago=17.5 * 3600, exit_code=0,
+                    gpu_type="rtx6000", node="r71-00", partition="free-gpu", user="alice07")
+    svc.put_job(dataclasses.replace(job, is_mine=True))
+
+
+def test_hook_env_of_a_resubmission() -> None:
+    e = JobEvent("resubmitted", JobKey("lyra", "31358335"), "orb", JobState.PENDING, T0,
+                 "resumes 31354789 (PREEMPTED)")
+    env = hook_env(Notice("lyra", e.text(), (e,)))
+    assert env["RUNFLEET_EVENT"] == "resubmitted" and env["RUNFLEET_STATE"] == "PENDING"
+    assert env["RUNFLEET_SUMMARY"] == "lyra:31358335 orb resubmitted: resumes 31354789 (PREEMPTED)"
+
+
+async def test_digest_lists_a_resubmitted_failure_last_and_says_what_carries_it_on(make_app: MakeApp) -> None:
+    app, svc = make_app()
+    lyra_resubmit(svc)
+    async with app.run_test(size=(120, 35)) as pilot:
+        await pilot.pause(FLUSH)
+        await pilot.press("D")
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, DigestScreen)
+        assert [str(j.key) for j in app.screen.failures] == ["lyra:31327454", "lyra:31354789"]   # open ones first
+        assert "failures (2, 1 resubmitted)" in str(app.screen.query(Static)[1].render())
+        menu = app.screen.query_one(OptionList)
+        last = str(menu.get_option_at_index(1).prompt)
+        assert "31354789" in last and "→ resubmitted as 31358335 (COMPLETED)" in last
+        assert "resubmitted" not in str(menu.get_option_at_index(0).prompt)
+
+
+@pytest.mark.parametrize("resubmitted", [False, True])
+async def test_away_toast_is_no_warning_when_the_failures_were_resubmitted(make_app: MakeApp,
+                                                                           resubmitted: bool) -> None:
+    app, svc = make_app()
+    if resubmitted:
+        lyra_resubmit(svc)
+    async with app.run_test(size=(120, 35)) as pilot:
+        await pilot.pause(FLUSH)
+        app._toasts.clear()                                                      # the start's toasts: no rate limit
+        app.alerts._away = (T0 - timedelta(hours=19), None, app.clock.monotonic())   # back after 19 h: one failure
+        app.alerts.check_away()
+        await pilot.pause(0.1)
+        toast = next(n for n in app._notifications if n.message.startswith("since "))
+        assert "1 preempted" in toast.message                                    # still counted: history
+        assert toast.severity == ("information" if resubmitted else "warning")

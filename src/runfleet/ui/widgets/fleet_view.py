@@ -221,8 +221,11 @@ class FleetView(Widget, can_focus=False):
         if (hit is not None and hit[0] is snap.jobs and hit[1] == minute and hit[2] == window
                 and (hit[3] is None or now < hit[3])):
             return hit[4], hit[5]
-        rank = fleet_layout.rank_slurm if is_cluster(state) else fleet_layout.rank_ws
-        ranked = rank(snap.jobs.values(), now, window)
+        if is_cluster(state):        # resubmitted failures rank last, never "needs you" (links once per jobs mapping)
+            lineage = fleet_layout.lineage_of(state.config.name, snap, self._memo)
+            ranked = fleet_layout.rank_slurm(snap.jobs.values(), now, window, lineage)
+        else:
+            ranked = fleet_layout.rank_ws(snap.jobs.values(), now, window)
         starts = fleet_layout.ranked_starts(ranked)
         self._ranks[state.config.name] = (snap.jobs, minute, window, fleet_layout.rank_expiry(ranked, window), ranked,
                                           starts)

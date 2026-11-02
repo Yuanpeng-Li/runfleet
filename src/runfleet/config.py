@@ -92,7 +92,8 @@ class UISettings:
     jobs_columns: tuple[str, ...] = ("host", "id", "name", "state", "elapsed", "left", "gpus", "gpu_util",
                                      "node_reason")
 
-NOTIFY_EVENTS = ("started", "ended_bad", "ended_ok", "ended_other", "restarted", "time_low", "gpu_idle")
+NOTIFY_EVENTS = ("started", "ended_bad", "ended_ok", "ended_other", "restarted", "time_low", "gpu_idle",
+                 "resubmitted")
 
 @dataclass(frozen=True, slots=True)
 class NotifySettings:

@@ -14,6 +14,11 @@ landed in another job. Workstation tasks keep their own GPU / Procs views.
 Job cost (Account, §5.2.11, §7.17): a Slurm job's `cost` line under `tres`, one line in the compact Summary and the GPU
 tab's Cost box, all from ``util.cost.job_cost`` with the host's cached charging rules (no remote command); the 1 Hz
 ``refresh_time`` re-renders them while the job runs, so the hours accrue live.
+
+Resubmissions (§5.2.12, ``app.lineage()``): a bad ending a later job carries on keeps its cause chip, but the line says
+"resubmitted as 58721477 · done 7h ago" (and "→ latest …" for a longer chain) instead of the advice, the title gets
+"⤳" and the Job box a `resubmit` row; the job that carries one on gets a `resumes` row (the compact Summary: on the
+cause line). The ids are clickable; `n` opens the next attempt, `N` the one this job resumes (its crumb leads back).
 """
 
 from __future__ import annotations
@@ -53,7 +58,8 @@ from runfleet.util import humanize
 from runfleet.util.cost import JobCost
 from runfleet.util.efficiency import CPU_LOW, GPU_LOW, MEM_LOW, TIME_LOW, Efficiency, efficiency
 from runfleet.util.efficiency import rows as efficiency_rows
-from runfleet.util.logscan import EXIT_SCAN_LINES, TRIAGE_LINES, Cause, cause_of, exit_cause
+from runfleet.util.lineage import EMPTY, Lineage
+from runfleet.util.logscan import EXIT_SCAN_LINES, TRIAGE_LINES, Cause, cause_of, exit_cause, preempt_mode_for
 
 TABS = ("summary", "gpu", "logs", "steps", "procs", "raw")
 TAB_TITLES = {"summary": "Summary", "gpu": "GPU", "logs": "Logs", "steps": "Steps", "procs": "Procs", "raw": "Raw"}
@@ -95,12 +101,12 @@ def _title_right(job: Job, now: datetime, short: bool) -> Text:
     return right
 
 
-def title_line(job: Job, now: datetime, width: int, *, watched: bool = False) -> Text:
-    """`host:id  ◉ ↻1 name  STATE  times`; when narrow the times shorten before the name is cut (80 columns read
+def title_line(job: Job, now: datetime, width: int, *, watched: bool = False, superseded: bool = False) -> Text:
+    """`host:id  ◉ ⤳ ↻1 name  STATE  times`; when narrow the times shorten before the name is cut (80 columns read
     `orb-swp--eval--plac…` with room to spare)."""
     left = Text(f"{job.key.host}:{job.key.label}", style="bold")
     left.append("  ")
-    left.append_text(name_badges(job, watched))
+    left.append_text(name_badges(job, watched, superseded=superseded))
     left.append(job.name)
     right = _title_right(job, now, short=False)
     if width - left.cell_len - right.cell_len - 2 < 2:
@@ -121,7 +127,27 @@ def _pair(l1: str, v1: str | Text, l2: str = "", v2: str | Text = "", width: int
     return out
 
 
-def job_box_lines(job: Job, detail: JobDetail | None, now: datetime, width: int) -> list[Text]:
+def link_rows(job: Job, links: Lineage, now: datetime) -> list[Text]:
+    """The Job box's resubmission rows (§5.2.12): ``resubmit 58721477 done · 7h ago`` (+ ``→ latest …``) on a bad
+    ending a later job carries on, ``resumes 58717472 preempted · 7h ago`` on the job that carries one on."""
+    rows: list[Text] = []
+    for label, other in (("resubmit", links.next_of(job.key)), ("resumes", links.prev_of(job.key))):
+        if other is None:
+            continue
+        value = render.link_ref(other)
+        when = render.link_when(other, now)
+        if when:
+            value.append(f" · {when}", style=theme.muted())
+        latest = links.latest_of(job.key) if label == "resubmit" else None
+        if latest is not None and latest.key != other.key:
+            value.append(" → latest ", style=theme.muted())
+            value.append_text(render.link_ref(latest))
+        rows.append(_pair(label, value))
+    return rows
+
+
+def job_box_lines(job: Job, detail: JobDetail | None, now: datetime, width: int,
+                  links: Lineage = EMPTY) -> list[Text]:
     lines: list[Text] = []
     if job.kind is JobKind.TASK:
         lines.append(_pair("user", job.user, "root pid", job.job_id_raw, width))
@@ -151,6 +177,7 @@ def job_box_lines(job: Job, detail: JobDetail | None, now: datetime, width: int)
         requeue = (detail.fields.get("Requeue") if detail else None) or job.raw.get("Requeue")
         lines.append(_pair("restarts", str(job.restarts), "requeue",
                            {"1": "yes", "0": "no"}.get(requeue or "", requeue or humanize.NONE), width))
+        lines += link_rows(job, links, now)
         if job.cpu_pct is not None or job.rss_bytes is not None:      # sstat, running jobs (§5.1)
             cpu = f"{humanize.cpu_load(job.cpu_pct)} avg" if job.cpu_pct is not None else humanize.NA
             lines.append(_pair("cpu", cpu, "peak rss", humanize.size(job.rss_bytes), width))
@@ -795,25 +822,43 @@ def detail_problem(detail: JobDetail) -> str | None:
 
 
 # ---------------------------------------------------------------- triage (§5.2.8)
-def cause_line(job: Job, cause: Cause | None, width: int) -> Text | None:
+def cause_line(job: Job, cause: Cause | None, width: int, *, links: Lineage = EMPTY, now: datetime | None = None,
+               resumes: bool = False) -> Text | None:
     """The line under the title: an ended job's cause chip with the first log line that shows it (else its one-line
     explanation) and the key that opens the log there; a pending job's reason chip with what to do about it and the
-    start estimate's caveat. None = nothing to say (running, completed)."""
+    start estimate's caveat. None = nothing to say (running, completed).
+
+    A bad ending a later job carries on (§5.2.12, ``links`` with ``now``) keeps its chip, but says "resubmitted as …"
+    instead (muted: resolved, not an error). ``resumes``: the compact Summary, which has no Job box, also says which
+    bad ending this job carries on ("resumes 58717472 preempted 7h ago")."""
+    resolved = render.resubmitted_text(job, links, now) if now is not None else None
+    carries = render.resumes_text(job, links, now) if now is not None and resumes else None
     if job.state.group is StateGroup.QUEUED:
         reason = render.reason_text(job.reason, short=True).plain
         advice = job.raw.get("reason_advice")
         if not reason and not advice:
-            return None
+            return render.fit(carries, width) if carries is not None else None
         out = render.cause_chip(reason or "pending", pending=True)
+        if carries is not None:
+            out.append(" ")
+            out.append_text(carries)
+            out.append(" ·", style=theme.dim())
         if advice:
             out.append(" " + advice, style=theme.muted())
         if job.est_start and job.start_time is not None:
             out.append(f" · est start {humanize.local_hm(job.start_time)} (Slurm's guess; it moves)", style=theme.dim())
         return render.fit(out, width)
     if cause is None:
-        return None
+        line = Text(" · ", style=theme.dim()).join(t for t in (resolved, carries) if t is not None)
+        return render.fit(line, width) if line.cell_len else None
     out = render.cause_chip(cause.code)
     out.append(" ")
+    if carries is not None:
+        out.append_text(carries)
+        out.append(" · ", style=theme.dim())
+    if resolved is not None:         # the advice is moot: say who carries it on (L still opens the failure line)
+        out.append_text(resolved)
+        return render.fit(out, width)
     key = Text("  L: log at this line", style=theme.dim()) if cause.evidence and cause.pattern is not None else Text()
     body = Text(cause.evidence, style=theme.error()) if cause.evidence else Text(cause.text, style=theme.muted())
     room = width - out.cell_len - key.cell_len
@@ -879,9 +924,11 @@ class JobDetailScreen(FleetScreen):
     HELP_CONTEXTS = ("job_detail", "global")
     HELP_TITLE = "Job detail"
 
-    def __init__(self, key: JobKey) -> None:
+    def __init__(self, key: JobKey, *, via: JobKey | None = None) -> None:
+        """``via``: the job this one was opened from with `n` / `N` (§5.2.12): a crumb leads back there."""
         super().__init__()
         self.key = key
+        self.via = via
         self.job: Job | None = None
         self.detail: JobDetail | None = None
         self.detail_error: str | None = None
@@ -905,7 +952,10 @@ class JobDetailScreen(FleetScreen):
         job = self.rf.store.job(self.key)
         self.job = job
         label = job.key.label if job is not None else self.key.id
-        yield FleetHeader(crumbs=[("Jobs", ("view", "jobs")), label], host=self.key.host, id="header")
+        crumbs: list[Any] = [("Jobs", ("view", "jobs"))]
+        if self.via is not None:           # opened with n / N: back through the attempt it came from
+            crumbs.append((self.via.label, ("job", self.via.host, self.via.id)))
+        yield FleetHeader(crumbs=[*crumbs, label], host=self.key.host, id="header")
         yield Static("", id="title", classes="title-line")
         yield Static("", id="banner", classes="title-line")
         cause = Static("", id="cause", classes="title-line")      # cause chip / pending reason (§5.2.8)
@@ -1213,7 +1263,8 @@ class JobDetailScreen(FleetScreen):
         if job is None:
             self.query_one("#title", Static).update(Text(f" {self.key} — no longer known", style=theme.warn()))
             return
-        self.query_one("#title", Static).update(title_line(job, now, width, watched=self.rf.alerts.is_watched(job)))
+        self.query_one("#title", Static).update(title_line(job, now, width, watched=self.rf.alerts.is_watched(job),
+                                                           superseded=self.rf.lineage().superseded(job.key)))
         banner = stale_banner(self.rf.store.hosts.get(self.key.host), now, context="job_detail")
         if self.detail_error:
             banner = Text(self.detail_error, style=theme.warn())
@@ -1303,7 +1354,7 @@ class JobDetailScreen(FleetScreen):
         self._render_compact(job, eff, cost, now)
         job_box = self.query_one("#job-box", Static)
         job_box.border_title = "Task" if job.kind is JobKind.TASK else "Job"
-        job_box.update(Text("\n").join(job_box_lines(job, detail, now, left_w)))
+        job_box.update(Text("\n").join(job_box_lines(job, detail, now, left_w, self.rf.lineage())))
         self._render_resources(job, cost)
         self._render_cost_box(job, cost, now)
         gpu_box = self.query_one("#gpu-box", Static)
@@ -1333,11 +1384,20 @@ class JobDetailScreen(FleetScreen):
         reason and what to do). Its tooltip carries the full explanation."""
         job = self.job
         widget = self.query_one("#cause", Static)
-        self.cause = cause_of(job, self.detail, self._triage) if job is not None else None
-        line = cause_line(job, self.cause, (self.size.width or 120) - 2) if job is not None else None
+        if job is None:
+            self.cause = None
+            widget.display = False
+            return
+        self.cause = cause_of(job, self.detail, self._triage, preempt_mode=preempt_mode_for(self._caps(), job.partition))
+        links = self.rf.lineage()
+        line = cause_line(job, self.cause, (self.size.width or 120) - 2, links=links, now=self.rf.now(),
+                          resumes=not self.summary_log)
         widget.display = line is not None
         widget.update(line or "")
-        widget.tooltip = self.cause.plain() if self.cause is not None else None
+        tips = [self.cause.plain()] if self.cause is not None else []
+        if links.superseded(job.key) or links.prev_of(job.key) is not None:
+            tips.append("resubmissions: " + render.chain_plain(job, links))
+        widget.tooltip = "\n".join(tips) or None
 
     def _render_gpu_tab(self, job: Job, detail: JobDetail | None, gpu_tres: bool | None, width: int) -> None:
         ui = self.rf.service.config.ui
@@ -1566,6 +1626,35 @@ class JobDetailScreen(FleetScreen):
         else:
             self.rf.toast("no failure line in the loaded log" if cause is not None else "no cause: the job has not "
                           "failed", severity="warning")
+
+    def _history_note(self) -> str:
+        state = self.rf.store.hosts.get(self.key.host)
+        window = state.config.slurm.sacct_window if state is not None else None
+        return f" (history covers the last {humanize.window(window)})" if window else ""
+
+    def action_next_attempt(self) -> None:
+        """`n`: the job that carries this bad ending on (§5.2.12); its crumb leads back through this one."""
+        job = self.job
+        nxt = self.rf.lineage().next_of(self.key) if job is not None else None
+        if nxt is not None:
+            self.app.push_screen(JobDetailScreen(nxt.key, via=self.key))
+            return
+        if job is None or job.kind is not JobKind.SLURM:
+            why = "resubmissions are linked for Slurm jobs only"
+        elif not job.state.is_terminal or job.state.group is StateGroup.DONE:
+            why = f"{job.key.label} did not end badly: nothing carries it on"
+        else:
+            why = f"{job.key.label}: not resubmitted as far as RunFleet sees{self._history_note()}"
+        self.rf.toast(why, severity="warning")
+
+    def action_prev_attempt(self) -> None:
+        """`N`: the bad ending this job carries on (§5.2.12); its crumb leads back through this one."""
+        prev = self.rf.lineage().prev_of(self.key) if self.job is not None else None
+        if prev is not None:
+            self.app.push_screen(JobDetailScreen(prev.key, via=self.key))
+            return
+        self.rf.toast(f"{self.key.label} resumes no earlier job as far as RunFleet sees{self._history_note()}",
+                      severity="warning")
 
     def action_toggle_follow(self) -> None:
         for view in self.query(LogView):

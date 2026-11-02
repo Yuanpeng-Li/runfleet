@@ -2,6 +2,8 @@
 
 Both are dialogs over the current screen; ``enter`` on a row closes the dialog and opens that job (a GPU watch that
 fired: its host). The digest also offers ``f``: the Jobs view filtered to the jobs that ended since the last visit.
+A failure that was resubmitted (:mod:`runfleet.util.lineage`) is still listed, after the open ones, dim and with what
+carries it on.
 """
 
 from __future__ import annotations
@@ -16,13 +18,14 @@ from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
-from runfleet.core.events import JobEvent, count_line, end_summary, end_word, ended_at
+from runfleet.core.events import JobEvent, count_line, end_summary, end_word, ended_at, resubmitted_note
 from runfleet.models import Job, JobKey, StateGroup
 from runfleet.ui import keymap, render, theme
 from runfleet.ui.gpu_watch import WatchEvent
 from runfleet.ui.notify import since_label
 from runfleet.ui.screens import dialog_list_room
 from runfleet.util import humanize
+from runfleet.util.lineage import EMPTY, Lineage
 
 LIST_ROWS = 20                   # = the lists' max-height (less on a short terminal: dialog_list_room)
 _DIALOG_CSS = """
@@ -47,16 +50,22 @@ def event_text(event: JobEvent | WatchEvent, width: int = 96) -> Text:
     return render.fit(out, width)
 
 
-def failure_text(job: Job, width: int = 96) -> Text:
+def failure_text(job: Job, width: int = 96, after: Sequence[Job] = ()) -> Text:
+    """``k2:2332861  orb-…  F  exit 1  ended 17:23``; a resubmitted one (``after``: the jobs that carry it on) dim,
+    with ``→ resubmitted as 2332990 (COMPLETED)``."""
     out = Text(f"{job.key.host}:{job.key.label}  ", style="bold")
-    out.append(humanize.truncate(job.name, 40) + "  ")
+    out.append(humanize.truncate(job.name, 32 if after else 40) + "  ")
     out.append_text(render.state_badge(job.state, job.held))
     why = end_summary(job)
     if why:
         out.append(f"  {why}", style=theme.state_style(job.state))
+    if after:                                    # before the end time: the line may cut that, never the new id
+        out.append(f"  → {resubmitted_note(after)}", style=theme.muted())
     end = ended_at(job)
     if end is not None:
         out.append(f"  ended {humanize.local_hm(end)}", style=theme.muted())
+    if after:
+        out.stylize(theme.dim())
     return render.fit(out, width)
 
 
@@ -128,30 +137,45 @@ def digest_header(since: datetime, jobs: Sequence[Job], hosts: Sequence[str], no
 
 
 class DigestScreen(ModalScreen[tuple[str, JobKey | None] | None]):
-    """What ended since the last visit: counts per host, then the failures (``enter`` opens one, ``f`` filters)."""
+    """What ended since the last visit: counts per host, then the failures (``enter`` opens one, ``f`` filters): the
+    open ones first, then those already resubmitted (``lineage``; None: the app's :meth:`Alerts.lineage` at compose)."""
 
     BINDINGS = keymap.bindings("digest")
     HELP_CONTEXT = "digest"
     DEFAULT_CSS = _DIALOG_CSS
 
-    def __init__(self, since: datetime, jobs: Sequence[Job], hosts: Sequence[str], now: datetime) -> None:
+    def __init__(self, since: datetime, jobs: Sequence[Job], hosts: Sequence[str], now: datetime, *,
+                 lineage: Lineage | None = None) -> None:
         super().__init__()
         self.since = since
         self.jobs = list(jobs)
         self.hosts = list(hosts)
         self.now = now
+        self.lineage = lineage
         self.failures = [j for j in self.jobs if j.state.group in (StateGroup.FAILED, StateGroup.ENDED)]
+
+    def _sort_failures(self) -> Lineage:
+        """Open failures first, resubmitted ones after them (each newest first, as given)."""
+        if self.lineage is None:
+            alerts = getattr(self.app, "alerts", None)
+            self.lineage = alerts.lineage() if alerts is not None else EMPTY
+        lin = self.lineage
+        self.failures.sort(key=lambda j: lin.superseded(j.key))
+        return lin
 
     def compose(self) -> ComposeResult:
         box = Vertical(id="digest-box", classes="dialog")
         box.border_title = "Since you were away"
         box.border_subtitle = "↵ open job · f show in Jobs view · esc close"
+        lin = self._sort_failures()
         with box:
             yield Static(digest_header(self.since, self.jobs, self.hosts, self.now), id="digest-head")
             if self.failures:
-                yield Static(Text(f"\nfailures ({len(self.failures)})", style="bold"))
-                yield OptionList(*[Option(failure_text(j), id=str(j.key)) for j in self.failures],
-                                 id="digest-list")
+                done = sum(1 for j in self.failures if lin.superseded(j.key))
+                note = f", {done} resubmitted" if done else ""
+                yield Static(Text(f"\nfailures ({len(self.failures)}{note})", style="bold"))
+                yield OptionList(*[Option(failure_text(j, after=lin.chain_after(j.key)), id=str(j.key))
+                                   for j in self.failures], id="digest-list")
 
     def on_mount(self) -> None:
         found = self.query(OptionList)

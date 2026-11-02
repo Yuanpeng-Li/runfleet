@@ -3,10 +3,11 @@
 `TransitionDetector` keeps the last observed jobs of each host and turns the next observation into `JobEvent`s:
 started (queued → running, or a new task / job first seen running), ended (into a terminal state), restarted (the
 restart count went up or the job went back to the queue), time_low (running with less than max(10 % of the limit,
-10 min) left; once per run) and gpu_idle (the collector's `GPU idle …` hint first raised; once per run). Only the
-user's own jobs count. The first observation of a host is a baseline and yields nothing, so a start, a reconnect or
-a warm cache never floods; jobs that first appear already ended (sacct history arriving a tick late) only count when
-they ended after the baseline.
+10 min) left; once per run), gpu_idle (the collector's `GPU idle …` hint first raised; once per run) and resubmitted
+(a job first seen carrying on a bad ending, :mod:`runfleet.util.lineage`; once per job). Only the user's own jobs
+count. The first observation of a host is a baseline and yields nothing, so a start, a reconnect or a warm cache never
+floods; jobs that first appear already ended (sacct history arriving a tick late) only count when they ended after the
+baseline.
 
 `coalesce` folds one batch into notices (a burst on one host becomes one summary line), `wanted` applies the
 `[notify]` event selection, `ended_since` and `count_line` back the "since you were away" digest.
@@ -23,12 +24,14 @@ from typing import Literal
 from runfleet.config import NotifySettings
 from runfleet.models import Job, JobKey, JobKind, JobState, StateGroup
 from runfleet.util import humanize
+from runfleet.util.lineage import Lineage, link
 from runfleet.util.logscan import PENDING_EXIT_HINT
 
-EventKind = Literal["started", "ended", "restarted", "time_low", "gpu_idle"]
-Category = Literal["started", "ended_bad", "ended_ok", "ended_other", "restarted", "time_low", "gpu_idle"]
+EventKind = Literal["started", "ended", "restarted", "time_low", "gpu_idle", "resubmitted"]
+Category = Literal["started", "ended_bad", "ended_ok", "ended_other", "restarted", "time_low", "gpu_idle",
+                   "resubmitted"]
 CATEGORIES: tuple[Category, ...] = ("started", "ended_bad", "ended_ok", "ended_other", "restarted", "time_low",
-                                    "gpu_idle")
+                                    "gpu_idle", "resubmitted")
 BAD_END = frozenset({JobState.FAILED, JobState.TIMEOUT, JobState.OUT_OF_MEMORY, JobState.NODE_FAIL,
                      JobState.PREEMPTED, JobState.BOOT_FAIL, JobState.DEADLINE})
 TIME_LOW_FRACTION = 0.10
@@ -45,10 +48,10 @@ _END_WORDS: dict[JobState, str] = {
     JobState.EXITED: "ended",
 }
 _KIND_WORDS: dict[str, str] = {"started": "started", "restarted": "restarted", "time_low": "low on time",
-                               "gpu_idle": "GPU idle"}
+                               "gpu_idle": "GPU idle", "resubmitted": "resubmitted"}
 # order of words in a count line: the bad news first
 _WORD_ORDER = ("failed", "out of memory", "timeout", "node failure", "preempted", "boot failure", "deadline",
-               "restarted", "low on time", "GPU idle", "cancelled", "ended", "completed", "started")
+               "restarted", "low on time", "GPU idle", "cancelled", "ended", "completed", "resubmitted", "started")
 
 
 def end_word(state: JobState) -> str:
@@ -70,6 +73,22 @@ def end_summary(job: Job) -> str:
 def ended_at(job: Job) -> datetime | None:
     """When a terminal job ended (the observation time when the scheduler gave no end)."""
     return job.end_time or (job.observed_at if job.state.is_terminal else None)
+
+
+def resubmitted_note(chain: Sequence[Job]) -> str:
+    """What carries on a superseded job (:meth:`Lineage.chain_after`, oldest first): ``resubmitted as 58721477
+    (COMPLETED)``, plus ``→ latest 31327999 COMPLETED`` when the chain is longer than one ("" for none)."""
+    if not chain:
+        return ""
+    out = f"resubmitted as {chain[0].key.label} ({chain[0].state.name})"
+    if len(chain) > 1:
+        out += f" → latest {chain[-1].key.label} {chain[-1].state.name}"
+    return out
+
+
+def resumes_note(prev: Job | None) -> str:
+    """The bad ending a job carries on (:meth:`Lineage.prev_of`): ``resumes 58717472 (PREEMPTED)`` ("" for none)."""
+    return f"resumes {prev.key.label} ({prev.state.name})" if prev is not None else ""
 
 
 def time_left_s(job: Job, now: datetime) -> float | None:
@@ -107,7 +126,7 @@ class JobEvent:
     name: str
     state: JobState
     at: datetime
-    summary: str = ""            # why it ended / "↻2" / "8m left of 2:00:00" / "GPU idle 20m"
+    summary: str = ""            # why it ended / "↻2" / "8m left of 2:00:00" / "GPU idle 20m" / "resumes 5871… (…)"
     exit_code: int | None = None
     restarts: int = 0
 
@@ -174,11 +193,13 @@ class TransitionDetector:
     def observe(self, host: str, jobs: Mapping[str, Job], now: datetime) -> list[JobEvent]:
         mine = {jid: j for jid, j in jobs.items() if j.is_mine}
         prev = self._jobs.get(host)
-        if prev is None:                         # baseline: what is already low / idle is not news either
+        lin = link(mine.values())                # once per observation (linear), never per job
+        if prev is None:                         # baseline: what is already low / idle / resubmitted is not news either
             self._jobs[host], self._since[host] = mine, now
             self._fired[host] = {(kind, jid, j.restarts) for jid, j in mine.items()
                                  for kind, hit in (("time_low", time_low(j, now)), ("gpu_idle", gpu_idle_hint(j)))
                                  if hit}
+            self._fired[host] |= {("resubmitted", k.id, 0) for k in lin.predecessor}
             return []
         since = self._since[host] - timedelta(seconds=BASELINE_SLACK_S)
         fired = self._fired[host]
@@ -190,7 +211,7 @@ class TransitionDetector:
                 if _end_pending(new):
                     pass                                 # told once classified (the branch below)
                 elif new.state.is_terminal and end is not None and end >= since:
-                    out.append(_event("ended", new, now, end_summary(new)))
+                    out.append(_event("ended", new, now, _end_text(new, lin)))
                 elif new.state.group is StateGroup.ACTIVE and new.start_time is not None and \
                         not new.est_start and new.start_time >= since:
                     out.append(_event("started", new, now, _where(new)))
@@ -202,7 +223,13 @@ class TransitionDetector:
                 verdict = _end_pending(old) and (ended_at(new) or now) >= since
                 if (not old.state.is_terminal or verdict) and new.state.is_terminal \
                         and not _end_pending(new):     # an end still being classified waits for its verdict
-                    out.append(_event("ended", new, now, end_summary(new)))
+                    out.append(_event("ended", new, now, _end_text(new, lin)))
+            resumed = lin.prev_of(new.key)
+            if resumed is not None and ("resubmitted", jid, 0) not in fired:
+                fired.add(("resubmitted", jid, 0))    # first seen carrying it on (new, or its bad ending seen late)
+                linked = max(t for t in (new.submit_time, ended_at(resumed)) if t is not None)
+                if linked >= since:               # the link itself is new: not old history sacct delivered late
+                    out.append(_event("resubmitted", new, now, resumes_note(resumed)))
             if time_low(new, now) and ("time_low", jid, new.restarts) not in fired:
                 fired.add(("time_low", jid, new.restarts))
                 left = time_left_s(new, now) or 0.0
@@ -215,6 +242,16 @@ class TransitionDetector:
         self._fired[host] = {f for f in fired if f[1] in mine}
         self._jobs[host] = mine
         return out
+
+
+def _end_text(job: Job, lin: Lineage) -> str:
+    """An end's summary; a bad ending first seen when its resubmission is already there (late sacct, a chained
+    segment queued ahead) still fires (a failure is never hidden) and says so."""
+    summary = end_summary(job)
+    nxt = lin.next_of(job.key)
+    if nxt is None:
+        return summary
+    return f"{summary} (already resubmitted as {nxt.key.label})".strip()
 
 
 def _where(job: Job) -> str:

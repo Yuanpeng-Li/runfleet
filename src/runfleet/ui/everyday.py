@@ -26,7 +26,8 @@ from runfleet.errors import RunFleetError
 from runfleet.models import GPU, ConnState, Job, JobDetail, JobKey, JobKind, LogRef, StateGroup
 from runfleet.util import humanize
 from runfleet.util.gpufree import FREE_MEM_MIB as FREE_MEM_MIB, FREE_UTIL_PCT as FREE_UTIL_PCT, split_free
-from runfleet.util.logscan import cause_of
+from runfleet.util.lineage import EMPTY, Lineage
+from runfleet.util.logscan import cause_of, preempt_mode_for
 from runfleet.util.redact import scrub as scrub      # moved to util.redact (shared with `runfleet agent`)
 
 if TYPE_CHECKING:
@@ -139,11 +140,11 @@ def _nodes_line(job: Job, detail: JobDetail | None) -> str:
     return ", ".join(job.nodes) or job.nodelist or "—"
 
 
-def _cause_line(job: Job, detail: JobDetail | None, lines: Sequence[str]) -> str | None:
+def _cause_line(job: Job, detail: JobDetail | None, lines: Sequence[str], preempt_mode: str | None) -> str | None:
     """The cause chip (§5.2.8, ``logscan.cause_of(...).plain()``) from the lines RunFleet holds; never fails the
     bundle."""
     try:
-        cause = cause_of(job, detail, lines)
+        cause = cause_of(job, detail, lines, preempt_mode=preempt_mode)
     except Exception:                          # the bundle must come out even if triage breaks
         log.exception("cause_of failed")
         return None
@@ -151,8 +152,9 @@ def _cause_line(job: Job, detail: JobDetail | None, lines: Sequence[str]) -> str
 
 
 def support_bundle(job: Job, detail: JobDetail | None, *, cluster: str, log_lines: Sequence[str], now: datetime,
-                   version: str = "") -> str:
-    """A Markdown report to paste into Slack / a ticket; secrets scrubbed (§7.15)."""
+                   version: str = "", preempt_mode: str | None = None, links: Lineage = EMPTY) -> str:
+    """A Markdown report to paste into Slack / a ticket; secrets scrubbed (§7.15). ``preempt_mode`` words a
+    preemption's advice (``logscan.preempt_mode_for``); ``links`` names the resubmissions around the job (§5.2.12)."""
     md = [f"# RunFleet support bundle · {job.key.host}:{job.key.label}", ""]
 
     def row(label: str, value: object) -> None:
@@ -176,13 +178,16 @@ def support_bundle(job: Job, detail: JobDetail | None, *, cluster: str, log_line
     row("times", " · ".join(times))
     row("nodes", _nodes_line(job, detail))
     row("restarts", job.restarts)
+    for label, other in (("resubmitted as", links.next_of(job.key)), ("resumes", links.prev_of(job.key))):
+        if other is not None:
+            row(label, f"{other.key.label} · {other.state.name}")
     row("workdir", job.workdir)
     for ref in job.logs:
         row(f"{ref.stream}", (ref.path or ref.pattern or "unknown") + (" (merged)" if ref.merged else ""))
     if detail is not None and detail.explanation:
         md += ["", "## Why it ended" if job.state.is_terminal else "## Notes", ""]
         md += [f"- {line}" for line in detail.explanation]
-    cause = _cause_line(job, detail, log_lines)
+    cause = _cause_line(job, detail, log_lines, preempt_mode)
     if cause:
         md += ["", "## Cause", "", f"- {cause}"]
     efficiency = detail.efficiency if detail is not None else ()
@@ -393,8 +398,9 @@ async def make_bundle(app: RunFleetApp, key: JobKey) -> None:
         cluster += f" (Slurm {caps.slurm_version}" + (f", cluster {caps.cluster_name}" if caps.cluster_name else "") + ")"
     elif job.kind is JobKind.TASK:
         cluster += " (workstation)"
-    text = support_bundle(app.store.job(key) or job, detail, cluster=cluster, log_lines=lines, now=app.now(),
-                          version=__version__)
+    job = app.store.job(key) or job
+    text = support_bundle(job, detail, cluster=cluster, log_lines=lines, now=app.now(), version=__version__,
+                          preempt_mode=preempt_mode_for(caps, job.partition), links=app.lineage())
     saved = ""
     directory = app.bundle_dir()
     if directory is not None:

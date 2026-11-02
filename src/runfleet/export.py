@@ -3,7 +3,9 @@
 Shape: `{"schema", "generated_at", "hosts": [{"name", "status", "caps", "jobs", "gpus", "procs", "nodes",
 "partitions", "account"}]}`; every value is `models.to_json` of the §3.3 type. Hosts keep config order; jobs are sorted
 by id. `account` (the periodic account summary, §5.2.11; null = never read or not applicable) was added after 0.8.0
-within the same schema.
+within the same schema, and so were each job's `resubmitted_as` / `resumes` (§5.2.12, `util.lineage`: the job id of the
+later job that carries this bad ending on / of the bad ending this job carries on; null = none seen), computed here
+from the host's jobs — never part of `models.to_json(Job)`.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from typing import Any
 
 from runfleet.core.store import FleetStore, HostState
 from runfleet.models import ConnState, HostSnapshot, Job, StateGroup, to_json
+from runfleet.util.lineage import EMPTY, Lineage, link
 
 SCHEMA = "runfleet.snapshot/1"
 # DEGRADED (some section failed) is a successful snapshot with errors; DISABLED is the user's choice, not a failure.
@@ -42,13 +45,24 @@ def failed_hosts(store: FleetStore, hosts: Iterable[str] | None = None) -> list[
     return [name for name, state in _selected(store, hosts) if host_failed(state)]
 
 
+def _job_document(job: Job, lineage: Lineage, encode: Encoder) -> Any:
+    """`encode(job)` plus the resubmission links (job ids or null) when it encodes to an object."""
+    out = encode(job)
+    if not isinstance(out, dict):
+        return out
+    nxt, prev = lineage.next_of(job.key), lineage.prev_of(job.key)
+    return {**out, "resubmitted_as": nxt.key.id if nxt is not None else None,
+            "resumes": prev.key.id if prev is not None else None}
+
+
 def host_document(name: str, state: HostState, encode: Encoder) -> dict[str, Any]:
     snap = state.snapshot
+    lineage = link(snap.jobs.values()) if snap else EMPTY
     return {
         "name": name,
         "status": encode(state.status),
         "caps": encode(snap.caps) if snap is not None and snap.caps is not None else None,
-        "jobs": [encode(job) for _, job in sorted(snap.jobs.items())] if snap else [],
+        "jobs": [_job_document(job, lineage, encode) for _, job in sorted(snap.jobs.items())] if snap else [],
         "gpus": [encode(gpu) for gpu in snap.gpus] if snap else [],
         "procs": [encode(proc) for proc in snap.procs] if snap else [],
         "nodes": [encode(node) for node in snap.nodes] if snap else [],
