@@ -166,6 +166,7 @@ labstation:p642229   R   5h03m          2×A6000  -      python -m orb.train --c
   gpu_use{source,mean_pct,peak_pct,mem_used_mib,sampled_at}
   exit{code,signal,cause} workdir logs{stdout,stderr,merged,stdout_size,stderr_size}
   array{parent,task} restarts observed_at
+  cost{…}（§3.14） resubmitted_as{key,id,state,group,latest} resumes{key,id,state,group}（§3.16）
   ```
 - 运行中 job 的 `elapsed_s` 外推到 `generated_at`（job 数据过期时只算到 `observed_at`），`start_is_estimate` 用来代替 `est_start`。
 
@@ -249,7 +250,7 @@ now     time_low   lyra:5512           14m left
 
 **为什么不给 cursor**：事件时间不等于观测时间。举例：sacct 在 12:05 才补报一个 11:59 结束的 job，而 cursor 已经推进到 12:00，这条结束事件就永远丢了。所以 P1 的约定是：
 - 只提供时间窗口；
-- 事件带稳定 ID：`<job key 或主机>:<打印出的 kind>`（`k2:2331977:ended_bad`；重新排队的运行 `k2:4:started:1`；主机状态 `lynx:host:needs_auth[:<状态起始 epoch>]`）。job 部分用完整 key：Slurm 就是 id 本身，工作站 task 是 pid 加启动时间（`labstation:p642229-1788696459:started`），所以同一视图里 pid 复用的两个 task 不会撞 ID；事件的 `job` 字段仍是显示形式。文本头部写出带日期的完整窗口（ISO，Z）；
+- 事件带稳定 ID：`<job key 或主机>:<打印出的 kind>`（`k2:2331977:ended_bad`；重新排队的运行 `k2:4:started:1`；接续一个坏结局的新 job `lyra:31358335:resubmitted`（§3.16）；主机状态 `lynx:host:needs_auth[:<状态起始 epoch>]`）。job 部分用完整 key：Slurm 就是 id 本身，工作站 task 是 pid 加启动时间（`labstation:p642229-1788696459:started`），所以同一视图里 pid 复用的两个 task 不会撞 ID；事件的 `job` 字段仍是显示形式。文本头部写出带日期的完整窗口（ISO，Z）；
 - skill 规定 agent 用**重叠窗口**加去重（例如每次查 `--since` 上次查询时间往前多 30 min）。
 
 输出里的 `coverage` 写明每台主机数据覆盖到什么时间，以及 sacct 窗口和 recent_window 的边界。
@@ -447,6 +448,38 @@ lyra gpuxl · 1× L40S · 8 cpus (--cpus) · 24h · qos normal ×1 (your last jo
   不在 FleetAPI 里），报告用 `core.cache.upsert_account_report` 写入（只写有数据的报告）。`--demo` 在内存里取。
 - 数组父 id 下列出的成员 `cost` 为 null（6 KB 预算要装下成员；`agent job HOST:ID_N` 有）。`agent help` 总览每个 verb
   两行，`help VERB` 给全文。
+
+### 3.16 重新提交：`resubmitted_as` / `resumes`（2026-11 增补，DESIGN §5.2.12）
+
+Slurm 不记录"坏结局的 job"和"接着跑它的新 job"之间的关系（PreemptMode CANCEL 的抢占、崩溃、节点故障、超时之后的
+`sbatch`：新 id、同名或 hpc-run 的下一个 attempt `…--a02`）。`util.lineage.link` 从主机快照里已有的 job 推出这条链
+（纯函数、只连同一主机、不加远程命令；规则见模块 docstring），每个文档算一次（O(n)），从不按行算。旧 job
+**superseded**，新 job **resumes** 它。缺链只表示"没看到"，从不说"没有重新提交"。同 id 的 requeue（PreemptMode
+REQUEUE）不算链，仍是 `restarts` / `started:<n>`。
+
+- **JSON job 投影**（`jobs` / `job`，schema 仍是 `/1`，只加键）：`resubmitted_as{key,id,state,group,latest}`（`latest`
+  是链上最新的 job，形状同上；链只有一步时为 null）和 `resumes{key,id,state,group}`；没有链时为 null；别人的 job
+  两者都为 null（`_OTHER_NULL`），`_fit_job_json` 不裁它们。
+- **`agent job` 卡片**：result 行之后一行 `lineage  resubmitted as lyra:31358335 (COMPLETED, submitted 08:15Z)`
+  （链更长时加 `· latest lyra:31327999 (COMPLETED)`），新 job 上是 `lineage  resumes lyra:31354789 (PREEMPTED)`；这行不在
+  `_CARD_OPTIONAL` 里，超预算时不删。superseded 的 job 的 `next` 指向 `runfleet agent job <latest key>`（不再是读日志 /
+  重新提交）。
+- **`agent jobs`**：superseded 的已结束 job 的 NOTE 末尾加 `· resubmitted as 31358335 (COMPLETED)`，接续的 job 加
+  `· resumes 31354789 (PREEMPTED)`。`--attention` 不再列出 superseded 的失败。
+- **`agent brief`**：计数是历史，不变（`counts.failed_recent` 仍计入 superseded 的失败）；新增
+  `counts.resubmitted_recent` = 窗口内已被重新提交的失败数（failed_recent 的子集；没有 job 数据时为 null），文本写成
+  `failed/24h 3 (2 resubmitted)`（为 0 时不写）。attention 不再包含 superseded 的失败；链上最新的 job 如果也失败，由它
+  承担 attention。
+- **`agent events`**：新 kind `resubmitted`，时间是链接成立的时刻（新 job 的 submit_time 与旧 job 结束时间中较晚者；singleton 分段会提前排队），ID `<新 job 的 key>:resubmitted`，文本
+  `resumes <host>:<id> (<STATE>)`（如 `resumes lyra:31354789 (PREEMPTED)`），state/name 是新 job 的；预算优先级同
+  `ended_other`。已有的 `ended_bad` 等事件的 ID 和文本不变。
+- **原因措辞**：`cause` 按 job 分区的 PreemptMode（`logscan.preempt_mode_for(caps, partition)`）区分 CANCEL
+  （"…and killed (PreemptMode CANCEL) — resubmit"）和 REQUEUE（"…and not requeued (PreemptMode REQUEUE, but the job was not requeueable) — resubmit"：已结束的 PREEMPTED 作业就是没被 requeue 的）；不知道时保持原措辞。
+- **`runfleet snapshot --json`**：每个 job 末尾加 `resubmitted_as` / `resumes`（job id 或 null），在 export 里算，
+  `models.to_json(Job)` 不变；schema 仍是 `runfleet.snapshot/1`。
+- **MCP**：`job_detail`、`fleet_events`、`list_jobs.attention` 的描述提到这些字段和 kind（没有 kind 的枚举）。
+- **skill**：`metadata.runfleet-skill: "4"`；SKILL.md（≤ 80 行）§4 加一行："`resubmitted as`（JSON `resubmitted_as`）：
+  已由 hpc-run 或用户接着跑了——不要再提议重新提交，跟踪 `latest`"；references 两份各加一段。
 
 ## 4. 新鲜度与并发
 
@@ -689,7 +722,7 @@ runfleet agent job k2:2332861                      # times, placement, pending r
 runfleet agent log k2:2332861 --lines 80           # bounded tail, scrubbed (1 ssh probe); --grep 'Traceback|Error', --head
 runfleet agent gpus --type h100 --min 4            # where N free GPUs of a type are (free ≠ schedulable for you)
 runfleet agent host k2                             # health: auth, per-probe failures, data ages, partitions, load
-runfleet agent events --since 2h                   # submitted / started / ended ok|bad / time low / host problems
+runfleet agent events --since 2h                   # (re)submitted / started / ended ok|bad / time low / host problems
 runfleet wait k2:2332861 --json --timeout 21600    # blocks until it ends — run it in the background
 runfleet agent help [VERB]                         # full flags, JSON fields, exit and problem codes
 ```

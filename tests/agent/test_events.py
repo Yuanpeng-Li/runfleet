@@ -120,7 +120,7 @@ def test_events_budget_and_priority() -> None:
     jobs = [mk_job("k2", str(1000 + i), JobState.COMPLETED, submit_time=T0 - 20 * H + i * S,
                    start_time=T0 - 19 * H + i * S, end_time=T0 - 10 * H + i * S) for i in range(2000)]
     bad = mk_job("k2", "9999", JobState.FAILED, submit_time=T0 - 22 * H, start_time=T0 - 21 * H,
-                 end_time=T0 - 20 * H)
+                 end_time=T0 - 20 * H, name="orb-crash")         # its own name: no later job resubmits it
     doc = view.events(fleet(mk_host("k2", [*jobs, bad])), T0 - 24 * H, limit=100)
     shown = doc.data["events"]
     assert len(shown) <= 100 and doc.data["truncated"]["total"] == 6003

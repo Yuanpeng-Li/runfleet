@@ -112,14 +112,15 @@ TOOLS: tuple[Tool, ...] = (
                         "failed, cancelled and ended; ended = a workstation task that is gone, exit unknown"),
           "name": _str("job name glob, e.g. orb-*"), "workdir": _str("working directory prefix"),
           "partition": _str("Slurm partition"), "since": _str("ended since: " + _SINCE),
-          "attention": _flag("only jobs that need a look"),
+          "attention": _flag("only jobs that need a look (a failure already resubmitted does not)"),
           "all_users": _flag("add other users' rows (user, id, state, GPUs, partition only)"),
           "sort": _str("largest charged SU (su) or GPU-hours (gpuh) first", enum=["su", "gpuh"]),
           "limit": _LIMIT, "refresh": _REFRESH, "timeout": _TIMEOUT}),
     Tool("job_detail", "job", "Job detail",
          "One card per job: submit / start / end times, placement, why it pends (with advice, never a queue "
-         "position), exit code and cause, GPU use, log paths. not_found, outside_coverage and listing_failed are "
-         "different answers." + _READ_ONLY,
+         "position), exit code and cause, GPU use, log paths, and resubmissions: resubmitted_as (a later job "
+         "already carries this failure on: follow its latest, do not resubmit again) / resumes. not_found, "
+         "outside_coverage and listing_failed are different answers." + _READ_ONLY,
          {"ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": commands.JOB_IDS_MAX,
                   "description": "HOST:ID, e.g. k2:2332861, k2:31270818_7, k2:31270818 (whole array), "
                                  "labstation:p642229"},
@@ -153,8 +154,8 @@ TOOLS: tuple[Tool, ...] = (
          {"host": _str("host name or ssh alias"), "refresh": _REFRESH, "timeout": _TIMEOUT},
          ("host",)),
     Tool("fleet_events", "events", "Fleet events",
-         "What happened since a time: jobs submitted / started / ended (ok, bad, other) with stable ids, time "
-         "running low, host problems; per-host coverage." + _READ_ONLY,
+         "What happened since a time: jobs submitted / resubmitted (resumes an earlier failure) / started / ended "
+         "(ok, bad, other) with stable ids, time running low, host problems; per-host coverage." + _READ_ONLY,
          {"since": _str(_SINCE), "hosts": _HOSTS, "limit": _LIMIT, "refresh": _REFRESH, "timeout": _TIMEOUT},
          ("since",)),
     Tool("account_usage", "usage", "Account usage",

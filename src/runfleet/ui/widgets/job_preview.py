@@ -5,7 +5,9 @@ path, then the last log lines from a cached one-shot ``peek_log`` (requested by 
 dwell — never a stream). Compact form (< 30 rows): the title rule with the essentials plus one log line. An ended job
 shows its cause chip (``OOM-GPU`` + the peeked line that shows it), a pending one what to do about its reason and,
 for an own pending Slurm job, its priority evidence in one line (§5.2.10: polled, no extra remote command). The
-metadata line of a Slurm job ends in its cost (`· 33 SU`, Account §5.2.11: from the cached charging rules).
+metadata line of a Slurm job ends in its cost (`· 33 SU`, Account §5.2.11: from the cached charging rules). A bad
+ending a later job carries on (§5.2.12) keeps its chip, but the chip says "resubmitted as 58721477 · done 7h ago"
+instead of the advice; the job that carries it on says "resumes 58717472 preempted 7h ago" (JobsView passes the links).
 """
 
 from __future__ import annotations
@@ -23,7 +25,8 @@ from runfleet.ui.query import elapsed_s
 from runfleet.util import cost as costs
 from runfleet.util import humanize
 from runfleet.util.cost import JobCost
-from runfleet.util.logscan import cause_of
+from runfleet.util.lineage import EMPTY, Lineage
+from runfleet.util.logscan import cause_of, preempt_mode_for
 
 Mode = Literal["full", "line", "hidden"]
 
@@ -153,18 +156,24 @@ def gpu_line(job: Job, caps: Capabilities | None, now: datetime, thresholds: tup
     return out
 
 
-def cause_text(job: Job, peek: LogPeek | None, width: int) -> Text | None:
+def cause_text(job: Job, peek: LogPeek | None, width: int, *, preempt_mode: str | None = None,
+               links: Lineage = EMPTY, now: datetime | None = None) -> Text | None:
     """§5.2.8: an ended job's cause chip with the first peeked log line that shows it (else its one-line
-    explanation); a pending job's "what to do" line. Only the cached peek is read — no extra remote command."""
+    explanation); a pending job's "what to do" line. Only the cached peek is read — no extra remote command. A job a
+    later one carries on (§5.2.12, ``links`` with ``now``) keeps the chip, followed by "resubmitted as …" instead."""
     if job.state.group is StateGroup.QUEUED:
         advice = job.raw.get("reason_advice")
         return render.fit(Text("→ " + advice, style=theme.muted()), width) if advice else None
-    cause = cause_of(job, None, peek.lines if peek is not None and not peek.error else ())
+    cause = cause_of(job, None, peek.lines if peek is not None and not peek.error else (), preempt_mode=preempt_mode)
+    resolved = render.resubmitted_text(job, links, now) if now is not None else None
     if cause is None:
-        return None
+        return render.fit(resolved, width) if resolved is not None else None
     out = render.cause_chip(cause.code)
     out.append(" ")
-    out.append(cause.evidence or cause.text, style=theme.error() if cause.evidence else theme.muted())
+    if resolved is not None:
+        out.append_text(resolved)
+    else:
+        out.append(cause.evidence or cause.text, style=theme.error() if cause.evidence else theme.muted())
     return render.fit(out, width)
 
 
@@ -215,9 +224,11 @@ class JobPreview(Static):
 
     def show_job(self, job: Job, *, caps: Capabilities | None, now: datetime, peek: LogPeek | None,
                  peek_pending: bool, thresholds: tuple[float, float], mem_thresholds: tuple[float, float],
-                 usage_mode: str | None = None) -> None:
-        """``usage_mode``: `AccountSummary.mode` of the job's host when read (SU or billing-h, §5.2.11)."""
+                 usage_mode: str | None = None, links: Lineage = EMPTY) -> None:
+        """``usage_mode``: `AccountSummary.mode` of the job's host when read (SU or billing-h, §5.2.11); ``links``:
+        the resubmissions among the held jobs (§5.2.12)."""
         width = self.size.width or 120
+        mode = preempt_mode_for(caps, job.partition)
         meta = meta_line(job, cost_meta(job, costs.job_cost(job, now, caps), costs.usage_only(caps, usage_mode)))
         title = Text(f"{job.key.host}:{job.key.label}", style="bold")
         title.append(" · ", style=theme.dim())
@@ -238,17 +249,22 @@ class JobPreview(Static):
                 if job.gpu.mem_used_mib is not None:
                     bits.append(f" · {humanize.gib_pair(job.gpu.mem_used_mib, job.gpu.mem_total_mib)}",
                                 style=theme.muted())
-            cause = cause_of(job, None, peek.lines if peek is not None and not peek.error else ())
+            cause = cause_of(job, None, peek.lines if peek is not None and not peek.error else (), preempt_mode=mode)
             if cause is not None:
                 bits.append(" ")
                 bits.append_text(render.cause_chip(cause.code))
+            link = render.lineage_line(job, links, now)
+            if link is not None:
+                bits.append(" ")
+                bits.append_text(link)
             head = Text(f"{job.key.host}:{job.key.label}", style="bold") + bits
             lines = [_rule(head, Text(""), width)]
             lines += log_lines(peek, peek_pending, 1, width, now, has_log)
             self.update(Text("\n").join(lines[:2]))
             return
         if self.side:
-            self._show_side(job, title, meta, caps, now, peek, peek_pending, thresholds, mem_thresholds, has_log)
+            self._show_side(job, title, meta, caps, now, peek, peek_pending, thresholds, mem_thresholds, has_log,
+                            mode, links)
             return
         lines = [_rule(title, _runtime(job, now), width), render.fit(meta, width)]
         gl = gpu_line(job, caps, now, thresholds, mem_thresholds)
@@ -260,9 +276,12 @@ class JobPreview(Static):
                 gl.append("stdout ", style=theme.muted())
                 gl.append(humanize.truncate_left(path, room), style=theme.muted())
         lines.append(render.fit(gl, width))
-        chip = cause_text(job, peek, width)
+        chip = cause_text(job, peek, width, preempt_mode=mode, links=links, now=now)
         if chip is not None:
             lines.append(chip)
+        resumes = render.resumes_text(job, links, now)
+        if resumes is not None:
+            lines.append(render.fit(resumes, width))
         if job.priority is not None:
             lines.append(render.fit(render.priority_summary(job.priority, job.account, now), width))
         for hint in job.hints if chip is None or not job.state.is_terminal else ():    # the chip says it already
@@ -274,7 +293,7 @@ class JobPreview(Static):
     def _show_side(self, job: Job, title: Text, meta: Text, caps: Capabilities | None, now: datetime,
                    peek: LogPeek | None,
                    peek_pending: bool, thresholds: tuple[float, float], mem_thresholds: tuple[float, float],
-                   has_log: bool) -> None:
+                   has_log: bool, mode: str | None = None, links: Lineage = EMPTY) -> None:
         """Right-hand preview (>= 150 columns): the same facts, wrapped into a narrow, tall column."""
         width = self.size.width or 60
         lines = [render.fit(title, width), render.fit(_runtime(job, now), width), Text("")]
@@ -287,9 +306,12 @@ class JobPreview(Static):
             lines.append(render.fit(Text("stdout " + (stdout.path or stdout.pattern or ""), style=theme.muted()),
                                     width) if len(stdout.path or "") < width - 7 else
                          Text("stdout " + humanize.truncate_left(stdout.path or "", width - 7), style=theme.muted()))
-        chip = cause_text(job, peek, width)
+        chip = cause_text(job, peek, width, preempt_mode=mode, links=links, now=now)
         if chip is not None:
             lines.append(chip)
+        resumes = render.resumes_text(job, links, now)
+        if resumes is not None:
+            lines.append(render.fit(resumes, width))
         if job.priority is not None:
             lines += wrap_parts(render.priority_summary(job.priority, job.account, now).plain.split(" · "), width,
                                 style=theme.muted())

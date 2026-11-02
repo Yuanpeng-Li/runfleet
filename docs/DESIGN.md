@@ -296,6 +296,8 @@ src/runfleet/
                          partitions, SU/hour formatting (pure, shared by the UI and the agent, §5.2.11)  [WP2]
     usage.py             usage rollup: grouping keys (experiment, task, name, …) and group() over UsageCells (pure,
                          §5.2.11)  [WP2]
+    lineage.py           resubmissions: which later job of yours carries on a Slurm job that ended badly (pure, shared
+                         by the UI, the agent and `snapshot --json`, §5.2.12)  [WP2]
   probe/
     section.py           FROZEN Section, SectionResult, SectionOutcome, ProbeScript, StreamSpec  [WP1]
     framing.py           render ProbeScript → POSIX sh; parse framed stdout → SectionResults  [WP1]
@@ -424,8 +426,9 @@ from typing import Any, Literal, TypeVar
 
 T = TypeVar("T")
 
-DETECT_REV = 3      # bump when detection learns something new: cached capabilities of an older revision are re-detected
-                    # (2: priority settings, §5.2.10; 3: Account — QOS UsageFactor and partition charges, §5.2.11)
+DETECT_REV = 4      # bump when detection learns something new: cached capabilities of an older revision are re-detected
+                    # (2: priority settings, §5.2.10; 3: Account — QOS UsageFactor and partition charges, §5.2.11;
+                    # 4: each partition's PreemptMode, §5.2.12)
 
 # ---------- hosts ----------
 class ConnState(StrEnum):
@@ -489,6 +492,7 @@ class PartitionCharge:                       # Account (§5.2.11): how one parti
     allow_qos: tuple[str, ...] | None = None # AllowQos; None = ALL
     def_cpu_per_gpu: int | None = None       # DefCpuPerGPU (None: not set; lyra prints none)
     def_mem_per_cpu_mb: int | None = None    # DefMemPerCPU (None: not set or DefMemPerNode)
+    preempt_mode: str | None = None          # PreemptMode of the partition, upper case (None: the cluster's applies)
 
 @dataclass(frozen=True, slots=True)
 class Capabilities:
@@ -2588,7 +2592,7 @@ The **detect probe** (one round trip, purpose `detect`) holds the generic sectio
 | `slurm.version` (req `sinfo`) | `sinfo --version` | `slurm 25.05.8` → "25.05.8" |
 | `slurm.config` (req `scontrol`) | `scontrol show config \| grep -E '^(ClusterName\|AccountingStorageType\|JobAcctGatherType\|JobAcctGatherFrequency\|PreemptMode\|PrologFlags\|LaunchParameters\|MinJobAge\|PrivateData\|PriorityType\|PriorityWeight[A-Za-z]*\|PriorityFlags\|PriorityDecayHalfLife\|PriorityMaxAge\|PriorityUsageResetPeriod) '` | cluster_name, slurm_config (incl. the priority settings of §5.2.10), acct_gather_freq_s |
 | `slurm.assoc` (req `sacctmgr`) | `sacctmgr -n -P show assoc where user="$(id -un)" format=Cluster,Account,Partition,QOS` | associations |
-| `slurm.parts` (req `scontrol`) | `commands.PARTS_CMD`: `groups=` (comma-separated names from the group database via `getent`, not the session's groups), `parent=cluster\|account\|parent` lines walking up from the user's accounts (account-level `sacctmgr show assoc` rows, ≤ 6 levels, `root` left out), `parents=complete` when every sacctmgr call worked and the chain ended, then `scontrol show partition -o` (a value runs to the next ` Key=`, so names with spaces stay whole) | gpu_partitions: partitions with `gres/gpu` in TRES, not `Hidden`, `RootOnly`, `INACTIVE` or `DRAIN`, whose AllowGroups holds one of your groups and where, for some account, the association of this cluster for that partition (else the one for all partitions, as Slurm picks) passes AllowAccounts/DenyAccounts with the account or a parent (the lists are hierarchical; a DenyAccounts list needs `parents=complete`) and has a QOS passing AllowQos/DenyQos (an empty QOS list passes only unrestricted partitions). No association data at all: only partitions open to every account and QOS; associations on other clusters only: none. **partition_charges** (Account, §5.2.11): one `PartitionCharge` per partition line whose name passes the partition validator (`scontrol` without `-a` already leaves hidden partitions and those closed to the user's groups out), from the same lines: `TRESBillingWeights`, `QoS` (`N/A` → None), `AllowQos` (`ALL` → None), `DefCpuPerGPU`, `DefMemPerCPU` (`UNLIMITED` / absent → None) |
+| `slurm.parts` (req `scontrol`) | `commands.PARTS_CMD`: `groups=` (comma-separated names from the group database via `getent`, not the session's groups), `parent=cluster\|account\|parent` lines walking up from the user's accounts (account-level `sacctmgr show assoc` rows, ≤ 6 levels, `root` left out), `parents=complete` when every sacctmgr call worked and the chain ended, then `scontrol show partition -o` (a value runs to the next ` Key=`, so names with spaces stay whole) | gpu_partitions: partitions with `gres/gpu` in TRES, not `Hidden`, `RootOnly`, `INACTIVE` or `DRAIN`, whose AllowGroups holds one of your groups and where, for some account, the association of this cluster for that partition (else the one for all partitions, as Slurm picks) passes AllowAccounts/DenyAccounts with the account or a parent (the lists are hierarchical; a DenyAccounts list needs `parents=complete`) and has a QOS passing AllowQos/DenyQos (an empty QOS list passes only unrestricted partitions). No association data at all: only partitions open to every account and QOS; associations on other clusters only: none. **partition_charges** (Account, §5.2.11): one `PartitionCharge` per partition line whose name passes the partition validator (`scontrol` without `-a` already leaves hidden partitions and those closed to the user's groups out), from the same lines: `TRESBillingWeights`, `QoS` (`N/A` → None), `AllowQos` (`ALL` → None), `DefCpuPerGPU`, `DefMemPerCPU` (`UNLIMITED` / absent → None), `PreemptMode` (upper case; absent / `N/A` → None: the cluster's `slurm_config` value applies; DETECT_REV 4) |
 | `slurm.qos` (req `sacctmgr`; Account) | `sacctmgr -n -P show qos format=Name,UsageFactor` (timeout 15 s, max_stdout 64 KB) | qos_usage_factor: `name\|factor` rows; a row whose factor is not a number is skipped, > 50 % bad rows is a PARSE error and leaves the field unset (the cached value stays) |
 | `slurm.sacctfmt` (req `sacct`) | `sacct --helpformat` | sacct_fields (enables `StdOut,StdErr` when present) |
 | `slurm.gputres` (req `sacct`) | `j=$(sacct -u "$(id -un)" -S now-14days -E now -X -n -P --format=JobIDRaw,AllocTRES,State \| awk -F'\|' '$2 ~ /gres\/gpu/ && $3 !~ /^(RUNNING\|PENDING)/ {j=$1} END {print j}'); [ -n "$j" ] && sacct -j "$j" -n -P --format=JobID,TRESUsageInMax%400; true` | gpu_tres seed |
@@ -2897,11 +2901,19 @@ on ingest:
   jobs = {id: j for id, j in history.items() if j.state.is_terminal}
   jobs.update(live)                                # live always wins for active jobs
   for id, t in vanished_at.items():
-      if id in jobs and jobs[id].state.is_terminal: forget id
+      if id in jobs and jobs[id].state.is_terminal and not earlier_attempt(history[id], last_seen): forget id
       elif now − t < 10 min: jobs[id] = replace(last_seen, source="vanished", hints=("ended; waiting for accounting",))
       else: jobs[id] = replace(last_seen, state=UNKNOWN, source="vanished")
   return CollectorOutput(jobs=jobs, …)
 ```
+`earlier_attempt`: a same-id requeue (PreemptMode REQUEUE) leaves the previous attempt's terminal row (PREEMPTED, its
+end time) in `history` until sacct reports the job again. A terminal row that ended at or before the start of the
+attempt last seen in squeue, or that was read before a sighting where the job was pending again, describes an earlier
+attempt: it does not settle the vanished job, which stays `ended; waiting for accounting` and is looked up with
+`sacct -j` (with backoff) until a row of the last attempt arrives; a late answer that still describes the old attempt
+is ignored too. The restart count last seen in squeue (`RestartCnt`) is carried into the ended row (sacct has none),
+in memory and in `jobmeta_restarts` (§5.5), and never goes down.
+
 Log paths for history-only jobs: `jobmeta` cache (paths seen while live, persisted because `scontrol` forgets a job
 `MinJobAge` = 300 s after it ends) → sacct `StdOut/StdErr` if supported (they hold the **unexpanded** `--output`
 pattern on 25.05/25.11/26.05 — M3 F2 — and are expanded like squeue's, §5.2.5, with JobName, JobIDRaw, User, WorkDir
@@ -2962,7 +2974,9 @@ RunFleet already collects. **No new periodic remote command**: log evidence come
 and only where `caps.sacct_fields` lists it.
 - **Cause chip** (`logscan.cause_of(job, detail=None, lines=()) -> Cause | None`; `Cause(code, text, evidence)`): ended
   jobs that did not succeed only. Order: the scheduler state (`OUT_OF_MEMORY` → `OOM-HOST`, `TIMEOUT`/`DEADLINE` →
-  `TIMEOUT`, `PREEMPTED`, `NODE_FAIL`/`BOOT_FAIL` → `NODE_FAIL`; a `CANCELLED` record whose log says `DUE TO TIME
+  `TIMEOUT`, `PREEMPTED` (worded by `preempt_mode=logscan.preempt_mode_for(caps, job.partition)`: the partition's
+  `PreemptMode`, else the cluster's — CANCEL "…and killed — resubmit", REQUEUE "…and not requeued (… not requeueable) — resubmit" (an ended PREEMPTED job is one Slurm did not requeue), unknown keeps
+  both), `NODE_FAIL`/`BOOT_FAIL` → `NODE_FAIL`; a `CANCELLED` record whose log says `DUE TO TIME
   LIMIT` / `PREEMPTION` / `NODE FAIL` is that instead, else `CANCELLED`), then the log by `CAUSE_RULES` (most telling
   first: `OOM-GPU`, `OOM-HOST`, `QUOTA`, `IMPORT`, `SEGV`, `NAN`, `NCCL` — one rank's OOM / crash shows up as NCCL
   timeouts on the others), then the exit status (`rc ≥ 128` → `SIGNAL rc-128`, 139 → `SEGV`, the job's or a non-extern
@@ -3329,6 +3343,61 @@ detail `cost` line, the GPU tab's Cost box and the compact one-liner (§7.3 E, �
 sort keys and filter terms (§7.5, §7.6); `runfleet agent usage` / `cost`, `job.cost`, `host.account` and
 `snapshot --json` `hosts[].account` (§8.7).
 
+#### 5.2.12 Resubmissions (`util/lineage.py`, pure)
+A partition with `PreemptMode=CANCEL` (lyra; the field cluster this came from) ends a preempted job `PREEMPTED`, and
+resuming it is a new `sbatch`: a new job id under the same name (hpc-run's convention, §8.6), likewise after a crash,
+a node failure, a time limit or a cancel. Slurm keeps no link between the two, so RunFleet draws it from the jobs a
+host snapshot already holds — no remote command. `lineage.link(jobs) -> Lineage` (`next_of`, `prev_of`,
+`superseded`, `latest_of`, `chain_after`; `EMPTY`) is computed once per host jobs mapping (the TUI's
+`app.lineage()` / `query.LineageCache` and `fleet_layout.lineage_of` memoise on its identity; the agent once per
+document) and shared by every surface, so they tell the same story.
+
+**Rule** (exact, never fuzzy): job B *carries on* job A when both are own Slurm jobs (`is_mine`, same user) on the
+same host with a submit time; A ended badly (terminal, not DONE: FAILED, TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, PREEMPTED,
+BOOT_FAIL, DEADLINE, CANCELLED) with an end time; B has the same name, or the same name with a higher hpc-run attempt
+(`…--s45--a01` → `…--s45--a02`; seed and everything else equal; a name without `--aNN` needs an exact match); B was
+submitted strictly later and did not run alongside A (not started, a pending estimate, or started no earlier than
+`CONCURRENT_SLACK` = 60 s before A ended — a `--dependency=singleton` segment is submitted ahead and waits, two copies
+running at once are duplicates); the work dirs are equal when both are known; array tasks link only to the same task
+index of another array, and an array summary row never links. A's successor is the earliest such B; several bad
+endings may share one (two failed duplicates, one resubmit; `prev_of` = the most recently submitted). Chains
+(F → F → F → CD) are followed by `latest_of`. Same-id requeues are not links (`restarts`, `↻N`). A missing link means
+"not seen" (history covers `sacct_window`, own jobs only), never "not resubmitted".
+
+**Meaning.** A *superseded* job keeps its state, chip and place in every count — counts are history (`F n/24h`, card
+and fleet counts, `runfleet status`, `snapshot` summary, the agent's `failed_recent`). What changes is attention: it
+no longer needs the user (fleet card rank 6 `SUPERSEDED`, after everything else; never an `a` entry; the away toast is
+a warning only when some failure in it has no resubmission; the agent's `--attention` and brief attention items skip
+it). The newest job of the chain carries the attention by its own state, and its `a` reason adds `· resumes X (ST)`.
+
+**TUI.** Jobs table: a dim `⤳ ` before the name (`name_badges`, also on the detail title); NODE / REASON reads
+`<summary> → <newest id of the chain> <code>` muted instead of in the failure colour. Job detail keeps the chip but
+replaces its advice with `resubmitted as <id> · <state> <when>` (+ `→ latest <id> <state>` for a longer chain; the
+tooltip names the whole chain); the Job box gets a `resubmit` row, a successor a `resumes` row (the compact Summary
+carries it on the cause line); ids are clickable; `n` opens the next attempt, `N` the one this job resumes (the new
+screen's breadcrumb goes back through the old one); without a link: `not resubmitted as far as RunFleet sees
+(history covers the last <sacct_window>)`. The preview pane shows the same lines; the support bundle (§7.15) adds
+`resubmitted as` / `resumes` rows. Filter `is:resubmitted` (alias `is:superseded`) / `is:resumes` (alias
+`is:resumed`), palette *Jobs: hide resubmitted* / *only resubmitted*; the *failed* preset still shows them, marked.
+Fleet activity rows: a bad end that was resubmitted keeps `✖` but says `→ resubmitted as <id>` and is not bad news;
+the digest lists open failures first, then the resubmitted ones, dim (`failures (n, k resubmitted)`).
+
+**Events** (§7.14): *resubmitted* fires once when an own job is first seen carrying on a bad ending (summary `resumes
+58717472 (PREEMPTED)`; a link that became true before the baseline — the later of the resubmit and the bad
+ending — is no news, even when sacct delivers the old ending a tick late or after a reconnect); selectable, in neither default. A bad ending first seen when its resubmission is already listed still fires
+*ended* (we never hide a failure), its summary saying `(already resubmitted as X)`.
+
+**Agent and export** (§8.7, AGENT_INTERFACE §3.16, additions within `/1`): `agent job` has a `lineage` line after
+`result` (`resubmitted as HOST:ID (STATE, submitted HH:MMZ)` + `· latest HOST:ID (STATE)`, or `resumes HOST:ID
+(STATE)`; never dropped for the budget) and a superseded job's `next` is `runfleet agent job <latest key>`; JSON jobs
+gain `resubmitted_as{key,id,state,group,latest}` and `resumes{key,id,state,group}` (null = none seen; null for other
+users); `agent jobs` notes append `resubmitted as ID (STATE)` / `resumes ID (STATE)`; `brief` adds
+`counts.resubmitted_recent` (text `failed/24h 3 (2 resubmitted)`); `agent events` adds kind `resubmitted` (id
+`<successor key>:resubmitted`, dated when the link became true: the later of its submit time and the bad
+ending). `snapshot --json` adds per-job `resubmitted_as` / `resumes` job
+ids (computed in `export`, not stored on `Job`). The skill (revision 4) says a resubmitted job was already resumed:
+follow `latest`, never propose another resubmit.
+
 ### 5.3 Workstations (`backends/process/`, `backends/common/nvidia.py`, `backends/common/procfs.py`)
 
 #### 5.3.1 Sections and cadence
@@ -3546,7 +3615,14 @@ CREATE TABLE host_status (host TEXT PRIMARY KEY, at REAL, state TEXT,           
 CREATE TABLE host_health (host TEXT PRIMARY KEY, at REAL, json TEXT);                -- for `runfleet agent` only
 CREATE TABLE account_reports (host TEXT, window TEXT, at REAL, json TEXT,            -- Account (§5.2.11): on-demand
                               PRIMARY KEY (host, window));                           -- reports, one per (host, window)
+CREATE TABLE jobmeta_restarts (host TEXT, job_id TEXT, restarts INTEGER,             -- §5.2.4: RestartCnt last seen
+                               PRIMARY KEY (host, job_id));                          -- live (sacct has none)
 ```
+**Restarts** (additive after 0.9.0): the highest `RestartCnt` seen live per job, in its own table rather than a
+`jobmeta` column (older versions sharing the file insert jobmeta rows positionally); written with jobmeta, only when
+> 0, read with a LEFT JOIN (a missing row = 0), pruned with its jobmeta row. A rise in the count starts a new attempt:
+the stored log paths, GPU type and per-node allocation of the previous one are dropped (`JobMeta.from_job`), so they
+never reach the history row.
 **Account** (additive after 0.8.0): the periodic summary needs no table — it is part of the `snapshots` JSON
 (`HostSnapshot.account`; older rows decode with `account=None`). `account_reports` holds the last `AccountReport` per
 (host, window) as `to_json`: written by FleetService when a report arrives (same 10 s batch), loaded lazily by
@@ -4248,7 +4324,7 @@ exceeds what is left (97 SU)` and an exhausted account `no SU left`, both error-
     take the first list row; "next" moves into the list; a workstation adds `swap · up · load` from 8 list rows.
     Lists rank own jobs by need (Slurm: fresh failures < 4 h, running with a warn/red hint or low on time or a red/amber
     runway, never-run or held pending, older failures in `recent_window`, other running by time left, other pending by
-    estimated start; workstation: fresh failures, own running with a hint, own running by GPUs, other users' tasks,
+    estimated start, then failures that were resubmitted (§5.2.12, `→ <id> <ST>`); workstation: fresh failures, own running with a hint, own running by GPUs, other users' tasks,
     older failures; CD/CA never, a plain EX task is no failure; ties by job id). Shown grouped failed / running /
     pending (others); with more candidates than rows, array siblings of rank 4/5 fold (`orb-sweep [3-4] ×2`), then
     `rows − 1` rows and `+N more · R a, next ends in X · PD b · tab: Jobs`. Wide template (inner ≥ 72): label 10 |
@@ -4284,7 +4360,8 @@ exceeds what is left (97 SU)` and an exhausted account `no SU left`, both error-
     `a` (fleet context, any layout: roomy, compact or the table) opens `AttentionScreen`: `fleet_layout.attention`
     merges the cards' cached rankings (`FleetView._ranked`, also used at T0 and in table mode), whole fleet, keeping
     only rows that need the user — tier 0 fresh failures, 1 running with a warn/red hint or low on time (workstation:
-    own task with a hint), 2 pending that will never run or held, 3 older failures in the window (Slurm ranks 0–3;
+    own task with a hint), 2 pending that will never run or held, 3 older failures in the window that were not
+    resubmitted (§5.2.12; Slurm ranks 0–3;
     workstation ranks 0, 1, 4); sorted by tier, failures newest first across hosts, else host order, then card rank
     order; array siblings never fold. A row reads `host  id  badge  full name  why` (`attention_why`: the card row's
     detail and time cells, `low on time` for a runway-only rank 1), the reason on a second line when the full name
@@ -4375,6 +4452,7 @@ space-separated and all must match:
 | `acct:lab` / `account:lab,pilab_02` | Slurm account in list (Account, §5.2.11) |
 | `part:free-gpu` / `p:gpu,gpuxl` | partition in list |
 | `su:>10` `su:<=0` `gpuh:>=5` | the job's cost (`> >= < <= =`; SU = billing-h on usage-only clusters); `=` compares at the precision the column shows (`su:=33` matches 32.5 … 33.49, `su:=2.9` one decimal below 10, `gpuh` integers from 100); the first numeric terms: a malformed number is a text term, a job with an unknown cost never matches (`!su:>10` keeps it) |
+| `is:resubmitted` `is:superseded` / `is:resumes` `is:resumed` | a bad ending a later job of yours carries on / a job that carries one on (§5.2.12); other `is:` words are text |
 | `!term` | negation of any term |
 
 State presets (`f` cycles, palette `State: …`): fresh (default) → active → queued → failed (FAILED + ENDED) → all. The
@@ -4450,7 +4528,7 @@ and detail screens keep Textual's focus traversal. `→`/`right` keeps DataTable
 | Fleet view | arrows/`hjkl` move between cards · `enter`/double-click host detail · click selects (on a card's job row or a panel activity row: opens that job) · `a` needs you: what needs the user fleet-wide (§7.4) · `space` (or a header chip click) scopes · `c` connect · `C` log in to every host needing auth (§7.15) · `s` host shell · `t` enable/disable polling · `e` error details |
 | Jobs view | `j`/`k`/arrows/wheel move · `g`/`G`/`home`/`end` first/last · `ctrl+d`/`ctrl+u`/`pgdn`/`pgup` half page · `enter`/double-click detail · `l` log viewer · `p` log in `$PAGER` · `ctrl+f` search the logs of your recent jobs in scope (§4.7.1) · `x`/right-click action menu · `ctrl+k` cancel (Slurm) / terminate (task) · `space` mark and move down · `V` mark all visible / clear · `A` mark / clear the row's whole array · `y`/`Y` copy id / copy menu (`Y Y` = stdout path, §7.15) · `s` shell · `P` forward a port · `c` connect the row's host · `f` next state preset · `o` next sort column · `O` reverse sort · `z` cycle grouping · `u` toggle other users' GPU processes · `w` watch / unwatch the row or the marked rows (§7.14) |
 | GPUs view | navigation as Jobs · `enter` owning job/task (or host) · `x` actions of the owning task · `ctrl+k` terminate owning own task · `c` connect the row's host · `a` copy `CUDA_VISIBLE_DEVICES` for N free GPUs (workstations) · `o`/`O` sort |
-| Job detail | `[`/`]` previous/next tab · `o`/`e` stdout/stderr · `F` follow on/off · `l` full log viewer · `L` log viewer landed on the cause chip's line (§5.2.8) · `/` search the log (opens the log viewer with its search box; never the Jobs filter) · `p` pager · `r` refresh detail (reopens a dead stream) · `f` other log files (picked already: switch to it; on it: pick another; §4.7.2) · `x`, `ctrl+k`, `s`, `c`, `y`, `Y`, `P`, `w` as in Jobs · `esc`/`q` back |
+| Job detail | `[`/`]` previous/next tab · `o`/`e` stdout/stderr · `F` follow on/off · `l` full log viewer · `L` log viewer landed on the cause chip's line (§5.2.8) · `/` search the log (opens the log viewer with its search box; never the Jobs filter) · `p` pager · `r` refresh detail (reopens a dead stream) · `f` other log files (picked already: switch to it; on it: pick another; §4.7.2) · `n` / `N` the job that carries this one on / the one it resumes (§5.2.12) · `x`, `ctrl+k`, `s`, `c`, `y`, `Y`, `P`, `w` as in Jobs · `esc`/`q` back |
 | Host detail | `enter` on a process opens its task · `ctrl+k` terminate task · `x` actions · `u` other users · `o`/`O` sort · `s` shell · `c` connect · `t` enable/disable · workstation: `a` free-GPU picker · cluster: `f` nodes with free GPUs only, `[`/`]` previous/next partition, `$` the Account screen with this cluster first |
 | Account (§7.17) | `j`/`k`/arrows, `g`/`G` move between rows of the focused box (accounts, then rollup) · `tab`/`shift+tab` between boxes · `[`/`]` previous/next window (7d · 30d · 90d · period; unavailable ones skipped) · `z` rollup grouping (experiment → task → name → account → partition → GPU model) · `u` me ↔ whole account · `o`/`O` rollup sort (GPU-h ▼ → SU ▼ → CPU-h ▼ → jobs ▼ → name ▲) / reverse · `enter` on a rollup row: Jobs view filtered to it (state preset `all`) · `r` refresh the focused cluster (≥ 60 s apart) · `ctrl+r` all · `esc`/`q` back (`$` here does nothing) |
 | Log viewer | `F` follow on/off · `G` bottom + follow · `g` top of the buffer · `o`/`e` stream · `/` search the buffer, `n`/`N` next/previous match (`esc` clears) · `]`/`[` next/previous error or warning line (§5.2.8) · `f` other log files (picked already: switch to it; on it: pick another) · `p` pager · `R` reopen the stream · `y` copy path · `c` connect |
@@ -4639,7 +4717,7 @@ command: everything is derived from the snapshots the poller already produces.
   included) per host and compares the next observation: *started* (queued → active; a job or task first seen active
   that started after the baseline), *ended* (into a terminal state; carries state, exit code and the collector's short
   summary: `reason_text` / `hints[0]` / a task's `exited (log: …)`), *restarted* (`restarts` up, or back to the queue
-  from active / PREEMPTED / NODE_FAIL), *time_low* (RUNNING and left < max(10 % of the limit, 10 min); once per job and
+  from active / PREEMPTED / NODE_FAIL), *resubmitted* (a job first seen carrying on a bad ending, §5.2.12), *time_low* (RUNNING and left < max(10 % of the limit, 10 min); once per job and
   run), *gpu_idle* (the collector's `GPU idle …` hint first raised; once per run). The first observation of a host is a
   baseline (nothing fires, already-low/idle jobs are marked fired); it is taken only from a live poll (OK/DEGRADED with
   `last_ok`, the squeue/ps section not failing), never from the warm cache; a host in UNREACHABLE / NEEDS_AUTH /
@@ -4651,7 +4729,8 @@ command: everything is derived from the snapshots the poller already produces.
   `watched_events` (default `started`, `ended_ok`, `ended_other`, `gpu_idle`) for watched ones. `enabled`, `terminal`
   and `events` (as presets) can also be changed in Settings › General (§7.13), live and saved. `ended_bad` = FAILED,
   TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, PREEMPTED, BOOT_FAIL, DEADLINE; `ended_ok` = COMPLETED; `ended_other` =
-  CANCELLED / EX.
+  CANCELLED / EX. `resubmitted` is selectable (`events` / `watched_events`, the Settings preset *all*, hook
+  `RUNFLEET_EVENT=resubmitted`) but in neither default: it is information, not bad news.
 - **Delivery** (`ui/notify.Alerts`, fed from `RunFleetApp._flush_changes`, i.e. ≤ 4 Hz, plus a 30 s scan for the
   time-based events): selected events go to the history (palette › *Notifications*, 200 entries, `enter` opens the
   job). With `enabled`: per batch and host, ≤ 3 events → one toast each, more → one summary (`k2: 12 failed, 3

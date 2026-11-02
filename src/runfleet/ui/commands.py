@@ -64,6 +64,10 @@ class RunFleetCommands(Provider):
         yield "Sort by GPU-h", partial(app.jobs_setting, "sort", "gpuh"), "jobs table: GPU-hours so far"
         for group in GROUPS:
             yield f"Group by {group}", partial(app.jobs_setting, "group", group), "jobs table"
+        yield "Jobs: hide resubmitted", partial(app.jobs_setting, "filter", "!is:resubmitted"), \
+            "jobs table: hide the bad endings a later job of yours carries on (filter !is:resubmitted)"
+        yield "Jobs: only resubmitted", partial(app.jobs_setting, "filter_all", "is:resubmitted"), \
+            "jobs table: the bad endings a later job of yours carries on (filter is:resubmitted)"
         yield "Save view as…", app.prompt_save_view, "name the Jobs view's filter, preset, sort and grouping (ui.json)"
         views = app.saved_jobs_views()
         for name, view in views.items():

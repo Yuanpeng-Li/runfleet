@@ -9,12 +9,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
+from rich.style import Style
 from rich.text import Text
 
-from runfleet.models import (ConnState, ErrorKind, FairShare, HostStatus, JobState, PartitionSummary,
-                             PendingPriority)
+from runfleet.models import (ConnState, ErrorKind, FairShare, HostStatus, Job, JobKey, JobState, PartitionSummary,
+                             PendingPriority, StateGroup)
 from runfleet.ui import theme
+from runfleet.ui.query import elapsed_s, ended_at
 from runfleet.util import humanize
+from runfleet.util.lineage import Lineage
 from runfleet.util.gpufree import (GPU_BUSY_MEM_MIB as GPU_BUSY_MEM_MIB, GPU_BUSY_UTIL as GPU_BUSY_UTIL,
                                    gpu_in_use as gpu_in_use)     # moved to util.gpufree (shared with `runfleet agent`)
 
@@ -342,3 +345,92 @@ def priority_summary(p: PendingPriority, account: str | None, now: datetime) -> 
     if p.sampled_at is not None:
         out.append(f" · {humanize.ago(p.sampled_at, now)}", style=theme.dim())
     return out
+
+
+# ---------------------------------------------------------------- resubmissions (§5.2.12)
+_LINK_WORDS = {JobState.COMPLETED: "done", JobState.OUT_OF_MEMORY: "oom", JobState.NODE_FAIL: "node fail",
+               JobState.BOOT_FAIL: "boot fail"}
+
+
+def link_state(job: Job) -> str:
+    """The state of a linked job in one lower-case word: ``done``, ``running``, ``preempted``, ``pending``."""
+    return _LINK_WORDS.get(job.state, job.state.name.lower())
+
+
+def open_job_style(key: JobKey) -> Style:
+    """A click on the text opens that job's detail (``app.open_job``)."""
+    return Style(meta={"@click": f"app.open_job({str(key)!r})"})
+
+
+def link_when(job: Job, now: datetime) -> str:
+    """When the linked job got where it is: ``7h ago`` (ended), ``for 2h03m`` (running, pending since submit)."""
+    if job.state.is_terminal:
+        return humanize.ago(ended_at(job), now, dash="")
+    if job.state.group is StateGroup.ACTIVE:
+        el = elapsed_s(job, now)
+        return f"for {humanize.span(el)}" if el is not None else ""
+    return f"for {humanize.span((now - job.submit_time).total_seconds())}" if job.submit_time is not None else ""
+
+
+def link_ref(job: Job, *, code: bool = False) -> Text:
+    """``58721477 done`` with the id clickable and the state in its colour (``code``: ``58721477 CD``)."""
+    out = Text(job.key.label, style=open_job_style(job.key))
+    out.append(" ")
+    out.append(job.state.value if code else link_state(job), style=theme.state_style(job.state))
+    return out
+
+
+def resubmitted_text(job: Job, links: Lineage, now: datetime, *, prefix: str = "resubmitted as ") -> Text | None:
+    """``resubmitted as 58721477 · done 7h ago`` (+ ``→ latest 58730002 running`` for a longer chain): the bad ending
+    a later job carries on, worded as resolved (muted, never the error colour). None: no later job seen."""
+    nxt = links.next_of(job.key)
+    if nxt is None:
+        return None
+    out = Text(prefix, style=theme.muted())
+    out.append(nxt.key.label, style=open_job_style(nxt.key))
+    out.append(" · ", style=theme.dim())
+    out.append(link_state(nxt), style=theme.state_style(nxt.state))
+    when = link_when(nxt, now)
+    if when:
+        out.append(f" {when}", style=theme.muted())
+    latest = links.latest_of(job.key)
+    if latest is not None and latest.key != nxt.key:
+        out.append(" → latest ", style=theme.muted())
+        out.append_text(link_ref(latest))
+    return out
+
+
+def resumes_text(job: Job, links: Lineage, now: datetime) -> Text | None:
+    """``resumes 58717472 preempted 7h ago``: the bad ending this job carries on; None when it carries none on."""
+    prev = links.prev_of(job.key)
+    if prev is None:
+        return None
+    out = Text("resumes ", style=theme.muted())
+    out.append(prev.key.label, style=open_job_style(prev.key))
+    out.append(" ")
+    out.append(link_state(prev), style=theme.state_style(prev.state))
+    when = link_when(prev, now)
+    if when:
+        out.append(f" {when}", style=theme.muted())
+    return out
+
+
+def lineage_line(job: Job, links: Lineage, now: datetime) -> Text | None:
+    """Both links of a job in one line (a middle job of a chain resumes one and is resubmitted as another)."""
+    parts = [t for t in (resubmitted_text(job, links, now), resumes_text(job, links, now)) if t is not None]
+    if not parts:
+        return None
+    return Text(" · ", style=theme.dim()).join(parts)
+
+
+def chain_plain(job: Job, links: Lineage) -> str:
+    """The whole chain through ``job``, oldest first: ``58717472 PR → 58721477 CD`` (tooltips)."""
+    back: list[Job] = []
+    seen = {job.key}
+    prev = links.prev_of(job.key)
+    while prev is not None and prev.key not in seen:
+        seen.add(prev.key)
+        back.append(prev)
+        prev = links.prev_of(prev.key)
+    chain = [*reversed(back), job, *links.chain_after(job.key)]
+    return " → ".join(f"{j.key.label} {j.state.value}" for j in chain)

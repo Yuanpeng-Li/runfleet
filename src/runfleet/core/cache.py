@@ -43,11 +43,14 @@ CREATE TABLE IF NOT EXISTS jobmeta     (host TEXT, job_id TEXT, job_id_raw TEXT,
                                         stderr TEXT, merged INTEGER, gpu_type TEXT, per_node_json TEXT,
                                         first_seen REAL, last_seen REAL, last_state TEXT,
                                         PRIMARY KEY (host, job_id));
+CREATE TABLE IF NOT EXISTS jobmeta_restarts (host TEXT, job_id TEXT, restarts INTEGER, PRIMARY KEY (host, job_id));
 CREATE TABLE IF NOT EXISTS ended_tasks (host TEXT, job_id TEXT, ended_at REAL, json TEXT, PRIMARY KEY (host, job_id));
 CREATE TABLE IF NOT EXISTS host_status (host TEXT PRIMARY KEY, at REAL, state TEXT, error_kind TEXT, error TEXT);
 CREATE TABLE IF NOT EXISTS host_health (host TEXT PRIMARY KEY, at REAL, json TEXT);
 CREATE TABLE IF NOT EXISTS account_reports (host TEXT, window TEXT, at REAL, json TEXT, PRIMARY KEY (host, window));
 """
+# jobmeta's restart counts live in their own table, never a new jobmeta column: an older RunFleet sharing the cache
+# file (an installed release next to a newer TUI) writes jobmeta rows positionally and would fail on a 14th column
 HEALTH_V = 1
 # one account report row (§5.2.11): the newest `at` of a (host, window) wins, whoever writes it (Cache, `agent usage`)
 UPSERT_REPORT = ("INSERT INTO account_reports VALUES (?, ?, ?, ?) ON CONFLICT (host, window) DO UPDATE SET "
@@ -172,6 +175,7 @@ class JobMeta:
     first_seen: float
     last_seen: float
     last_state: str
+    restarts: int = 0                  # the highest RestartCnt seen live (sacct has none; older cache rows: 0)
 
     @classmethod
     def from_job(cls, job: Job, now: float, previous: JobMeta | None = None) -> JobMeta:
@@ -179,25 +183,32 @@ class JobMeta:
         out = next((r for r in job.logs if r.stream == "stdout" and r.path and r.source != "template"), None)
         err = next((r for r in job.logs if r.stream == "stderr" and r.path and r.source != "template"), None)
         merged = any(r.merged for r in job.logs)
-        prev = previous
+        restarts = max(job.restarts, previous.restarts if previous else 0)
+        # a requeue (RestartCnt went up) starts a new attempt: the previous one's log paths, GPU type and per-node
+        # allocation (nodes, GPU indices) no longer apply; the work dir and the first sighting do
+        prev = previous if previous is None or restarts == previous.restarts else None
         return cls(
             job_id=job.key.id, job_id_raw=job.job_id_raw, name=job.name,
-            workdir=job.workdir or (prev.workdir if prev else None),
+            workdir=job.workdir or (previous.workdir if previous else None),
             stdout=out.path if out else (prev.stdout if prev else None),
             stderr=err.path if err else (prev.stderr if prev else None),
             merged=merged or (prev.merged if prev else False),
             gpu_type=job.alloc.gpu_type or (prev.gpu_type if prev else None),
             per_node=job.alloc.per_node or (prev.per_node if prev else ()),
-            first_seen=prev.first_seen if prev else now, last_seen=now, last_state=job.state.value,
+            first_seen=previous.first_seen if previous else now, last_seen=now, last_state=job.state.value,
+            restarts=restarts,
         )
 
     def worth_keeping(self) -> bool:
-        return bool(self.stdout or self.workdir or self.gpu_type or self.per_node)
+        return bool(self.stdout or self.workdir or self.gpu_type or self.per_node or self.restarts)
 
 
 def enrich_from_meta(job: Job, meta: JobMeta) -> Job:
-    """Fill a history-only job's missing log paths / GPU type / per-node allocation from jobmeta (source="cache")."""
+    """Fill a history-only job's missing log paths / GPU type / per-node allocation from jobmeta (source="cache"), and
+    its restart count (sacct has none: a requeued job that ended would say 0)."""
     updates: dict[str, Any] = {}
+    if meta.restarts > job.restarts:
+        updates["restarts"] = meta.restarts
     has_real_log = any(r.path and r.source not in ("template",) for r in job.logs)
     if not has_real_log and meta.stdout:
         refs = [LogRef(stream="stdout", path=meta.stdout, merged=meta.merged, source="cache")]
@@ -302,8 +313,10 @@ class Cache:
     def load_jobmeta(self, host: str) -> dict[str, JobMeta]:
         with self._db_lock:
             rows = self._db.execute(
-                "SELECT job_id, job_id_raw, name, workdir, stdout, stderr, merged, gpu_type, per_node_json, "
-                "first_seen, last_seen, last_state FROM jobmeta WHERE host = ?", (host,)).fetchall()
+                "SELECT m.job_id, m.job_id_raw, m.name, m.workdir, m.stdout, m.stderr, m.merged, m.gpu_type, "
+                "m.per_node_json, m.first_seen, m.last_seen, m.last_state, r.restarts FROM jobmeta m "
+                "LEFT JOIN jobmeta_restarts r ON r.host = m.host AND r.job_id = m.job_id WHERE m.host = ?",
+                (host,)).fetchall()
         out: dict[str, JobMeta] = {}
         for r in rows:
             try:
@@ -312,7 +325,7 @@ class Cache:
                 per_node = ()
             out[r[0]] = JobMeta(job_id=r[0], job_id_raw=r[1], name=r[2], workdir=r[3], stdout=r[4], stderr=r[5],
                                 merged=bool(r[6]), gpu_type=r[7], per_node=per_node, first_seen=r[9],
-                                last_seen=r[10], last_state=r[11])
+                                last_seen=r[10], last_state=r[11], restarts=int(r[12] or 0))
         return out
 
     def load_ended_tasks(self, host: str, since: datetime) -> dict[str, Job]:
@@ -359,6 +372,8 @@ class Cache:
         t = now.timestamp()
         with self._db_lock, self._db:
             self._db.execute("DELETE FROM jobmeta WHERE last_seen < ?", (t - JOBMETA_RETENTION,))
+            self._db.execute("DELETE FROM jobmeta_restarts WHERE NOT EXISTS (SELECT 1 FROM jobmeta m WHERE "
+                             "m.host = jobmeta_restarts.host AND m.job_id = jobmeta_restarts.job_id)")
             self._db.execute("DELETE FROM ended_tasks WHERE ended_at < ?", (t - ENDED_TASKS_RETENTION,))
             self._db.execute("DELETE FROM caps WHERE detected_at < ?", (t - CAPS_MAX_AGE,))
             self._db.execute("DELETE FROM account_reports WHERE at < ?", (t - ACCOUNT_REPORTS_RETENTION,))
@@ -466,6 +481,8 @@ class Cache:
                        [(h, m.job_id, m.job_id_raw, m.name, m.workdir, m.stdout, m.stderr, int(m.merged),
                          m.gpu_type, json.dumps(to_json(m.per_node)), m.first_seen, m.last_seen, m.last_state)
                         for (h, _), m in metas.items()])
+        db.executemany("INSERT OR REPLACE INTO jobmeta_restarts VALUES (?, ?, ?)",
+                       [(h, m.job_id, m.restarts) for (h, _), m in metas.items() if m.restarts])
         db.executemany("INSERT OR REPLACE INTO ended_tasks VALUES (?, ?, ?, ?)",
                        [(h, j.key.id, t, json.dumps(to_json(j))) for (h, _), (j, t) in ended.items()])
         db.executemany("INSERT OR REPLACE INTO host_status VALUES (?, ?, ?, ?, ?)",
@@ -500,6 +517,7 @@ class Cache:
             if isinstance(was, str) and isinstance(now, str) and was != now:
                 self._db.execute("DELETE FROM caps WHERE host = ?", (host,))
                 self._db.execute("DELETE FROM jobmeta WHERE host = ?", (host,))
+                self._db.execute("DELETE FROM jobmeta_restarts WHERE host = ?", (host,))
                 self._db.execute("DELETE FROM ended_tasks WHERE host = ?", (host,))
                 self._db.execute("DELETE FROM account_reports WHERE host = ?", (host,))
                 log.info("cache: %s now names another ssh destination; its old metadata dropped", host)

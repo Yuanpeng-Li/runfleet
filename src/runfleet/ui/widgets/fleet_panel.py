@@ -23,6 +23,7 @@ from runfleet.ui.gpu_watch import WatchEvent
 from runfleet.ui.notify import since_label
 from runfleet.ui.widgets.host_card import old_reading
 from runfleet.util import humanize
+from runfleet.util.lineage import link
 
 if TYPE_CHECKING:
     from runfleet.core.store import HostState
@@ -56,6 +57,9 @@ def panel_body(hosts: Mapping[str, HostState], now: datetime, *, rows: int, widt
     ended = tuple(memo.get(name, "ended", (snap.jobs,), (),
                            lambda: fleet_layout.own_ended(snap))           # noqa: B023 (called at once)
                   for name, state in hosts.items() if (snap := state.snapshot) is not None)
+    snaps = [(name, snap) for name, state in hosts.items() if (snap := state.snapshot) is not None]
+    lineage = memo.get("*", "lineage", tuple(snap.jobs for _name, snap in snaps), (),
+                       lambda: link(j for _name, snap in snaps for j in snap.jobs.values()))
     free = fleet_layout.free_by_type(hosts, now, lambda state, gpu: old_reading(state, gpu, now), memo, rate)
     mine = fleet_layout.my_types(hosts, now, window, memo)
     yours = {id(t) for t in free.types.values() if t.label in mine and t.host is None}
@@ -72,13 +76,13 @@ def panel_body(hosts: Mapping[str, HostState], now: datetime, *, rows: int, widt
         extra = [fleet_layout.Activity(e.at, e.host, fleet_layout.GLYPHS["gpu_free"], e.watch, e.summary, False,
                                        e.at <= since) for e in fired]
         return (fleet_layout.count_text(jobs, history, since),
-                fleet_layout.activity_rows(jobs, history, now, window, since, extra),
+                fleet_layout.activity_rows(jobs, history, now, window, since, extra, lineage=lineage),
                 fleet_layout.activity_expiry(jobs, history, now, window, extra))
 
     # the rolling window moves with ``now``: what it holds changes only when an end or an event leaves it (expiry),
     # so the rows and the count line agree with the cards' "my jobs" counts to the second
     since_key = since if digest_since is not None else None
-    counts, acts, _until = memo.get("*", "activity", (*ended, history[-1] if history else None,
+    counts, acts, _until = memo.get("*", "activity", (*ended, lineage, history[-1] if history else None,
                                                       fired[-1] if fired else None),
                                     (window, since_key, len(history), len(fired)), activity, now=now,
                                     expires=lambda v: v[2])

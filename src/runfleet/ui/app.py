@@ -39,10 +39,11 @@ from runfleet.ui import keymap, saved_views, theme
 from runfleet.ui.commands import RunFleetCommands
 from runfleet.ui.messages import ClockTick, FleetChanged, ScopeChanged
 from runfleet.ui.notify import Alerts
-from runfleet.ui.query import Preset
+from runfleet.ui.query import LineageCache, Preset
 from runfleet.ui.saved_views import SavedView
 from runfleet.ui.screens import FleetScreen
 from runfleet.util import platform as rfplatform
+from runfleet.util.lineage import Lineage
 
 log = logging.getLogger("runfleet.ui.app")
 
@@ -193,6 +194,7 @@ class RunFleetApp(App[None]):
         self._doctor_held: dict[str, tuple[float, Any]] = {}   # host -> (monotonic, DoctorReport) held back
         self._connecting: set[str] = set()
         self.alerts = Alerts(self)              # notifications, watch list, "since you were away" (§7.14)
+        self._lineage = LineageCache()          # resubmission links of the held jobs (§5.2.12), per host snapshot
         self.check_updates = check_updates      # ask GitHub for a newer RunFleet at start (§8.6; never --demo/tests)
         self.update_status: Any = None          # update.Status of the last check this run (None: not asked yet)
         self.update_checking = False
@@ -482,6 +484,11 @@ class RunFleetApp(App[None]):
 
     def host_state(self, host: str) -> HostState | None:
         return self.store.hosts.get(host)
+
+    def lineage(self) -> Lineage:
+        """Which job carries on which bad ending (§5.2.12), from the jobs the store holds: relinked per host only when
+        its snapshot's jobs changed, so every view may ask once per render pass."""
+        return self._lineage.get(self.store.hosts)
 
     # ------------------------------------------------------------------ global actions (keymap "global")
     def action_help(self) -> None:
@@ -1086,7 +1093,7 @@ class RunFleetApp(App[None]):
 
     # ------------------------------------------------------------------ palette commands
     def jobs_setting(self, kind: str, value: Any) -> None:
-        """Palette: state preset / sort / grouping of the Jobs view (switches to it)."""
+        """Palette: state preset / sort / grouping / filter text of the Jobs view (switches to it)."""
         main = self.go_main("jobs")
         if main is None:
             return
@@ -1096,6 +1103,10 @@ class RunFleetApp(App[None]):
             main.jobs.set_sort(value)
         elif kind == "group":
             main.jobs.set_group(value)
+        elif kind == "filter":                  # palette › Jobs: hide resubmitted (§5.2.12)
+            main.jobs.set_filter(value)
+        elif kind == "filter_all":              # palette › Jobs: only resubmitted — every state, or ended ones hide
+            main.jobs.set_filter(value, preset="all")
 
     # ------------------------------------------------------------------ account usage (§7.17)
     def action_account(self, host: str | None = None) -> None:

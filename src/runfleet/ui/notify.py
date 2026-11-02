@@ -33,6 +33,7 @@ from runfleet.models import ConnState, Job, JobKey, StateGroup
 from runfleet.ui import gpu_watch
 from runfleet.ui.gpu_watch import GpuWatch, Reading, WatchEvent
 from runfleet.util import humanize, platform
+from runfleet.util.lineage import Lineage, link
 
 if TYPE_CHECKING:
     from runfleet.ui.app import RunFleetApp
@@ -444,7 +445,8 @@ class Alerts:
         jobs = ended_since(self.app.store.jobs(), since)
         if not jobs:
             return
-        bad = any(j.state.group is StateGroup.FAILED for j in jobs)
+        lin = self.lineage()                    # a failure already resubmitted is history, not an open problem
+        bad = any(j.state.group is StateGroup.FAILED and not lin.superseded(j.key) for j in jobs)
         self.app.toast(f"since {since_label(since, self.now())}: {count_line(end_word(j.state) for j in jobs)}"
                        " — D to review", severity="warning" if bad else "information", timeout=20.0)
 
@@ -457,6 +459,12 @@ class Alerts:
             if st.last_ok is None or st.last_ok < after:
                 return False
         return True
+
+    def lineage(self) -> Lineage:
+        """The resubmission links among every host's jobs (:mod:`runfleet.util.lineage`): what the away toast and the
+        digest read once each (the app's per-host cache when it has one; else linked here, linear in the jobs)."""
+        cached = getattr(self.app, "lineage", None)
+        return cached() if callable(cached) else link(self.app.store.jobs())
 
     def digest(self) -> tuple[datetime, list[Job]]:
         """What `D` shows: own jobs ended since the last away point (else within ``recent_window``)."""

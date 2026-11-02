@@ -52,6 +52,7 @@ LEGEND: tuple[tuple[str, str, str], ...] = (
     ("fleet_panel", "✖ ✓ ■ ◷ ↻ ◌", "what changed: bad end · completed · other end · low on time · restarted · "
                                    "GPU idle"),
     ("fleet_panel", "◎", "what changed: a GPU watch fired (palette › Watches)"),
+    ("fleet_panel", "↪", "what changed: a job resumes one that ended badly ([notify] events: resubmitted)"),
     ("fleet_panel", "free GPUs", "fleet panel: what sinfo / nvidia-smi saw minutes ago, not your quota"),
     ("gpus", "*  ~", "per-job aggregate from Slurm accounting (not one GPU's reading) · stale"),
     ("global", "⟳ 15s", "tick interval of the hosts in scope (spinner while a probe is in flight)"),

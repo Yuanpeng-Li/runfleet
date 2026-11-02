@@ -2,8 +2,10 @@
 
 Sources (docs/AGENT_INTERFACE.md §3.8): submit times, real (not estimated) start times, ends (`core.events.ended_since`,
 sacct history included) and the workstation tasks of the cache's `ended_tasks` table (7 days, beyond the snapshot's
-`recent_window`). Conditions that hold now carry no time: `time_low` and each host's current state with its start
-(`host_status.at` dates the current state only: transitions are not rebuilt).
+`recent_window`). A job that carries on an earlier bad ending (`util.lineage`, a new id) is also "resubmitted" at its
+submit time (`k2:2331980:resubmitted`, "resumes k2:2331977 (PREEMPTED)"); same-id requeues are `started:<n>`.
+Conditions that hold now carry no time: `time_low` and each host's current state with its start (`host_status.at`
+dates the current state only: transitions are not rebuilt).
 
 Event time is not observation time: accounting can report at 12:05 a job that ended at 11:59, so a window starting at
 12:00 never shows that end. Callers (the skill) query overlapping windows and dedupe by `Event.id`, which is stable
@@ -26,10 +28,12 @@ from runfleet.core import events as core_events
 from runfleet.core.cache import ENDED_TASKS_RETENTION
 from runfleet.models import ConnState, Job, JobState, StateGroup
 from runfleet.util import humanize
+from runfleet.util.lineage import link
 from runfleet.util.logscan import PENDING_EXIT_HINT
 
-EventKind = Literal["submitted", "started", "ended_ok", "ended_bad", "ended_other", "time_low", "host"]
-KINDS: tuple[EventKind, ...] = ("submitted", "started", "ended_ok", "ended_bad", "ended_other", "time_low", "host")
+EventKind = Literal["submitted", "resubmitted", "started", "ended_ok", "ended_bad", "ended_other", "time_low", "host"]
+KINDS: tuple[EventKind, ...] = ("submitted", "resubmitted", "started", "ended_ok", "ended_bad", "ended_other",
+                                "time_low", "host")
 _QUIET = (None, ConnState.OK, ConnState.DISABLED, ConnState.NEW)     # host states that are not news
 
 
@@ -42,7 +46,8 @@ class Event:
     host: str
     job: str | None                  # display id "k2:2331977" / "labstation:p642229"; None for host items
     name: str                        # raw job name ("" for host items)
-    text: str                        # raw detail: "OUT_OF_MEMORY · out of memory", "14m left of 1d", "needs_auth"
+    text: str                        # raw detail: "OUT_OF_MEMORY · out of memory", "14m left of 1d", "needs_auth",
+                                     # "resumes k2:2331977 (PREEMPTED)"
     state: str | None = None         # job state code ("OOM") or host state ("needs_auth")
     since: datetime | None = None    # host items: when the current state began
 
@@ -94,11 +99,19 @@ def _end_text(job: Job) -> str:
 
 def _job_events(hv: HostView, since: datetime, now: datetime) -> list[Event]:
     jobs = [j for j in _all_jobs(hv).values() if j.is_mine]
+    lineage = link(jobs)
     out: list[Event] = []
     for j in jobs:
         ref, base = _ref(j), _event_key(j)
         if j.submit_time is not None and since < j.submit_time <= now:
             out.append(Event(f"{base}:submitted", j.submit_time, "submitted", hv.name, ref, j.name, "", j.state.value))
+        prev = lineage.prev_of(j.key)
+        # the link holds from the later of the resubmit and the bad ending (a singleton segment queues ahead of it)
+        linked = max((t for t in (j.submit_time, prev.end_time if prev is not None else None) if t is not None),
+                     default=None)
+        if prev is not None and linked is not None and since < linked <= now:
+            out.append(Event(f"{base}:resubmitted", linked, "resubmitted", hv.name, ref, j.name,
+                             f"resumes {_ref(prev)} ({prev.state.name})", j.state.value))
         started = j.start_time is not None and not j.est_start and j.state.group is not StateGroup.QUEUED
         if started and j.start_time is not None and since < j.start_time <= now:
             where = " ".join(x for x in (_gpus(j), j.nodelist or "") if x)

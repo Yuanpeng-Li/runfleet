@@ -178,6 +178,18 @@ def test_partition_charges_synthetic() -> None:
         PartitionCharge("c"))
 
 
+def test_partition_preempt_mode() -> None:
+    """Each partition's PreemptMode (upper case, a combination kept whole); absent or N/A -> None (the cluster-wide
+    `slurm_config` value applies). The trimmed fixture lines carry none."""
+    lines = "\n".join([
+        "groups=lab", "parents=complete",
+        _part("free-gpu", PreemptMode="CANCEL"), _part("gpu", PreemptMode="off"),
+        _part("gang", PreemptMode="GANG,SUSPEND"), _part("plain"), _part("na", PreemptMode="N/A"),
+    ])
+    assert [p.preempt_mode for p in partition_charges(lines)] == ["CANCEL", "OFF", "GANG,SUSPEND", None, None]
+    assert all(p.preempt_mode is None for p in partition_charges(sample("lyra", "scontrol_partitions_charges")))
+
+
 def test_qos_section_is_cheap_and_guarded() -> None:
     (sec,) = [s for s in SlurmCollector.capability_sections(None) if s.name == "slurm.qos"]  # type: ignore[arg-type]
     assert sec.cmd == cmds.QOS_CMD == "sacctmgr -n -P show qos format=Name,UsageFactor"

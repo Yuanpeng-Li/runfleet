@@ -264,6 +264,63 @@ def test_enrich_history_job_from_jobmeta() -> None:
     assert later.stdout == "/w/7.out" and later.first_seen == 10.0 and later.last_seen == 20.0
 
 
+def test_requeue_resets_the_attempts_jobmeta_and_keeps_the_restart_count() -> None:
+    """A requeue (RestartCnt up) starts a new attempt: the first attempt's nodes / GPU indices / log path / GPU type
+    never come back on the history row; the restart count reaches the ended row (sacct says 0) and never goes down."""
+    first = job("8", logs=(LogRef("stdout", "/w/8-n1.out"),), workdir="/w",
+                alloc=ResourceAlloc(1, 1, None, 1, "a30", {}, per_node=(NodeAlloc("n1", None, None, (2,), None),)))
+    meta = JobMeta.from_job(first, 10.0)
+    assert meta.restarts == 0 and meta.per_node
+    second = JobMeta.from_job(job("8", restarts=1, alloc=ResourceAlloc(1, 1, None, 1, None, {})), 20.0, meta)
+    assert second.restarts == 1 and second.per_node == () and second.gpu_type is None and second.stdout is None
+    assert second.workdir == "/w" and second.first_seen == 10.0 and second.worth_keeping()
+    again = JobMeta.from_job(job("8", alloc=ResourceAlloc(1, 1, None, 1, None, {})), 30.0, second)
+    assert again.restarts == 1                                         # never lowered
+    hist = job("8", JobState.COMPLETED, source="sacct", alloc=ResourceAlloc(1, 1, None, 1, None, {}))
+    got = enrich_from_meta(hist, second)
+    assert got.restarts == 1 and got.alloc.per_node == ()
+    assert enrich_from_meta(hist, meta).restarts == 0
+    assert enrich_from_meta(replace(hist, restarts=3), second).restarts == 3
+
+
+def test_jobmeta_restarts_round_trip_and_older_cache_rows(tmp_path: Path) -> None:
+    """Restart counts live in their own table: rows of a database written before it read 0, and jobmeta keeps its 13
+    columns, so an older RunFleet sharing the cache file still writes its jobmeta rows."""
+    path = tmp_path / "cache.sqlite"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE jobmeta (host TEXT, job_id TEXT, job_id_raw TEXT, name TEXT, workdir TEXT, stdout TEXT, "
+               "stderr TEXT, merged INTEGER, gpu_type TEXT, per_node_json TEXT, first_seen REAL, last_seen REAL, "
+               "last_state TEXT, PRIMARY KEY (host, job_id))")
+    db.execute("INSERT INTO jobmeta VALUES ('k2', '5', '5', 'j5', '/w', '/w/5.out', NULL, 0, NULL, '[]', 1.0, 2.0, "
+               "'RUNNING')")
+    db.commit()
+    db.close()
+    c = Cache(path)
+    old = c.load_jobmeta("k2")["5"]
+    assert old.restarts == 0 and old.stdout == "/w/5.out"
+    meta = JobMeta.from_job(job("6", restarts=2, workdir="/w"), T0.timestamp())
+    c.put_jobmeta("k2", [meta])
+    assert c.flush_sync()
+    assert Cache(path).load_jobmeta("k2") == {"5": old, "6": meta} and meta.restarts == 2
+    db = sqlite3.connect(path)
+    assert len(db.execute("PRAGMA table_info(jobmeta)").fetchall()) == 13
+    db.execute("INSERT OR REPLACE INTO jobmeta VALUES ('k2', '7', '7', 'j7', NULL, NULL, NULL, 0, NULL, '[]', 1.0, "
+               "2.0, 'RUNNING')")                                   # how 0.9.0 writes it
+    db.commit()
+    db.close()
+    assert Cache(path).load_jobmeta("k2")["7"].restarts == 0
+
+
+def test_jobmeta_restarts_go_with_their_jobmeta_row(tmp_path: Path) -> None:
+    path = tmp_path / "cache.sqlite"
+    c = Cache(path)
+    c.put_jobmeta("k2", [replace(JobMeta.from_job(job("6", restarts=2, workdir="/w"), 1.0), last_seen=1.0)])
+    assert c.flush_sync()
+    c.prune(T0)
+    db = sqlite3.connect(path)
+    assert db.execute("SELECT count(*) FROM jobmeta_restarts").fetchone() == (0,)
+
+
 def test_damaged_duration_row_is_skipped_not_the_whole_cache(tmp_path: Path) -> None:
     import json
     path = tmp_path / "c.sqlite"

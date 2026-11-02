@@ -317,7 +317,7 @@ AGENT_HELP = {
            "the other log files under its workdir",
     "gpus": "free GPUs: Slurm per partition and type, workstations per GPU",
     "host": "one host's health: login, failing probes, data ages, partitions, load",
-    "events": "submitted / started / ended / time low / host problems since a time",
+    "events": "submitted / resubmitted / started / ended / time low / host problems since a time",
     "usage": "SU balances, my / the account's usage in a window, where it went (Slurm accounting, cache first)",
     "cost": "pre-submit cost estimate from the cached charging rules (never ssh, never submits)",
     "help": "every flag, JSON field, exit and problem code of this version",
