@@ -320,7 +320,7 @@ async def test_notification_rows_apply_live(make_app: MakeApp) -> None:
         await pilot.press("down", "space")                                       # events: failures -> +gpu idle
         assert svc.config.notify.events == ("ended_bad", "restarted", "time_low", "gpu_idle")
         await pilot.press("space")
-        assert svc.config.notify.events == NOTIFY_EVENTS
+        assert svc.config.notify.events == NOTIFY_EVENTS and "resubmitted" in NOTIFY_EVENTS   # all: resubmits too
         _ended(svc, "2332863", JobState.COMPLETED)
         await pilot.pause(0.3)
         assert app.alerts.history[-1].category == "ended_ok"                     # "all" applies to every job

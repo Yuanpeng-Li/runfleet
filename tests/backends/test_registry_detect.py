@@ -126,7 +126,7 @@ def test_k2_capabilities_and_profile() -> None:
     assert c.slurm_config["PreemptMode"] == "REQUEUE" and c.acct_gather_freq_s == 30
     assert c.driver_version is None
     assert c.qos_usage_factor == {} and c.partition_charges == ()       # no slurm.qos / slurm.parts here
-    assert c.detect_rev == DETECT_REV == 3
+    assert c.detect_rev == DETECT_REV == 4
 
 
 def test_charging_rules_reach_capabilities() -> None:

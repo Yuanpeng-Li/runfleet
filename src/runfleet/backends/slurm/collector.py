@@ -6,7 +6,9 @@ State kept across ticks (sans-IO; time comes from `HostContext.now`):
 - `_jobinfo`: `scontrol show job -d -o` facts per display id (fetched once per job: first sight and PD→R);
 - `_meta`: "jobmeta" — log paths / GPU type / per-node indices seen while a job was live, so history rows keep them
   after scontrol forgets the job (MinJobAge);
-- `_vanished_at`: ids that left squeue but are not terminal in history yet (looked up with backoff: `_vanished_tries`);
+- `_vanished_at`: ids that left squeue but are not terminal in history yet, or whose terminal history row describes an
+  earlier attempt (a same-id requeue, `_earlier_attempt`) (looked up with backoff: `_vanished_tries`);
+- `_restarts`: the highest RestartCnt squeue showed per display id, carried into the ended row (sacct has none);
 - `_jobinfo_fail`: scontrol answered for an id without a usable record: re-asked only after a backoff;
 - `_usage`, `_stats`, `_nodes`: latest sstat / logstat / sinfo results;
 - `_smi_model`: the GPU model nvidia-smi reported for a job during Attach (§7.16.5): it overrides the job's gres type
@@ -131,6 +133,7 @@ class SlurmCollector(SchedulerCollector):
         self._vanished_at: dict[str, datetime] = {}
         self._vanished_last: dict[str, Job] = {}
         self._vanished_tries: dict[str, tuple[int, datetime]] = {}   # display id -> (lookups so far, next due)
+        self._restarts: dict[str, int] = {}                # display id -> highest RestartCnt seen live
         self._jobinfo_fail: dict[str, tuple[int, datetime]] = {}     # display id -> (failures so far, next due)
         self._usage: dict[str, StepUsage] = {}             # by job_id_raw
         self._sstat_rows: dict[str, list[SstatRow]] = {}   # every step row of the last sstat, by job_id_raw
@@ -587,6 +590,8 @@ class SlurmCollector(SchedulerCollector):
             if prev is not None and (job.restarts != prev.restarts or (
                     job.state is JobState.RUNNING and prev.state is JobState.RUNNING and job.nodes != prev.nodes)):
                 self._forget_attempt(d, job.job_id_raw)
+            if job.restarts > self._restarts.get(d, 0):
+                self._restarts[d] = job.restarts
             if d not in self._jobinfo and d not in self._jobinfo_gone:
                 self._want_jobinfo.setdefault(d, None)
             elif prev is not None and prev.state is not JobState.RUNNING and job.state is JobState.RUNNING:
@@ -1105,7 +1110,8 @@ class SlurmCollector(SchedulerCollector):
         for d in [d for d, j in self._history.items() if j.end_time is not None and j.end_time < window_start]:
             del self._history[d]
             self._meta.pop(d, None)
-        jobs: dict[str, Job] = {d: self._enrich(j, ctx) for d, j in self._history.items() if j.state.is_terminal}
+        jobs: dict[str, Job] = {d: self._enrich(self._with_restarts(j), ctx) for d, j in self._history.items()
+                                if j.state.is_terminal}
         for d, job in self._live.items():
             jobs[d] = self._enrich(job, ctx)
         horizon = timedelta(seconds=ctx.host.slurm.sacct_window)
@@ -1113,7 +1119,10 @@ class SlurmCollector(SchedulerCollector):
             last = self._vanished_last.get(d)
             hist = jobs.get(d)
             summary = last is not None and _is_array_summary(last)
-            if (hist is not None and hist.state.is_terminal and d not in self._live) or last is None \
+            # a terminal row of an earlier attempt (read before a same-id requeue ran the job again) is no answer:
+            # the id stays here, looked up with `sacct -j`, until accounting has a row of the last attempt
+            if (hist is not None and hist.state.is_terminal and d not in self._live
+                    and (last is None or not _earlier_attempt(hist, last))) or last is None \
                     or now - t > horizon or (summary and (now - t >= VANISHED_GRACE or _summary_resolved(last, jobs))):
                 # a summary (`500_[1-2]`) is no job: accounting answers with its tasks, never with its id
                 self._vanished_at.pop(d, None)
@@ -1128,6 +1137,11 @@ class SlurmCollector(SchedulerCollector):
         self._forget_unreferenced()
         return jobs
 
+    def _with_restarts(self, job: Job) -> Job:
+        """A history row with the RestartCnt last seen live: sacct has no restart count (its rows say 0)."""
+        n = self._restarts.get(job.key.id, 0)
+        return dataclasses.replace(job, restarts=n) if n > job.restarts else job
+
     def _forget_unreferenced(self) -> None:
         """Bound the per-job state to jobs still known (live, history window, vanished)."""
         live_ids = set(self._live)
@@ -1140,6 +1154,8 @@ class SlurmCollector(SchedulerCollector):
             del self._meta[d]
         for d in [d for d in self._smi_model if d not in known]:
             del self._smi_model[d]
+        for d in [d for d in self._restarts if d not in known]:
+            del self._restarts[d]
         self._jobinfo_gone &= live_ids
         for d in [d for d in self._jobinfo_fail if d not in live_ids]:
             del self._jobinfo_fail[d]
@@ -1458,6 +1474,22 @@ def _summary_resolved(summary: Job, jobs: Mapping[str, Job]) -> bool:
                and j.array_task.isdigit() and (tasks is None or int(j.array_task) in tasks) for j in jobs.values())
 
 
+def _earlier_attempt(hist: Job, last: Job) -> bool:
+    """`hist` (a terminal sacct row) ended before `last` (the job's last squeue sighting) began: the record of an
+    attempt a same-id requeue (PreemptMode REQUEUE, `scontrol requeue`) replaced. Running: it started before the last
+    attempt did (a requeued run always starts later; both cluster clock, so a lagging `sacct -j` answer is caught too),
+    or without its start, it ended before that start (strictly: a job that dies within its first second has End =
+    Start, and its own final row must settle it); pending again, or no start time: it was read no later than that
+    sighting."""
+    if last.state.group is not StateGroup.QUEUED and last.start_time is not None and (
+            hist.start_time is not None or hist.end_time is not None):
+        if hist.start_time is not None:
+            return hist.start_time < last.start_time
+        assert hist.end_time is not None
+        return hist.end_time < last.start_time
+    return hist.observed_at is not None and last.observed_at is not None and hist.observed_at <= last.observed_at
+
+
 def _backoff(tries: int) -> timedelta:
     """30 s, 1 min, 2 min, … at most 10 min."""
     return timedelta(seconds=min(600, 30 * 2 ** (min(tries, 6) - 1)))
@@ -1584,7 +1616,8 @@ def gpu_partitions(text: str, associations: Sequence[tuple[str, str, str, str]],
 def partition_charges(text: str) -> tuple[PartitionCharge, ...]:
     """How each partition charges (Account, §5.2.11), from the `PartitionName=` lines of `slurm.parts`: every line
     whose name passes the validator (hidden ones and those closed to the user's groups are not printed without `-a`).
-    TRESBillingWeights stays raw (keys compare case-insensitively later); `QoS=N/A` and `AllowQos=ALL` -> None."""
+    TRESBillingWeights stays raw (keys compare case-insensitively later); `QoS=N/A` and `AllowQos=ALL` -> None.
+    PreemptMode is upper-cased as printed (`GANG,SUSPEND` stays whole); absent -> None (the cluster-wide one applies)."""
     out: list[PartitionCharge] = []
     for line in text.splitlines():
         if not line.startswith("PartitionName="):
@@ -1599,7 +1632,8 @@ def partition_charges(text: str) -> tuple[PartitionCharge, ...]:
             partition=name, billing_weights=nullish(weights) or "", qos=nullish(f.get("QoS")),
             allow_qos=None if not allow or allow == "ALL" else tuple(q for q in allow.split(",") if q),
             def_cpu_per_gpu=parse_int(f.get("DefCpuPerGPU")),            # UNLIMITED / absent -> None
-            def_mem_per_cpu_mb=parse_int(f.get("DefMemPerCPU"))))
+            def_mem_per_cpu_mb=parse_int(f.get("DefMemPerCPU")),
+            preempt_mode=(nullish(f.get("PreemptMode")) or "").upper() or None))
     return tuple(out)
 
 

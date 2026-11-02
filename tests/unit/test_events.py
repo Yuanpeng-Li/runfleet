@@ -1,5 +1,5 @@
-"""core/events.py: job transitions -> events (baseline, started, ended, restarted, time_low, gpu_idle), selection,
-coalescing and the away digest helpers (§7.14)."""
+"""core/events.py: job transitions -> events (baseline, started, ended, restarted, time_low, gpu_idle, resubmitted),
+selection, coalescing and the away digest helpers (§7.14)."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import dataclasses
 from datetime import UTC, datetime, timedelta
 
 from runfleet.config import NotifySettings
-from runfleet.core.events import (JobEvent, TransitionDetector, coalesce, count_line, end_summary, ended_since,
-                                  time_left_s, time_low, wanted)
+from runfleet.core.events import (CATEGORIES, JobEvent, TransitionDetector, coalesce, count_line, end_summary,
+                                  ended_since, resubmitted_note, resumes_note, time_left_s, time_low, wanted)
 from runfleet.models import Job, JobKey, JobKind, JobState
 
 T0 = datetime(2026, 9, 7, 10, 42, 37, tzinfo=UTC)
@@ -189,3 +189,86 @@ def test_ended_since_newest_first_own_only() -> None:
     d = job("4", JobState.FAILED, end=T0, mine=False)
     e = job("5")
     assert [j.key.id for j in ended_since([a, b, c, d, e], T0 - timedelta(hours=2))] == ["2", "1"]
+
+
+# ---------------------------------------------------------------------------------------------------- resubmitted
+def seg(jid: str, state: JobState, *, submit: float, name: str = "orb-swp--train--s47--a01",
+        end: datetime | None = None, elapsed: float | None = 600) -> Job:
+    """One run of a resubmitted job (same name and workdir), submitted ``submit`` seconds before T0."""
+    return dataclasses.replace(job(jid, state, end=end, elapsed=elapsed, raw_state=state.name), name=name,
+                               submit_time=T0 - timedelta(seconds=submit), workdir="/pub/me/orb")
+
+
+PREEMPTED = seg("58717472", JobState.PREEMPTED, submit=9 * 3600, end=T0 - timedelta(minutes=13))
+
+
+def test_a_new_job_that_resumes_a_bad_ending_fires_once() -> None:
+    det = baseline(PREEMPTED)
+    later = T0 + timedelta(minutes=1)
+    new = seg("58721477", JobState.PENDING, submit=-30, elapsed=None)
+    out = det.observe("k2", jobs(PREEMPTED, new), later)
+    assert kinds(out) == [("resubmitted", "58721477")]
+    e = out[0]
+    assert (e.category, e.word, e.bad, e.summary) == ("resubmitted", "resubmitted", False,
+                                                      "resumes 58717472 (PREEMPTED)")
+    assert e.text() == "k2:58721477 orb-swp--train--s47--a01 resubmitted: resumes 58717472 (PREEMPTED)"
+    started = dataclasses.replace(new, state=JobState.RUNNING, start_time=later)
+    assert kinds(det.observe("k2", jobs(PREEMPTED, started), later + timedelta(minutes=1))) == [
+        ("started", "58721477")]                                         # once: never again while it is listed
+
+
+def test_resubmissions_already_there_at_the_baseline_are_not_news() -> None:
+    new = seg("58721477", JobState.RUNNING, submit=600, elapsed=300)
+    det = baseline(PREEMPTED, new)
+    assert det.observe("k2", jobs(PREEMPTED, new), T0 + timedelta(minutes=1)) == []
+
+
+def test_a_bad_ending_seen_after_its_resubmission_still_fires_and_says_so() -> None:
+    """Late sacct (or a chained segment queued ahead): the failure is never hidden; its successor, already listed,
+    is told to resume it in the same batch."""
+    new = seg("58721477", JobState.RUNNING, submit=30, elapsed=10)
+    det = baseline(new)
+    late = dataclasses.replace(PREEMPTED, end_time=T0 - timedelta(seconds=60))
+    out = det.observe("k2", jobs(late, new), T0 + timedelta(seconds=30))
+    assert kinds(out) == [("ended", "58717472"), ("resubmitted", "58721477")]
+    assert out[0].category == "ended_bad" and out[0].summary == "(already resubmitted as 58721477)"
+    failed = seg("9", JobState.RUNNING, submit=7200, name="orb-eval--s45--a01", elapsed=3600)
+    queued = seg("10", JobState.PENDING, submit=600, name="orb-eval--s45--a01", elapsed=None)   # singleton, ahead
+    det = baseline(failed, queued)
+    crash = dataclasses.replace(failed, state=JobState.FAILED, end_time=T0, exit_code=1)
+    out = det.observe("k2", jobs(crash, queued), T0 + timedelta(seconds=30))
+    assert kinds(out) == [("ended", "9"), ("resubmitted", "10")]
+    assert out[0].summary == "exit 1 (already resubmitted as 10)"
+
+
+def test_old_history_that_links_up_late_is_not_news() -> None:
+    det = baseline(job("1"))
+    old = dataclasses.replace(PREEMPTED, end_time=T0 - timedelta(days=2))
+    done = seg("58721477", JobState.COMPLETED, submit=2 * 86400 - 600, end=T0 - timedelta(days=1))
+    assert det.observe("k2", jobs(job("1"), old, done), T0 + timedelta(minutes=1)) == []
+
+
+def test_resubmitted_is_selectable_but_not_a_default() -> None:
+    e = JobEvent("resubmitted", JobKey("k2", "2"), "x", JobState.PENDING, T0, "resumes 1 (FAILED)")
+    assert "resubmitted" in CATEGORIES and not wanted(e, NotifySettings(), watched=True)
+    assert wanted(e, NotifySettings(events=("ended_bad", "resubmitted")), watched=False)
+    assert count_line(["started", "resubmitted", "failed"]) == "1 failed · 1 resubmitted · 1 started"
+
+
+def test_resubmission_notes() -> None:
+    a = seg("2", JobState.FAILED, submit=100, end=T0)
+    b = seg("3", JobState.COMPLETED, submit=50, end=T0)
+    assert resubmitted_note(()) == "" and resumes_note(None) == ""
+    assert resubmitted_note((a,)) == "resubmitted as 2 (FAILED)"
+    assert resubmitted_note((a, b)) == "resubmitted as 2 (FAILED) → latest 3 COMPLETED"
+    assert resumes_note(PREEMPTED) == "resumes 58717472 (PREEMPTED)"
+
+
+def test_a_link_older_than_the_baseline_is_not_news_when_sacct_arrives_late() -> None:
+    """Baseline from squeue only (sacct one tick late, or after a reconnect): the running resubmission, hours old,
+    meets its old bad ending in the next tick — no `resubmitted` row for a link that predates the baseline."""
+    new = seg("200", JobState.RUNNING, submit=5 * 3600, elapsed=4 * 3600)
+    det = baseline(new)
+    old = seg("100", JobState.PREEMPTED, submit=7 * 3600, end=T0 - timedelta(hours=6))
+    assert det.observe("k2", jobs(old, new), T0 + timedelta(seconds=30)) == []
+    assert det.observe("k2", jobs(old, new), T0 + timedelta(minutes=1)) == []      # and never later either

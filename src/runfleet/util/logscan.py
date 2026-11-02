@@ -13,7 +13,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from runfleet.models import Job, JobDetail, JobState, StateGroup
+from runfleet.models import Capabilities, Job, JobDetail, JobState, StateGroup
 from runfleet.util import platform
 
 EXIT_PATTERN = re.compile(r"Traceback \(most recent call last\)|CUDA out of memory|OutOfMemoryError|MemoryError|"
@@ -139,15 +139,40 @@ def _by_signal(n: int) -> Cause:
     return Cause(f"SIGNAL {n}", f"killed by {_signal_name(n)} (signal {n}){_SIGNAL_NOTES.get(n, '')}")
 
 
+def preempt_mode_for(caps: Capabilities | None, partition: str | None) -> str | None:
+    """The PreemptMode that applied to a job of `partition`: the partition's own (`scontrol show partition`), else the
+    cluster-wide one (`scontrol show config`); upper case, first word ("CANCEL", "REQUEUE", "SUSPEND", "OFF"); None
+    when neither is known (a workstation, caps not detected yet)."""
+    if caps is None:
+        return None
+    for pc in caps.partition_charges:
+        if pc.partition == partition and pc.preempt_mode:
+            return pc.preempt_mode.split(",", 1)[0].strip().upper() or None
+    mode = (caps.slurm_config.get("PreemptMode") or "").split(",", 1)[0].strip().upper()
+    return mode or None
+
+
+def _preempt_advice(mode: str | None) -> str:
+    if mode == "REQUEUE":
+        # cause_of sees only ended jobs: a requeued one is back in the queue under its id, so this one was not
+        # requeueable (--no-requeue, JobRequeue=0) and nothing brings it back
+        return ("preempted for a higher-priority job and not requeued (PreemptMode REQUEUE, but the job was not "
+                "requeueable) — resubmit; checkpoint often")
+    if mode == "CANCEL":
+        return "preempted for a higher-priority job and killed (PreemptMode CANCEL) — resubmit; checkpoint often"
+    return "preempted for a higher-priority job — resubmit or requeue; checkpoint often"
+
+
 def cause_of(job: Job, detail: JobDetail | None = None, lines: Iterable[str] = (), *,
-             limit: int = 200) -> Cause | None:
+             limit: int = 200, preempt_mode: str | None = None) -> Cause | None:
     """The cause chip of an ended job that did not succeed (None for queued, running and completed jobs).
 
     Scheduler states decide first (OUT_OF_MEMORY, TIMEOUT, PREEMPTED, NODE_FAIL / BOOT_FAIL, DEADLINE), with the log
     line that shows them as evidence; a CANCELLED record whose log says ``DUE TO TIME LIMIT`` / ``PREEMPTION`` is that
     instead. Otherwise the log decides (CAUSE_RULES, most telling first; the evidence is the first matching line),
     then the exit status of the job or its steps (``rc >= 128`` = signal ``rc - 128``). ``lines`` is log text RunFleet
-    already holds (detail stream, log peek) — this never fetches anything."""
+    already holds (detail stream, log peek) — this never fetches anything. ``preempt_mode`` (`preempt_mode_for`)
+    words the PREEMPTED advice: CANCEL means resubmit, REQUEUE means Slurm puts it back; None keeps both open."""
     st = job.state
     if not st.is_terminal or st.group is StateGroup.DONE:
         return None
@@ -163,8 +188,7 @@ def cause_of(job: Job, detail: JobDetail | None = None, lines: Iterable[str] = (
         return Cause("TIMEOUT", f"{what} — request more --time, or checkpoint and resume",
                      _first(text, _TIMEOUT_LINE, limit))
     if st is JobState.PREEMPTED or (st is JobState.CANCELLED and _first(text, _PREEMPT_LINE, limit)):
-        return Cause("PREEMPTED", "preempted for a higher-priority job — resubmit or requeue; checkpoint often",
-                     _first(text, _PREEMPT_LINE, limit))
+        return Cause("PREEMPTED", _preempt_advice(preempt_mode), _first(text, _PREEMPT_LINE, limit))
     if st in (JobState.NODE_FAIL, JobState.BOOT_FAIL) or (
             st is JobState.CANCELLED and _first(text, _NODE_FAIL_LINE, limit)):
         return Cause("NODE_FAIL", "the node failed, not your code — resubmit; --exclude the node if it repeats",

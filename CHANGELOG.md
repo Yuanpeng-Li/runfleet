@@ -5,6 +5,39 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Resubmitted jobs are linked to the job they carry on.** On a partition that preempts by cancelling
+  (`PreemptMode=CANCEL`), a preempted job ends PREEMPTED and is resumed by a new `sbatch` under the same name; so is a
+  job resubmitted after a crash, a node failure, a time limit or a cancel. RunFleet used to show the old job as an
+  open failure with "resubmit or requeue" long after it had been resubmitted and even finished. It now links the two
+  from the jobs it already holds (no new remote command): same host, your own jobs, the same name (or the same name
+  with a higher hpc-run attempt, `…--a01` → `…--a02`), submitted later and not running alongside it, the same workdir
+  when known; array tasks only to the same task of another array. The old job is marked `⤳` in the Jobs table with
+  `→ <id> <state>` of the newest job of the chain, and its detail keeps the cause chip but says `resubmitted as
+  58721477 · completed 16:36` (and `→ latest …` for a chain like F → F → F → CD); the new job says `resumes …`. In
+  job detail `n` / `N` open the next / previous attempt (ids are clickable too); filter `is:resubmitted` /
+  `is:resumes`, palette *Jobs: hide resubmitted*. Failure counts are unchanged (they are history), but a resubmitted
+  failure no longer needs attention: it leaves the `a` list and drops to the bottom of the fleet cards, the away toast
+  warns only about failures nobody resubmitted, and the digest lists them apart. A new `resubmitted` notification event
+  can be selected (not on by default). For agents, `agent job` gets a `lineage` line and a `next` that points at the
+  newest job, JSON jobs gain `resubmitted_as` / `resumes`, `agent jobs` notes say it, `--attention` and `brief` skip
+  resubmitted failures, `brief` adds `counts.resubmitted_recent`, `agent events` adds kind `resubmitted`, and
+  `snapshot --json` adds per-job `resubmitted_as` / `resumes` (all additions within `/1`); the skill (revision 4)
+  tells agents not to resubmit a job that was already resubmitted. A missing link only means "not seen" (history
+  covers `sacct_window`). Works with `--demo` (lyra 32354789 → 32355120).
+
+### Fixed
+- The PREEMPTED cause followed no PreemptMode: it said "resubmit or requeue" everywhere. It now reads the partition's
+  `PreemptMode` (detected again once: DETECT_REV 4), else the cluster's: CANCEL says the job was killed and must be
+  resubmitted, REQUEUE that Slurm requeues it.
+- Same-id requeue (PreemptMode REQUEUE): when the requeued job's next attempt ended before the next accounting read,
+  or while `sacct` was failing, RunFleet showed the previous attempt's PREEMPTED record and end time. Such a record no
+  longer settles the job; it waits for (and looks up) the record of the last attempt.
+- An ended job that had been requeued showed `restarts 0` (sacct has no restart count). The count last seen in the
+  queue is now kept, also across restarts of RunFleet (a new cache table, so older versions sharing the cache file
+  are unaffected), and a requeue no longer lets the first attempt's nodes, GPU indices or log path come back from the
+  cache.
+
 ## [0.9.0] - 2026-10-31
 
 ### Added

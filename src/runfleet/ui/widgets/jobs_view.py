@@ -162,13 +162,14 @@ class JobsView(Widget):
         jobs = [j for j in self.rf.store.jobs(self.rf.scope_hosts()) if self.show_others or j.is_mine]
         total = len(jobs)
         cost = self.cost_fn()
+        links = self.rf.lineage()              # `is:resubmitted` (§5.2.12): one link per changed host, not per row
         if self.ended_since is not None:
             since = self.ended_since
             jobs = [j for j in jobs if (end := query.ended_at(j)) is not None and end > since and j.is_mine
-                    and query.matches(self.parsed, j, now, cost)]
+                    and query.matches(self.parsed, j, now, cost, links)]
         else:
             jobs = [j for j in jobs if query.preset_matches(self.preset, j, now, window)
-                    and query.matches(self.parsed, j, now, cost)]
+                    and query.matches(self.parsed, j, now, cost, links)]
         return query.sort_jobs(jobs, self.sort, self.reverse, host_order=self.rf.host_names(), now=now,
                                cost=cost), total
 
@@ -226,7 +227,7 @@ class JobsView(Widget):
         return RowContext(now, colors, problems, frozenset(stale), frozenset(self.marks),
                           self.rf.service.config.ui.gpu_util_thresholds,
                           name_starts=getattr(self, "_name_starts", {}), watched=watched, cost=self.cost_fn(),
-                          usage_only_hosts=bill_h)
+                          usage_only_hosts=bill_h, lineage=self.rf.lineage())
 
     def refresh_data(self) -> None:
         if not self.is_mounted:
@@ -463,7 +464,7 @@ class JobsView(Widget):
         preview.show_job(job, caps=caps, now=self.rf.now(), peek=peek,
                          peek_pending=self._peek_pending is not None, thresholds=ui.gpu_util_thresholds,
                          mem_thresholds=ui.gpu_mem_thresholds,
-                         usage_mode=summary.mode if summary is not None else None)
+                         usage_mode=summary.mode if summary is not None else None, links=self.rf.lineage())
 
     # ------------------------------------------------------------------ selection
     def current_job(self) -> Job | None:

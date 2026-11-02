@@ -9,24 +9,28 @@ partition, nodes, reason or user, or of the name with its separators removed (``
 subsequence fuzz: common words would match nearly every long sweep name. ``host:``/``h:``, ``state:``/``st:`` (codes
 ``R``/``PD``, groups ``active``/``failed``, names ``running``/``pending``/``oom``…), ``user:``/``u:``,
 ``acct:``/``account:`` and ``part:``/``p:`` take comma lists; ``su:`` and ``gpuh:`` compare the job's cost (Account,
-§5.2.11) with ``> >= < <= =`` (``su:>10``, ``gpuh:>=5``); ``!term`` negates. The cost comes from a callback the screen
-builds from the cached charging rules, so this module stays pure.
+§5.2.11) with ``> >= < <= =`` (``su:>10``, ``gpuh:>=5``); ``is:resubmitted`` (alias ``is:superseded``) keeps the bad
+endings a later job carries on and ``is:resumes`` the jobs that carry one on (§5.2.12, ``util.lineage``);
+``!term`` negates. The cost and the lineage come from the screen (a callback built from the cached charging rules, a
+``Lineage`` from the jobs the store holds), so this module stays pure.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 import re
 
 from runfleet.models import Job, JobState, StateGroup
 from runfleet.util import cost as costs
+from runfleet.util import lineage as lineages
 from runfleet.util.cost import JobCost
+from runfleet.util.lineage import Lineage
 
-TermKind = Literal["text", "host", "state", "user", "account", "partition", "su", "gpuh"]
+TermKind = Literal["text", "host", "state", "user", "account", "partition", "su", "gpuh", "is"]
 CostFn = Callable[[Job, datetime], JobCost | None]      # util.cost.job_cost with the job's host caps (§7.5)
 
 _KEY_ALIASES: dict[str, TermKind] = {
@@ -35,8 +39,10 @@ _KEY_ALIASES: dict[str, TermKind] = {
     "user": "user", "u": "user",
     "acct": "account", "account": "account",
     "part": "partition", "p": "partition", "partition": "partition",
-    "su": "su", "gpuh": "gpuh",
+    "su": "su", "gpuh": "gpuh", "is": "is",
 }
+_IS_VALUES = {"resubmitted": "resubmitted", "superseded": "resubmitted",       # `is:` words -> the link (§5.2.12)
+              "resumes": "resumes", "resumed": "resumes"}
 _NUMERIC: frozenset[TermKind] = frozenset({"su", "gpuh"})
 _COMPARE = re.compile(r"^(?P<op>>=|<=|>|<|=)?(?P<n>\d+(?:\.\d*)?|\.\d+)$")
 _OPS: dict[str, Callable[[float, float], bool]] = {
@@ -86,8 +92,11 @@ def parse(text: str) -> Query:
                 terms.append(Term(kind, (m.group("op") or "=",), negate, float(m.group("n"))))
                 continue
             kind = None
+        if kind == "is":             # only known words: `is:foo` stays a text term, as any unknown key does
+            words = tuple(_IS_VALUES.get(v.lower(), "") for v in rest.split(",") if v)
+            kind = "is" if words and all(words) else None
         if kind is not None and rest:
-            values = tuple(v.lower() for v in rest.split(",") if v)
+            values = tuple(_IS_VALUES[v.lower()] if kind == "is" else v.lower() for v in rest.split(",") if v)
             terms.append(Term(kind, values, negate))
         else:
             terms.append(Term("text", (body.lower(),), negate))
@@ -150,7 +159,10 @@ def _numeric_matches(term: Term, job: Job, now: datetime | None, cost: CostFn | 
     return _OPS[term.values[0]](value, term.number)
 
 
-def _term_matches(term: Term, job: Job, now: datetime | None, cost: CostFn | None) -> bool:
+def _term_matches(term: Term, job: Job, now: datetime | None, cost: CostFn | None, links: Lineage) -> bool:
+    if term.kind == "is":               # no link seen = not matched (`!is:resubmitted` keeps it)
+        return any(links.superseded(job.key) if v == "resubmitted" else links.prev_of(job.key) is not None
+                   for v in term.values)
     if term.kind == "host":
         return job.key.host.lower() in term.values
     if term.kind == "state":
@@ -166,10 +178,49 @@ def _term_matches(term: Term, job: Job, now: datetime | None, cost: CostFn | Non
     return _fuzzy(term.values[0], _fields(job), job.name)
 
 
-def matches(query: Query, job: Job, now: datetime | None = None, cost: CostFn | None = None) -> bool:
+def matches(query: Query, job: Job, now: datetime | None = None, cost: CostFn | None = None,
+            links: Lineage = lineages.EMPTY) -> bool:
     """True when every term matches (negated terms must not match). ``su:`` / ``gpuh:`` need ``now`` and ``cost``;
-    without them the job's cost is unknown."""
-    return all(_term_matches(t, job, now, cost) != t.negate for t in query.terms)
+    without them the job's cost is unknown. ``is:`` reads ``links`` (none given: no job is linked)."""
+    return all(_term_matches(t, job, now, cost, links) != t.negate for t in query.terms)
+
+
+class LineageCache:
+    """Resubmission links (§5.2.12, ``util.lineage.link``) of the jobs the store holds, per host. A host is relinked
+    only when its jobs mapping changes — the store swaps in a new one on every poll that changed a job — so a render
+    pass costs one O(n) ``link`` per changed host, never one per row."""
+
+    def __init__(self) -> None:
+        self._hosts: dict[str, tuple[Mapping[str, Job], Lineage]] = {}
+        self._merged: Lineage = lineages.EMPTY
+
+    def get(self, hosts: Mapping[str, Any]) -> Lineage:
+        """The links among every host's jobs; ``hosts`` maps a name to a ``HostState`` (``.snapshot.jobs``)."""
+        changed = False
+        seen: set[str] = set()
+        for name, state in hosts.items():
+            snap = getattr(state, "snapshot", None)
+            jobs: Mapping[str, Job] | None = snap.jobs if snap is not None else None
+            if jobs is None:
+                continue
+            seen.add(name)
+            cached = self._hosts.get(name)
+            if cached is None or cached[0] is not jobs:
+                self._hosts[name] = (jobs, lineages.link(jobs.values()))
+                changed = True
+        for name in [n for n in self._hosts if n not in seen]:
+            del self._hosts[name]
+            changed = True
+        if changed:
+            parts = [lin for _jobs, lin in self._hosts.values() if lin is not lineages.EMPTY]
+            if not parts:
+                self._merged = lineages.EMPTY
+            elif len(parts) == 1:
+                self._merged = parts[0]
+            else:
+                self._merged = Lineage({k: v for p in parts for k, v in p.successor.items()},
+                                       {k: v for p in parts for k, v in p.predecessor.items()})
+        return self._merged
 
 
 # ---------------------------------------------------------------- state presets
