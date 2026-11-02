@@ -39,7 +39,8 @@ from runfleet.util import cost as costs
 from runfleet.util import humanize, platform
 from runfleet.util import usage as rollups
 from runfleet.util.gpufree import is_free
-from runfleet.util.logscan import cause_of
+from runfleet.util.lineage import EMPTY, Lineage, link
+from runfleet.util.logscan import cause_of, preempt_mode_for
 from runfleet.util.redact import escape_controls, scrub, scrub_log, strip_ansi
 from runfleet.wait import Target
 
@@ -1125,7 +1126,7 @@ def _in_window(job: Job, flt: JobFilter, now: datetime, recent_window: float) ->
     return (now - end).total_seconds() <= recent_window
 
 
-def _matches(job: Job, flt: JobFilter, now: datetime, recent_window: float) -> bool:
+def _matches(job: Job, flt: JobFilter, now: datetime, recent_window: float, lineage: Lineage = EMPTY) -> bool:
     if not job.is_mine and not flt.all_users:
         return False
     if job.state.group.value not in flt.states and job.state.value not in flt.states:
@@ -1141,7 +1142,7 @@ def _matches(job: Job, flt: JobFilter, now: datetime, recent_window: float) -> b
             return False
     if not _in_window(job, flt, now, recent_window):
         return False
-    return not flt.attention_only or attention_of(job, now, recent_window) is not None
+    return not flt.attention_only or attention_of(job, now, recent_window, lineage) is not None
 
 
 _GROUP_RANK = {StateGroup.FAILED: 0, StateGroup.ENDED: 1, StateGroup.CANCELLED: 2, StateGroup.ACTIVE: 3,
@@ -1245,9 +1246,16 @@ def _reason(job: Job) -> tuple[str | None, str | None]:
     return job.reason, text
 
 
-def _cause(job: Job) -> str | None:
-    c = cause_of(job)
-    return None if c is None else f"{c.code}: {c.text}"
+def _cause(job: Job, caps: Capabilities | None = None, lineage: Lineage = EMPTY) -> str | None:
+    """`CODE: text`; a superseded job (§5.2.12) keeps the diagnosis but not the advice ("— resubmit …"): it says what
+    already carries it on instead."""
+    c = cause_of(job, preempt_mode=preempt_mode_for(caps, job.partition))
+    if c is None:
+        return None
+    nxt = lineage.next_of(job.key)
+    if nxt is not None:
+        return f"{c.code}: {c.text.split(' — ', 1)[0]} — already resubmitted as {_ref(nxt)}"
+    return f"{c.code}: {c.text}"
 
 
 def task_gpus_unknown(job: Job, hv: HostView | None, now: datetime) -> bool:
@@ -1269,19 +1277,22 @@ def _gpus_unknown_in(fv: FleetView, job: Job) -> bool:
     return task_gpus_unknown(job, fv.host(job.key.host), fv.generated_at)
 
 
-def job_json(job: Job, now: datetime, *, gpus_unknown: bool = False, caps: Capabilities | None = None) -> dict[str, Any]:
+def job_json(job: Job, now: datetime, *, gpus_unknown: bool = False, caps: Capabilities | None = None,
+             lineage: Lineage = EMPTY) -> dict[str, Any]:
     """The §3.3 projection: a fixed key set, ~0.7 KB; other users' rows keep user, id, state, GPUs, partition.
     ``id`` is the display form HOST:LABEL (workstation tasks ``labstation:p363942``), ``key`` the full internal id
     (``labstation:p363942-1788696459``); every verb accepts both. A job last seen > 5 min ago: elapsed / left as of
     ``observed_at``, never extrapolated. ``gpus_unknown`` (:func:`task_gpus_unknown`): ``gpus`` null. ``cost``
-    (Account, :func:`cost_json`) from the host's cached charging rules ``caps``."""
+    (Account, :func:`cost_json`) from the host's cached charging rules ``caps`` (which also word a PREEMPTED cause:
+    the partition's PreemptMode). ``resubmitted_as`` / ``resumes`` (§5.2.12, :func:`lineage_json`) from
+    ``lineage``."""
     mine = job.is_mine
     reason, reason_text = _reason(job)
     out_ref, err_ref = _logs(job)
     exit_obj = None
     if job.state.is_terminal:
-        exit_obj = {"code": job.exit_code, "signal": job.exit_signal, "cause": clean(_cause(job), NAME_CAP) if mine
-                    else None}
+        exit_obj = {"code": job.exit_code, "signal": job.exit_signal,
+                    "cause": clean(_cause(job, caps, lineage), NAME_CAP) if mine else None}
     gpu = job.gpu
     nodes = [_cl(n, 64) for n in job.nodes[:32]] + ([f"…[+{len(job.nodes) - 32}]"] if len(job.nodes) > 32 else [])
     out: dict[str, Any] = {
@@ -1315,6 +1326,7 @@ def job_json(job: Job, now: datetime, *, gpus_unknown: bool = False, caps: Capab
         else None,
         "restarts": job.restarts, "observed_at": iso(job.observed_at),
         "cost": cost_json(job, now, caps),
+        **lineage_json(job, lineage),
     }
     if not mine:                     # decision Q2: user, id, state, GPUs, partition; the rest of the fixed keys empty
         out.update({k: None for k in _OTHER_NULL})
@@ -1324,7 +1336,39 @@ def job_json(job: Job, now: datetime, *, gpus_unknown: bool = False, caps: Capab
 
 _OTHER_NULL = ("reason", "reason_text", "submitted_at", "started_at", "ended_at", "elapsed_s", "limit_s", "left_s",
                "qos", "account", "cpus", "mem_bytes", "gpu_use", "exit", "workdir", "logs", "array", "observed_at",
-               "cost")
+               "cost", "resubmitted_as", "resumes")
+
+
+# ---------------------------------------------------------------- resubmissions (§5.2.12)
+def fleet_lineage(fv: FleetView) -> Lineage:
+    """The resubmission links among the jobs of every enabled host (`util.lineage.link`, O(n); only same-host pairs
+    link): computed once per document, never per row."""
+    return link(j for hv in fv.hosts if hv.enabled for j in _all_jobs(hv))
+
+
+def _link_json(job: Job | None) -> dict[str, Any] | None:
+    if job is None:
+        return None
+    return {"key": _cl(str(job.key), NAME_CAP), "id": _cl(_ref(job), NAME_CAP), "state": job.state.value,
+            "group": job.state.group.value}
+
+
+def lineage_json(job: Job, lineage: Lineage) -> dict[str, Any]:
+    """``resubmitted_as``: the later job that carries this bad ending on (the job is superseded), with ``latest``,
+    the newest job of the chain when that is another one; ``resumes``: the bad ending this job carries on. Null
+    means none seen, never "not resubmitted"."""
+    nxt = lineage.next_of(job.key)
+    resub = None
+    if nxt is not None:
+        latest = lineage.latest_of(job.key)
+        resub = {**(_link_json(nxt) or {}),
+                 "latest": _link_json(latest) if latest is not None and latest.key != nxt.key else None}
+    return {"resubmitted_as": resub, "resumes": _link_json(lineage.prev_of(job.key))}
+
+
+def _link_text(job: Job, *, host: bool = True) -> str:
+    """``lyra:31358335 (COMPLETED)`` (``host`` False: the id alone, for rows already naming the host)."""
+    return f"{_cl(_ref(job) if host else job.key.label, NAME_CAP)} ({job.state.name})"
 
 
 # ---------------------------------------------------------------- job cost (Account, §5.2.11)
@@ -1442,12 +1486,16 @@ def _elapsed_col(job: Job, now: datetime) -> str:
     return f"{e}/{limit}"
 
 
-def attention_of(job: Job, now: datetime, recent_window: float) -> tuple[int, str, str] | None:
+def attention_of(job: Job, now: datetime, recent_window: float,
+                 lineage: Lineage = EMPTY) -> tuple[int, str, str] | None:
     """Why an own job needs a look: (rank §3.2, kind, raw text), None if it does not. Ranks: 2 failed recently,
-    3 will never run, 4 time low, 5 GPU / log idle, 6 held (1 is for host problems)."""
+    3 will never run, 4 time low, 5 GPU / log idle, 6 held (1 is for host problems). A failure a later job carries
+    on (resubmitted, ``lineage``) needs none: the newest job of the chain does, if it failed too."""
     if not job.is_mine:
         return None
     if job.state in core_events.BAD_END:
+        if lineage.superseded(job.key):
+            return None
         end = core_events.ended_at(job)
         if end is not None and (now - end).total_seconds() <= recent_window:
             return 2, "ended_bad", core_events.end_summary(job) or job.state.name.lower()
@@ -1469,15 +1517,22 @@ def attention_of(job: Job, now: datetime, recent_window: float) -> tuple[int, st
     return None
 
 
-def _note(job: Job, now: datetime, recent_window: float) -> str:
+def _note(job: Job, now: datetime, recent_window: float, lineage: Lineage = EMPTY) -> str:
     if not job.is_mine:
         return ""
+    prev = lineage.prev_of(job.key)
+    resumes = f"resumes {_link_text(prev, host=False)}" if prev is not None else ""
     if job.state.is_terminal:
         end = core_events.ended_at(job)
         bits = [f"ended {_ago(end, now)}"]
         summary = core_events.end_summary(job)
         if summary:
             bits.append(summary)
+        nxt = lineage.next_of(job.key)
+        if nxt is not None:
+            bits.append(f"resubmitted as {_link_text(nxt, host=False)}")
+        elif resumes:
+            bits.append(resumes)
         return " · ".join(bits)
     if job.state.group is StateGroup.QUEUED:
         bits = []
@@ -1490,21 +1545,22 @@ def _note(job: Job, now: datetime, recent_window: float) -> str:
             bits.append(f"est {_hm(job.start_time, now)}")
         if bits and _old(job, now):
             bits.append(_as_of(job, now))
-        return " · ".join(bits)
+        return " · ".join([*bits, resumes] if resumes else bits)
     att = attention_of(job, now, recent_window)
     note = att[2] if att is not None else (job.hints[0] if job.hints else "")
     if _old(job, now):                 # elapsed and hints are as of the last sighting
         note = " · ".join(x for x in (note, _as_of(job, now)) if x)
-    return note
+    return " · ".join(x for x in (note, resumes) if x)
 
 
-def _job_row(job: Job, now: datetime, recent_window: float, gpus_unknown: bool = False) -> list[str]:
+def _job_row(job: Job, now: datetime, recent_window: float, gpus_unknown: bool = False,
+             lineage: Lineage = EMPTY) -> list[str]:
     gpus = _gpus_col(job, gpus_unknown)
     if not job.is_mine:
         return [_col(_ref(job), 48), job.state.value, "hidden", gpus, _part_col(job),
                 f"{OTHER_USER} {_col(job.user, 32)}", ""]
     return [_col(_ref(job), 48), job.state.value, _elapsed_col(job, now), gpus, _part_col(job),
-            _col(job.name), cap(_safe(_note(job, now, recent_window)), HINT_CAP)]
+            _col(job.name), cap(_safe(_note(job, now, recent_window, lineage)), HINT_CAP)]
 
 
 def _table(head: Sequence[str] | None, rows: Sequence[Sequence[str]]) -> list[str]:
@@ -1520,11 +1576,13 @@ def _all_jobs(hv: HostView) -> list[Job]:
     return list(agent_events.host_jobs(hv).values())
 
 
-def select_jobs(fv: FleetView, flt: JobFilter) -> list[Job]:
-    """Jobs of the selected hosts matching the filter, in display order (host, failed → done, newest end first)."""
+def select_jobs(fv: FleetView, flt: JobFilter, lineage: Lineage | None = None) -> list[Job]:
+    """Jobs of the selected hosts matching the filter, in display order (host, failed → done, newest end first);
+    ``lineage``: :func:`fleet_lineage` (computed here when not given; --attention drops resubmitted failures)."""
     now = fv.generated_at
     order = {h.name: i for i, h in enumerate(fv.hosts)}
-    out = [j for hv in fv.hosts if hv.enabled for j in _all_jobs(hv) if _matches(j, flt, now, fv.recent_window)]
+    lin = fleet_lineage(fv) if lineage is None else lineage
+    out = [j for hv in fv.hosts if hv.enabled for j in _all_jobs(hv) if _matches(j, flt, now, fv.recent_window, lin)]
     out.sort(key=_job_sort(order))
     if flt.sort in SORTS:                    # stable: equal (and unknown, last) costs keep the display order
         def amount(j: Job) -> float:
@@ -1586,13 +1644,14 @@ def jobs(fv: FleetView, flt: JobFilter, *, limit: int = 40) -> Document:
         fv = with_history(fv)
     now = fv.generated_at
     hosts = list(fv.hosts)
-    found = select_jobs(fv, flt)
+    lineage = fleet_lineage(fv)
+    found = select_jobs(fv, flt, lineage)
     total = len(found)
-    attn = [attention_of(j, now, fv.recent_window) is not None for j in found]
+    attn = [attention_of(j, now, fv.recent_window, lineage) is not None for j in found]
     prio = list(range(total)) if flt.sort else sorted(range(total), key=lambda i: (0 if attn[i] else 1, i))
     limit = max(0, limit)
     text_budget, json_budget = BUDGETS["jobs"]
-    rows = [_job_row(j, now, fv.recent_window, _gpus_unknown_in(fv, j)) for j in found]
+    rows = [_job_row(j, now, fv.recent_window, _gpus_unknown_in(fv, j), lineage) for j in found]
     head = ["ID", "ST", "ELAPSED/LIMIT", "GPUS", "PART", "NAME", "NOTE"]
     states = _states_arg(flt.states)
 
@@ -1662,7 +1721,7 @@ def jobs(fv: FleetView, flt: JobFilter, *, limit: int = 40) -> Document:
 
     def render_json(k: int) -> dict[str, Any]:
         keep = _keep(prio, min(k, limit))
-        shown = [job_json(j, now, gpus_unknown=_gpus_unknown_in(fv, j), caps=_caps(fv, j))
+        shown = [job_json(j, now, gpus_unknown=_gpus_unknown_in(fv, j), caps=_caps(fv, j), lineage=lineage)
                  for i, j in enumerate(found) if i in keep]
         trunc = None if len(shown) >= total else _trunc(len(shown), total, *next_cmd(keep, as_json=True))
         return _envelope(fv, "jobs", hosts, truncated=trunc, jobs=shown,
@@ -1825,12 +1884,12 @@ def _host_attention(hvs: Sequence[HostView], fv: FleetView) -> list[_Attention]:
     return out
 
 
-def _job_attention(fv: FleetView, mine: Sequence[Job]) -> list[_Attention]:
+def _job_attention(fv: FleetView, mine: Sequence[Job], lineage: Lineage = EMPTY) -> list[_Attention]:
     now = fv.generated_at
     order = {h.name: i for i, h in enumerate(fv.hosts)}
     out: list[_Attention] = []
     for j in sorted(mine, key=_job_sort(order)):
-        att = attention_of(j, now, fv.recent_window)
+        att = attention_of(j, now, fv.recent_window, lineage)
         if att is None:
             continue
         rank, kind, raw = att
@@ -1870,15 +1929,19 @@ def brief(fv: FleetView, *, hosts: Sequence[str] = ()) -> Document:
     known = [hv for hv in enabled if not jobs_unknown(hv)]
     lower = [hv for hv in known if history_unreliable(hv)]
     mine = [j for hv in known for j in _all_jobs(hv) if j.is_mine]
+    lineage = link(mine)
 
     def recent(j: Job) -> bool:
         end = core_events.ended_at(j)
         return end is not None and (now - end).total_seconds() <= fv.recent_window
 
     tally: Counter[StateGroup] = Counter()
+    resubmitted = 0                  # failures in the window a later job carries on (counted in failed_recent too)
     for j in mine:
         if not j.state.is_terminal or recent(j):
             tally[j.state.group] += task_count(j) if j.state.group is StateGroup.QUEUED else 1
+            if j.state.group is StateGroup.FAILED and lineage.superseded(j.key):
+                resubmitted += 1
 
     def num(g: StateGroup) -> int | None:
         return tally[g] if known else None
@@ -1890,7 +1953,7 @@ def brief(fv: FleetView, *, hosts: Sequence[str] = ()) -> Document:
               "failed_recent": num(StateGroup.FAILED), "done_recent": num(StateGroup.DONE),
               "cancelled_recent": num(StateGroup.CANCELLED), "ended_recent": num(StateGroup.ENDED),
               "recent_window_s": int(fv.recent_window), "unknown_hosts": _list(unknown),
-              "lower_bound_hosts": _list(lower)}
+              "lower_bound_hosts": _list(lower), "resubmitted_recent": resubmitted if known else None}
     win = humanize.window(fv.recent_window)
     unknown_names = [_col(h.name, 24) for h in unknown]
     ge = "≥" if lower else ""
@@ -1902,13 +1965,14 @@ def brief(fv: FleetView, *, hosts: Sequence[str] = ()) -> Document:
                  f"≥: accounting failing on {_names([_col(h.name, 24) for h in lower], 3)}" if lower else ""]
         note = "; ".join(x for x in notes if x)
         mine_line = (f"mine: R {counts['running']} · PD {counts['queued']} · failed/{win} {ge}{counts['failed_recent']}"
-                     f" · done/{win} {ge}{counts['done_recent']}"
+                     + (f" ({resubmitted} resubmitted)" if resubmitted else "")
+                     + f" · done/{win} {ge}{counts['done_recent']}"
                      + (f" · cancelled/{win} {ge}{counts['cancelled_recent']}" if counts["cancelled_recent"] or lower
                         else "")
                      + (f" · ended/{win} {counts['ended_recent']}" if counts["ended_recent"] else "")
                      + (f" ({note})" if note else ""))
     host_att = _host_attention(hvs, fv)
-    job_att = sorted(_job_attention(fv, mine), key=lambda a: a.rank)
+    job_att = sorted(_job_attention(fv, mine, lineage), key=lambda a: a.rank)
     attention = [*host_att, *job_att]
     n_attention = len(attention)
     attention = attention[:ATTENTION_MAX]
@@ -2102,14 +2166,32 @@ def _pending_json(job: Job) -> dict[str, Any] | None:
             "est_start": iso(job.start_time) if job.est_start else None, "priority": prio}
 
 
-def _generic_cause(job: Job) -> bool:
+def _generic_cause(job: Job, caps: Capabilities | None = None) -> bool:
     """The scheduler says no more than "it failed": no cause, or only an exit code / signal without log evidence."""
-    c = cause_of(job)
+    c = cause_of(job, preempt_mode=preempt_mode_for(caps, job.partition))
     return c is None or (c.evidence is None and c.code.startswith(("EXIT", "SIGNAL")))
 
 
+def _lineage_line(job: Job, lineage: Lineage, now: datetime) -> str | None:
+    """The card's resubmission line (§5.2.12): ``resubmitted as lyra:31358335 (COMPLETED, submitted 14:05Z)``
+    (+ ``· latest …`` for a longer chain) on a superseded job, ``resumes lyra:31354789 (PREEMPTED)`` on the job
+    that carries one on; None when no link is seen (never "not resubmitted")."""
+    bits = []
+    nxt = lineage.next_of(job.key)
+    if nxt is not None:
+        bits.append(f"resubmitted as {_cl(_ref(nxt), NAME_CAP)} ({nxt.state.name}, submitted "
+                    f"{_hm(nxt.submit_time, now)})")
+        latest = lineage.latest_of(job.key)
+        if latest is not None and latest.key != nxt.key:
+            bits.append(f"latest {_link_text(latest)}")
+    prev = lineage.prev_of(job.key)
+    if prev is not None:
+        bits.append(f"resumes {_link_text(prev)}")
+    return f"{CARD_LINEAGE}{' · '.join(bits)}" if bits else None
+
+
 def _job_lines(job: Job, hv: HostView, now: datetime, recent_window: float, fv: FleetView,
-               note: str = "") -> list[str]:
+               note: str = "", lineage: Lineage = EMPTY) -> list[str]:
     ref = _ref(job)
     mine = job.is_mine
     name = _cl(job.name, NAME_CAP) if mine else OTHER_USER
@@ -2173,15 +2255,19 @@ def _job_lines(job: Job, hv: HostView, now: datetime, recent_window: float, fv: 
                 bits.append(f"fairshare {pr.fairshare[0].fairshare:.2f}")
             bits += [_cl(h, LINE_CAP) for h in pr.hints[:3]]             # RunFleet's explanation: never cut short
             lines.append("  priority " + " · ".join(bits) + " (no queue position is known)")
+    caps = hv.snapshot.caps if hv.snapshot is not None else None
     if job.state.is_terminal:
         res_bits = [job.state.name]
         if job.exit_code is not None:
             res_bits.append(f"exit {job.exit_code}" + (f":{job.exit_signal}" if job.exit_signal is not None else ""))
-        cause = _cause(job)
+        cause = _cause(job, caps, lineage)
         if cause:
             res_bits.append(f"cause: {_cl(cause, NAME_CAP)}")
         lines.append("  result   " + " · ".join(res_bits))
-    cost = cost_text(job, now, hv.snapshot.caps if hv.snapshot is not None else None, _mode(hv))
+    lin = _lineage_line(job, lineage, now)
+    if lin is not None:
+        lines.append(lin)
+    cost = cost_text(job, now, caps, _mode(hv))
     if cost is not None:
         lines.append(f"  cost     {cost}")
     if job.hints:
@@ -2206,9 +2292,12 @@ def _job_lines(job: Job, hv: HostView, now: datetime, recent_window: float, fv: 
     seen = f"  seen     {_hm(job.observed_at, now)} (job list {_dur(jobs_age_s(hv, now))} ago"
     lines.append(seen + (" — accounting final)" if job.source == "sacct" else ")"))
     lref = pick_log(job)
-    if lref is not None and lref.path:
+    latest = lineage.latest_of(job.key)
+    if latest is not None:           # resubmitted already: follow the newest job of the chain, never resubmit again
+        lines.append(f"{CARD_NEXT}    resubmitted → {_cmd('job', [_pos(str(latest.key))], fv)}")
+    elif lref is not None and lref.path:
         log_cmd = _cmd("log", [_pos(str(job.key)), "--lines", "80"], fv)       # the full key: never another task
-        if job.state.is_terminal and job.state.group is not StateGroup.DONE and _generic_cause(job):
+        if job.state.is_terminal and job.state.group is not StateGroup.DONE and _generic_cause(job, caps):
             lines.append(f"  next     cause unclear from scheduler → {log_cmd} (the log may name it)")
         else:
             lines.append(f"  next     {log_cmd}")
@@ -2219,6 +2308,7 @@ def _job_lines(job: Job, hv: HostView, now: datetime, recent_window: float, fv: 
 
 # the second `next` of a running job whose stdout says little (quiet_stdout): dropped first when a card is too big
 CARD_QUIET = "  next     stdout is quiet; other logs: "
+CARD_LINEAGE = "  lineage  "        # resubmitted as / resumes (§5.2.12): never dropped to fit
 _CARD_OPTIONAL = ("  cost", CARD_QUIET, "  hints", "  gpu", "  priority", "  logs", "  workdir", "  where")
 
 
@@ -2231,6 +2321,7 @@ def _bcap(text: str, nbytes: int) -> str:
 
 CARD_NEXT = "  next "
 CARD_NEXT_DROPPED = f"{CARD_NEXT}    (the log command does not fit the card: `agent log` with the job's key)"
+CARD_NEXT_LATEST = f"{CARD_NEXT}    (the command does not fit the card: `agent job` with the latest job's key)"
 
 
 def _fit_card(lines: list[str], budget: int, dropped: str = CARD_NEXT_DROPPED) -> str:
@@ -2326,6 +2417,7 @@ def job(fv: FleetView, refs: Sequence[tuple[str, str]]) -> Document:
     rest = refs[JOB_REFS_MAX:]
     refs = refs[:JOB_REFS_MAX]
     seen_hosts: dict[str, HostView] = {}
+    lineages: dict[str, Lineage] = {}            # per host, computed once per call (O(jobs) each)
     errors: list[dict[str, Any]] = []
     blocks: list[_Block] = []
     found_any = False
@@ -2340,17 +2432,26 @@ def job(fv: FleetView, refs: Sequence[tuple[str, str]]) -> Document:
             continue
         assert hv is not None
         found_any = True
+        if hv.name not in lineages:
+            lineages[hv.name] = link(_all_jobs(hv))
+        lineage = lineages[hv.name]
         if len(found) == 1:
             j = found[0]
             files_cmd = _cmd("log", [_pos(str(j.key)), "--files"], fv, as_json=True)
             caps = hv.snapshot.caps if hv.snapshot is not None else None
-            obj = {**job_json(j, now, gpus_unknown=task_gpus_unknown(j, hv, now), caps=caps),
+            obj = {**job_json(j, now, gpus_unknown=task_gpus_unknown(j, hv, now), caps=caps, lineage=lineage),
                    "pending": _pending_json(j),
                    "note": clean(note, NAME_CAP) or None,
                    "other_logs": _exact(files_cmd, None)[0] if quiet_stdout(j, now, fv.stall_after) else None}
-            short = _too_long(_cmd("log", [_pos(str(j.key)), "--lines", "80"], fv))
-            dropped = f"{CARD_NEXT}    {short}" if isinstance(short, _Unprintable) else CARD_NEXT_DROPPED
-            blocks.append(_Block(text=_fit_card(_job_lines(j, hv, now, fv.recent_window, fv, note), card_t, dropped),
+            latest = lineage.latest_of(j.key)
+            if latest is not None:
+                short = _too_long(_cmd("job", [_pos(str(latest.key))], fv))
+                dropped = f"{CARD_NEXT}    {short}" if isinstance(short, _Unprintable) else CARD_NEXT_LATEST
+            else:
+                short = _too_long(_cmd("log", [_pos(str(j.key)), "--lines", "80"], fv))
+                dropped = f"{CARD_NEXT}    {short}" if isinstance(short, _Unprintable) else CARD_NEXT_DROPPED
+            blocks.append(_Block(text=_fit_card(_job_lines(j, hv, now, fv.recent_window, fv, note, lineage), card_t,
+                                                dropped),
                                  objs=[_fit_job_json(obj, card_j - 600)]))
             continue
         counts: Counter[str] = Counter()
@@ -2364,11 +2465,12 @@ def job(fv: FleetView, refs: Sequence[tuple[str, str]]) -> Document:
         jargs = [*args, "--name", _name_glob(first.name), *lim] if first.is_mine else [*args, "--all-users", *lim]
         nxt, nxt_json = _cmd("jobs", jargs, fv), _cmd("jobs", jargs, fv, as_json=True)
         members = found[:ARRAY_ROWS]
-        blocks.append(_Block(rows=[_job_row(j, now, fv.recent_window, task_gpus_unknown(j, hv, now))
+        blocks.append(_Block(rows=[_job_row(j, now, fv.recent_window, task_gpus_unknown(j, hv, now), lineage)
                                    for j in members],
                              # members under an array parent: no cost (it would crowd the members out of the
                              # budget); `agent job HOST:ID_N` has it
-                             objs=[_fit_job_json({**job_json(j, now, gpus_unknown=task_gpus_unknown(j, hv, now)),
+                             objs=[_fit_job_json({**job_json(j, now, gpus_unknown=task_gpus_unknown(j, hv, now),
+                                                             lineage=lineage),
                                                   "cost": None, "pending": _pending_json(j), "note": None,
                                                   "other_logs": None},
                                                  card_j // 4) for j in members],
@@ -3393,8 +3495,8 @@ def _num_text(value: float | None) -> str:
 
 
 # ====================================================================================================== events
-_EVENT_PRIO = {"host": 0, "time_low": 1, "ended_bad": 1, "ended_other": 2, "ended_ok": 3, "started": 4,
-               "submitted": 5}
+_EVENT_PRIO = {"host": 0, "time_low": 1, "ended_bad": 1, "resubmitted": 2, "ended_other": 2, "ended_ok": 3,
+               "started": 4, "submitted": 5}
 
 
 def _event_json(e: agent_events.Event) -> dict[str, Any]:
@@ -3453,9 +3555,9 @@ def _coverage_text(covers: Sequence[agent_events.Coverage], hvs: Sequence[HostVi
 
 def events(fv: FleetView, since: datetime, hosts: Sequence[str] = (), /, *, limit: int = 100,
            since_text: str | None = None) -> Document:
-    """`agent events --since`: submitted / started / ended ok|bad|other with stable ids ("<job id or host>:<kind>"),
-    then the "now" items (host states, time low), and each host's coverage. No cursor (P1): re-query with
-    overlapping windows. ``hosts``: the HOST arguments as typed, repeated in the footer."""
+    """`agent events --since`: submitted / resubmitted / started / ended ok|bad|other with stable ids ("<job id or
+    host>:<kind>"), then the "now" items (host states, time low), and each host's coverage. No cursor (P1): re-query
+    with overlapping windows. ``hosts``: the HOST arguments as typed, repeated in the footer."""
     if fv.error is not None:
         return _error_doc(fv, "events")
     fv = with_history(fv)
@@ -3946,7 +4048,8 @@ def log(fv: FleetView, ref: tuple[str, str], read: LogRead | None, *, lines: int
     evidence: str | None = None
     cause_line: str | None = None
     if jb.state.is_terminal and jb.state.group is not StateGroup.DONE:
-        c = cause_of(jb, lines=text_lines)
+        caps = hv.snapshot.caps if hv.snapshot is not None else None
+        c = cause_of(jb, lines=text_lines, preempt_mode=preempt_mode_for(caps, jb.partition))
         if c is not None:
             cause = cap(_safe(c.code + ": " + c.text + (f" · log: {c.evidence}" if c.evidence else "")), LINE_CAP)
             # the evidence is a line of the remote log: in text it is quoted like every log line ("| ")
@@ -4042,7 +4145,8 @@ _HELP_VERBS: Mapping[str, tuple[str, str, tuple[str, ...], str]] = {
     "brief": ("brief [HOST…]", "hosts, my R/PD/failed counts (PD counts pending array tasks; a host without job "
               "data is named unknown), up to 8 attention items, free GPUs", (),
               "counts{running,queued,failed_recent,done_recent,cancelled_recent,ended_recent,recent_window_s,"
-              "unknown_hosts,lower_bound_hosts} attention[]{kind,host,hosts,job,state,name,at,code,text} free_gpus[]{host,kind,"
+              "unknown_hosts,lower_bound_hosts,resubmitted_recent (failed_recent a later job carries on)} "
+              "attention[]{kind,host,hosts,job,state,name,at,code,text} free_gpus[]{host,kind,"
               "partition,type,free,total,mig_free,mig_total,planned,nodes_at,nodes_age_s,stale} gpu_unknown_hosts[] "
               "(GPUs unknown, not zero)"),
     "jobs": ("jobs [HOST…] [--state S] [--name GLOB] [--workdir PREFIX] [--partition P] [--since DUR|ISO]\n"
@@ -4084,8 +4188,8 @@ _HELP_VERBS: Mapping[str, tuple[str, str, tuple[str, ...], str]] = {
                  "health,sections[],sacct_window_s,problems[],partitions[]{name,nodes,free,total,mig_free,"
                  "mig_total,planned,node_states},metrics,gpus[],my_jobs (null: unknown),my_jobs_lower_bound[] (groups "
                  "whose counts are at least: accounting failing),account{window,mode,read_at,accounts[],errors[]}}"),
-    "events": ("events [HOST…] --since DUR|ISO [--limit N]", "submitted/started/ended_ok|bad|other, then now-items "
-               "(host, time_low); dedupe by id\n"
+    "events": ("events [HOST…] --since DUR|ISO [--limit N]", "submitted/resubmitted/started/ended_ok|bad|other, "
+               "then now-items (host, time_low); dedupe by id\n"
                "     id = \"<job key or host>:<kind>\"; no cursor: re-query an overlapping window and dedupe by id",
                ("--since", "--limit"),
                "since until events[]{id,at,kind,host,job,name,state,since,text} coverage[]{host,jobs_at,"
@@ -4116,7 +4220,9 @@ job: id (HOST:LABEL) key (full id) host kind name user mine state group state_te
   hints submitted_at started_at start_is_estimate ended_at elapsed_s limit_s left_s partition qos account gpus
   gpu_type cpus mem_bytes nodes gpu_use{source,mean_pct,peak_pct,mem_used_mib,sampled_at} exit{code,signal,
   cause} workdir logs{stdout,stderr,merged,stdout_size,stderr_size} array{parent,task} restarts observed_at
-  cost (help job) (elapsed_s / left_s / cost of a job seen >5 min ago: as of observed_at)"""
+  cost (help job) (elapsed_s / left_s / cost of a job seen >5 min ago: as of observed_at) resubmitted_as{key,id,
+  state,group,latest} (a later job carries this bad ending on: follow latest, never resubmit again) resumes{key,id,
+  state,group} (null: none seen)"""
 _HELP_EXIT = """\
 exit: 0 every selected host fine, job data <10 min · 4 partial: a host stale/failing/needs a login, node data
   old, accounting failing (finished counts a lower bound), or some of several job ids not found — the document

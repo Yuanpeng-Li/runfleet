@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -118,3 +118,24 @@ def test_summary_counts_my_jobs_and_my_gpus() -> None:
     rows = {r[0]: r for r in export.summary_rows(SimpleStore({"k2": k2, "lbs": ws}))}   # type: ignore[arg-type]
     assert rows["k2"][2:4] == ("2 active · 1 queued", "14")
     assert rows["lbs"][2:4] == ("1 active", "2/4")
+
+
+def test_jobs_carry_the_resubmission_links() -> None:
+    """§5.2.12: each job gains `resubmitted_as` / `resumes` (job ids or null) after its `to_json` fields, computed
+    from the host's jobs (schema still runfleet.snapshot/1)."""
+    t0 = datetime(2026, 9, 7, 1, 0, tzinfo=UTC)
+    hour = timedelta(hours=1)
+    name = "orb-swp--train--places-cosinewarm--s44--a01"
+    old = dataclasses.replace(job("k2", "31354789", JobState.PREEMPTED), name=name, submit_time=t0, start_time=t0,
+                              end_time=t0 + 3 * hour)
+    new = dataclasses.replace(job("k2", "31358335", JobState.COMPLETED), name=name,
+                              submit_time=t0 + 3 * hour + 13 * timedelta(minutes=1))
+    solo = job("k2", "2332861")
+    doc = export.build_snapshot(SimpleStore({"k2": host_state("k2", jobs=[old, new, solo])}),   # type: ignore[arg-type]
+                                generated_at=NOW)
+    jobs = {j["key"]["id"]: j for j in doc["hosts"][0]["jobs"]}
+    assert jobs["31354789"]["resubmitted_as"] == "31358335" and jobs["31354789"]["resumes"] is None
+    assert jobs["31358335"]["resumes"] == "31354789" and jobs["31358335"]["resubmitted_as"] is None
+    assert jobs["2332861"]["resubmitted_as"] is None and jobs["2332861"]["resumes"] is None
+    assert list(jobs["2332861"])[-2:] == ["resubmitted_as", "resumes"]
+    json.loads(export.dumps(doc))

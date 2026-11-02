@@ -760,3 +760,98 @@ def test_gpu_tres_is_never_downgraded_after_a_positive_sample() -> None:
     for jid in ("2332861", "2333760"):
         assert tick(c, cx, result("slurm.sstat", no_gpu.replace("2332861", jid))).caps_patch is None
     assert c._gpu_tres is True
+
+
+# ------------------------------------------------------------------ same-id requeue (PreemptMode REQUEUE)
+S0 = 1788723457                                       # the first attempt's start (the `_row` default)
+
+
+def _sacct_row(jid: str, state: str, end: int, *, start: int = S0, name: str = "slurm.sacct") -> SectionResult:
+    vals = {"JobID": jid, "JobIDRaw": jid, "JobName": "j", "User": "alice0001", "Account": "a", "QOS": "normal",
+            "Partition": "normal", "State": state, "ExitCode": "0:0", "DerivedExitCode": "0:0", "Reason": "None",
+            "Submit": str(S0 - 100), "Start": str(start), "End": str(end), "Elapsed": "00:01:40",
+            "Timelimit": "01:00:00", "AllocCPUS": "1", "ReqMem": "1G", "ReqTRES": "cpu=1,gres/gpu=1",
+            "AllocTRES": "cpu=1,gres/gpu=1", "NNodes": "1", "NodeList": "n1", "WorkDir": "/x"}
+    return result(name, SEP.join(vals.get(f, "") for f in cmds_sacct_fields()))
+
+
+def _requeued_then_ended() -> tuple[SlurmCollector, HostContext]:
+    """1000 runs, is preempted and requeued (sacct already says PREEMPTED, squeue PENDING with RestartCnt 1), runs
+    again on another node, and leaves squeue before any newer accounting row is read."""
+    cx = ctx("k2")
+    c = SlurmCollector(cx.host)
+    tick(c, cx, _squeue_rows(_row("1000")))
+    out = tick(c, at(cx, 15), _squeue_rows(_row("1000", state="PENDING", restarts="1")),
+               _sacct_row("1000", "PREEMPTED", S0 + 100))
+    assert out.jobs is not None and out.jobs["1000"].source == "squeue"           # live wins
+    tick(c, at(cx, 30), _squeue_rows(_row("1000", nodes="n2", restarts="1", start=str(S0 + 200))))
+    return c, cx
+
+
+def test_requeued_job_never_shows_the_previous_attempts_ending() -> None:
+    """The PREEMPTED row read before the requeue ran the job again is no answer once the id leaves squeue: the job
+    waits for accounting (sacct -j) instead of showing the old ending and end time."""
+    c, cx = _requeued_then_ended()
+    out = tick(c, at(cx, 45), _squeue_rows())
+    assert out.jobs is not None
+    v = out.jobs["1000"]
+    assert v.source == "vanished" and v.state is JobState.RUNNING and v.restarts == 1
+    assert v.hints == ("ended; waiting for accounting",) and "slurm.vanished" in out.followups
+    sec = c.sections(frozenset({"slurm.vanished"}), at(cx, 45))[0]
+    assert sec.name == "slurm.sacct_ids" and sec.meta["ids_raw"] == ["1000"]
+    # a lagging answer still describing the first attempt changes nothing
+    out = tick(c, at(cx, 50), _squeue_rows(), _sacct_row("1000", "PREEMPTED", S0 + 100, name="slurm.sacct_ids"))
+    assert out.jobs is not None and out.jobs["1000"].source == "vanished"
+    # the last attempt's row: the ended job, with the restart count squeue showed (sacct has none)
+    out = tick(c, at(cx, 90), _squeue_rows(),
+               _sacct_row("1000", "COMPLETED", S0 + 400, start=S0 + 200, name="slurm.sacct_ids"))
+    assert out.jobs is not None
+    j = out.jobs["1000"]
+    assert j.source == "sacct" and j.state is JobState.COMPLETED and j.restarts == 1
+    assert j.end_time is not None and int(j.end_time.timestamp()) == S0 + 400
+    assert c.sections(frozenset({"slurm.vanished"}), at(cx, 120)) == []
+
+
+def test_requeued_job_waits_while_sacct_fails() -> None:
+    """slurmdbd down after the second attempt ended: the old PREEMPTED row never stands in; UNKNOWN after the grace."""
+    c, cx = _requeued_then_ended()
+    down = result("slurm.sacct", "", 1, "sacct: error: Problem talking to the database: Connection refused")
+    out = tick(c, at(cx, 45), _squeue_rows(), down)
+    assert out.jobs is not None and out.jobs["1000"].source == "vanished"
+    out = tick(c, at(cx, 45 + 11 * 60), _squeue_rows(), down)
+    assert out.jobs is not None and out.jobs["1000"].state is JobState.UNKNOWN
+
+
+def test_requeued_job_cancelled_while_pending_again() -> None:
+    """Requeued, then cancelled while pending: the PREEMPTED row was read before that pending sighting (stale); the
+    CANCELLED row read after it is the answer."""
+    cx = ctx("k2")
+    c = SlurmCollector(cx.host)
+    tick(c, cx, _squeue_rows(_row("1001")), _sacct_row("1001", "PREEMPTED", S0 + 100))
+    tick(c, at(cx, 15), _squeue_rows(_row("1001", state="PENDING", restarts="1")))
+    out = tick(c, at(cx, 30), _squeue_rows())
+    assert out.jobs is not None and out.jobs["1001"].source == "vanished"
+    out = tick(c, at(cx, 60), _squeue_rows(), _sacct_row("1001", "CANCELLED by 1", S0 + 300, name="slurm.sacct_ids"))
+    assert out.jobs is not None and out.jobs["1001"].state is JobState.CANCELLED and out.jobs["1001"].restarts == 1
+
+
+def test_ending_read_with_the_last_sighting_is_trusted() -> None:
+    """No requeue: a job that ended between squeue and sacct of one tick shows its row at once when it leaves squeue
+    (it ended after its only attempt started)."""
+    cx = ctx("k2")
+    c = SlurmCollector(cx.host)
+    tick(c, cx, _squeue_rows(_row("1002")), _sacct_row("1002", "FAILED", S0 + 100))
+    out = tick(c, at(cx, 15), _squeue_rows())
+    assert out.jobs is not None and out.jobs["1002"].source == "sacct" and out.jobs["1002"].state is JobState.FAILED
+    assert out.jobs["1002"].restarts == 0 and c.sections(frozenset({"slurm.vanished"}), at(cx, 15)) == []
+
+
+def test_job_that_dies_in_its_first_second_settles() -> None:
+    """End = Start (a crash within the first second, caught running by squeue): its own final row is no earlier
+    attempt, so it ends FAILED at once instead of waiting for accounting until it turns UNKNOWN."""
+    cx = ctx("k2")
+    c = SlurmCollector(cx.host)
+    tick(c, cx, _squeue_rows(_row("1003")))
+    out = tick(c, at(cx, 15), _squeue_rows(), _sacct_row("1003", "FAILED", S0))
+    assert out.jobs is not None and out.jobs["1003"].source == "sacct" and out.jobs["1003"].state is JobState.FAILED
+    assert c.sections(frozenset({"slurm.vanished"}), at(cx, 15)) == []

@@ -156,7 +156,8 @@ ended at 11:59 only at 12:05). So:
 1. Keep `last_check` (the `generated_at` of your previous `events` call) and the ids you already reported.
 2. Query `runfleet agent events --since <last_check minus 30m>` (ISO time or a duration such as `2h`).
 3. Drop events whose `id` you already reported; report the rest; remember the new ids. An id is
-   `<job key or host>:<kind as printed>`: `k2:2331977:ended_bad`, `vega:881203:submitted`, a requeued run
+   `<job key or host>:<kind as printed>`: `k2:2331977:ended_bad`, `vega:881203:submitted`, a resubmission
+   `k2:2331980:resubmitted` (text `resumes k2:2331977 (PREEMPTED)`), a requeued run
    `k2:4:started:1`, a host state `lynx:host:needs_auth:1792310470` (`:<epoch>` = when the state began; left out
    when unknown). The job part is the full `key`: for Slurm the id itself, for a workstation task pid plus start
    time (`labstation:p642229-1788696459:started`), so a reused pid never collides; the event's `job` field is the
@@ -185,6 +186,21 @@ host, or the advice asks for a shorter `--since`.
   submits. `notes` list every assumption; `alternatives` are free partitions with the requested GPU type — evidence
   for the user, not a choice made for them. `job.cost.billing_basis`: `tres` is Slurm's own, `weights` / `cpus` an
   estimate; `usage_factor: null` = unknown QOS, counted ×1 (`×1?`).
+
+## Resubmissions (`resubmitted_as`, `resumes`)
+Slurm keeps no link between a job that ended badly and the new job that carries it on (a resubmit after a crash, a
+node failure, a timeout, or a preemption on a PreemptMode CANCEL partition: new id, same name or the next hpc-run
+attempt `…--a02`). RunFleet draws it from the jobs it holds, on the same host: the old job says `resubmitted as
+lyra:31358335 (COMPLETED, submitted 08:15Z)` (+ `latest lyra:… (…)` for a longer chain; JSON `resubmitted_as
+{key,id,state,group,latest}`), the new one `resumes lyra:31354789 (PREEMPTED)` (JSON `resumes{key,id,state,group}`).
+- The run was already resumed: don't propose another resubmit; follow `latest` (the card's `next` is `runfleet agent
+  job <latest>`). `null` means no link was seen, never "not resubmitted".
+- History is kept: counts stay (`brief`'s `failed_recent` still counts it; `counts.resubmitted_recent` says how many
+  of those were resubmitted, text `failed/24h 3 (2 resubmitted)`). Attention moves: a resubmitted failure is no
+  longer an attention item (`brief`, `jobs --attention`); the newest job of the chain is, if it failed too.
+- `agent events`: kind `resubmitted` dated when the link became true (the later of the new job's submit time and the bad ending), id `<new job key>:resubmitted`, text `resumes
+  HOST:ID (STATE)`. A same-id requeue (PreemptMode REQUEUE: the job keeps its id) is no resubmission: it shows as
+  `restarts` / `started:<n>`.
 
 ## Pending, GPUs, other users
 - Pending reasons come with RunFleet's plain-language advice; quote it. There is no queue position.

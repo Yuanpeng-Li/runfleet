@@ -2,8 +2,10 @@
 
 The entries are the cards' own rankings (:func:`runfleet.ui.fleet_layout.attention`): failures of the last 4 h, running
 jobs with a warning or low on time, pending jobs that will never start or are held, older failures in the recent
-window. Each row says host, job id, full name and why; ``enter`` closes the dialog and opens the job, ``esc`` closes.
-It reads the store only (nothing is polled to fill it) and works whatever the Fleet layout (roomy, compact, table).
+window. A failure that was resubmitted (:mod:`runfleet.util.lineage`) is not listed: the newest job of its chain is,
+when that one needs the user, and says what it resumes. Each row says host, job id, full name and why; ``enter``
+closes the dialog and opens the job, ``esc`` closes. It reads the store only (nothing is polled to fill it) and works
+whatever the Fleet layout (roomy, compact, table).
 """
 
 from __future__ import annotations

@@ -68,8 +68,9 @@ class SectionStatus:
     last_ok: datetime | None
     error: HostError | None = None
 
-DETECT_REV = 3      # bump when detection learns something new: cached capabilities of an older revision are re-detected
-                    # (2: priority settings, §5.2.10; 3: Account — QOS UsageFactor and partition charges, §5.2.11)
+DETECT_REV = 4      # bump when detection learns something new: cached capabilities of an older revision are re-detected
+                    # (2: priority settings, §5.2.10; 3: Account — QOS UsageFactor and partition charges, §5.2.11;
+                    # 4: each partition's PreemptMode, §5.2.12)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +82,8 @@ class PartitionCharge:                       # Account (§5.2.11): how one parti
     allow_qos: tuple[str, ...] | None = None # AllowQos; None = ALL
     def_cpu_per_gpu: int | None = None       # DefCpuPerGPU (None: not set; lyra prints none)
     def_mem_per_cpu_mb: int | None = None    # DefMemPerCPU (None: not set or DefMemPerNode)
+    preempt_mode: str | None = None          # the partition's PreemptMode, upper case ("CANCEL", "REQUEUE", "OFF");
+                                             # None: not printed (the cluster-wide `slurm_config` value applies)
 
 
 @dataclass(frozen=True, slots=True)

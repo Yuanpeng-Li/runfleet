@@ -5,7 +5,7 @@ compatibility: Requires the runfleet CLI on PATH (RunFleet 0.8.0 or newer); read
 license: MIT
 allowed-tools: [Bash(runfleet agent *), Bash(runfleet wait *), Bash(runfleet status *), Read]
 metadata:
-  runfleet-skill: "3"
+  runfleet-skill: "4"
 ---
 
 # RunFleet — read-only status of every job and GPU across all of the user's hosts
@@ -26,7 +26,7 @@ runfleet agent log k2:2332861 --lines 80           # bounded scrubbed tail (1 ss
 runfleet agent log k2:2332861 --files              # a launcher's real output elsewhere: --file PATH reads one listed
 runfleet agent gpus --type h100 --min 4            # where N free GPUs of a type are (free ≠ schedulable for you)
 runfleet agent host k2                             # health: login, failing probes, data ages, partitions, load
-runfleet agent events --since 2h                   # submitted / started / ended ok|bad / time low / host problems
+runfleet agent events --since 2h                   # (re)submitted / started / ended ok|bad / time low / host problems
 runfleet agent usage [HOST…] [--window 90d]        # SU used/limit/left per account, my GPU-h, top experiments
 runfleet agent cost lyra --partition gpu --gpus 1 --time 24h   # pre-submit SU estimate, free alternatives
 runfleet agent help [VERB]                         # every flag, JSON field, exit and problem code of this version
@@ -64,6 +64,7 @@ repeated while it exits 2, or poll `runfleet agent events --since 15m`. `--all-u
 - Before launching: `agent gpus` / `brief` to choose a target (the launch still checks GPUs live); before a large
   one also `agent cost` and `agent usage`: SU low → offer a free partition from `alternatives`, but hpc-run picks the
   account / partition and submits. After: `runfleet wait HOST:JOBID --json`; on failure `agent job` + `agent log`.
+  `resubmitted as` (JSON `resubmitted_as`): already resumed by hpc-run or the user — never resubmit; follow `latest`.
 - Project ↔ filters (`.hpc.conf`/`.ws.conf` → `--workdir`/`--name`), log paths, pids: `references/with-run-skills.md`.
 
 ## Safety rails (always)

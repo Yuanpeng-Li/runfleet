@@ -13,6 +13,10 @@ of it reads the store; nothing here asks a host for anything.
 
 Every list row and activity row keeps the :class:`JobKey` it shows (:func:`list_region`, :func:`activity_region`), so a
 click opens that job; :func:`attention` merges the cards' rankings into the fleet-wide "needs you" list (``a``).
+
+A failure that was resubmitted (:mod:`runfleet.util.lineage`, links among a host's own jobs) stays in the lists and the
+activity rows, marked with what carries it on, but no longer needs the user: it ranks last and is never an attention
+entry; the newest job of its chain ranks by its own state.
 """
 
 from __future__ import annotations
@@ -27,13 +31,15 @@ from typing import TYPE_CHECKING, Literal, TypeVar
 from rich.cells import cell_len
 from rich.text import Text
 
-from runfleet.core.events import BAD_END, JobEvent, count_line, end_summary, end_word, ended_since, time_low
+from runfleet.core.events import (BAD_END, JobEvent, count_line, end_summary, end_word, ended_since, resumes_note,
+                                  time_low)
 from runfleet.models import GPU, ConnState, HostSnapshot, Job, JobKey, JobKind, JobState, StateGroup
 from runfleet.ui import render, theme
 from runfleet.ui.query import _id_key, elapsed_s, ended_at, left_s
 from runfleet.ui.widgets.job_table import exit_summary, gpus_text, name_badges, runway_level
 from runfleet.util import humanize
 from runfleet.util.humanize import gpu_type_from_name, task_label
+from runfleet.util.lineage import EMPTY, Lineage, link
 from runfleet.util.slurmfmt import node_free
 
 if TYPE_CHECKING:
@@ -51,6 +57,7 @@ PANEL_MIN = 6                    # orphan cell
 PANEL_ROW_MIN = 8                # full-width row below the grid
 HOST2_MIN_LIST = 8               # list rows needed before the workstation "host2" line appears
 FRESH_FAIL_S = 4 * 3600          # a failure this recent ranks first
+SUPERSEDED = 6                   # rank of a failure that was resubmitted (after everything else)
 LABEL_W = 10                     # = host_card.LABEL_W (the label gutter)
 MAX_GPU_LINES = 8                # = host_card.MAX_GPU_LINES
 OWNER_WIDE = 22                  # owner column of a workstation GPU line (wide cards)
@@ -229,6 +236,8 @@ class Ranked:
     job: Job
     group: Group
     members: tuple[Job, ...] = ()            # array siblings folded into this row (job first); () = just the job
+    after: tuple[Job, ...] = ()              # a resubmitted failure: the jobs that carry it on, oldest first
+    resumes: Job | None = None               # the bad ending this job carries on
 
     @property
     def count(self) -> int:
@@ -275,33 +284,47 @@ def _est_key(job: Job, now: datetime) -> tuple[int, float]:
     return (1, 0.0)
 
 
-def rank_slurm(jobs: Iterable[Job], now: datetime, window: float) -> RankedList:
+def lineage_of(host: str, snap: HostSnapshot, memo: Memo | None = None) -> Lineage:
+    """The resubmission links among a host's jobs (:func:`runfleet.util.lineage.link`), kept in ``memo`` while
+    ``snap.jobs`` is the same object: once per poll that changes the jobs, never per row."""
+    if memo is None:
+        return link(snap.jobs.values())
+    return memo.get(host, "lineage", (snap.jobs,), (), lambda: link(snap.jobs.values()))
+
+
+def rank_slurm(jobs: Iterable[Job], now: datetime, window: float, lineage: Lineage | None = None) -> RankedList:
     """Own Slurm jobs by how much they need the user: 0 fresh failures (newest first), 1 running with a warn/red hint
     or low on time, 2 pending that will never run or held, 3 older failures within ``window``, 4 other running
-    (soonest end first, no limit last), 5 other pending (soonest estimate first). Ties by job id. CD/CA never."""
+    (soonest end first, no limit last), 5 other pending (soonest estimate first), 6 failures within ``window`` that
+    were resubmitted (:data:`SUPERSEDED`, newest first; they carry the chain after them). Ties by job id. CD/CA
+    never. ``lineage``: the host's links (:func:`lineage_of`; linked here from ``jobs`` when None)."""
+    jobs = list(jobs)
+    lin = link(jobs) if lineage is None else lineage
     out: list[tuple[tuple[object, ...], Ranked]] = []
     for j in jobs:
         if not j.is_mine:
             continue
         group = j.state.group
+        resumes = lin.prev_of(j.key)
         if group is StateGroup.FAILED:
             age = _age_s(j, now)
             if age is None or age > window:
                 continue
-            rank = 0 if age <= FRESH_FAIL_S else 3
-            out.append(((rank, _newest(j), _id_key(j)), Ranked(rank, j, "failed")))
+            after = lin.chain_after(j.key)
+            rank = SUPERSEDED if after else 0 if age <= FRESH_FAIL_S else 3
+            out.append(((rank, _newest(j), _id_key(j)), Ranked(rank, j, "failed", after=after, resumes=resumes)))
         elif group is StateGroup.ACTIVE:
             if _warn_hint(j) or time_low(j, now) or _runway(j, now) in ("red", "amber"):
-                out.append(((1, 0.0, _id_key(j)), Ranked(1, j, "running")))
+                out.append(((1, 0.0, _id_key(j)), Ranked(1, j, "running", resumes=resumes)))
             else:
                 left = left_s(j, now)
-                out.append(((4, (left is None, left or 0.0), _id_key(j)), Ranked(4, j, "running")))
+                out.append(((4, (left is None, left or 0.0), _id_key(j)), Ranked(4, j, "running", resumes=resumes)))
         elif group is StateGroup.QUEUED:
             red = _red_hint(j) or render.reason_red(j.reason)
             if red or j.held:
-                out.append(((2, 0.0, _id_key(j)), Ranked(2, j, "pending")))
+                out.append(((2, 0.0, _id_key(j)), Ranked(2, j, "pending", resumes=resumes)))
             else:
-                out.append(((5, _est_key(j, now), _id_key(j)), Ranked(5, j, "pending")))
+                out.append(((5, _est_key(j, now), _id_key(j)), Ranked(5, j, "pending", resumes=resumes)))
     out.sort(key=lambda p: p[0])
     return RankedList(r for _k, r in out)
 
@@ -480,13 +503,26 @@ class Cells:
     gpus: Text | None = None     # narrow running rows: f"{gpus:<10}{util:>6}" as the detail
 
 
+def carried_on(after: Sequence[Job]) -> str:
+    """A resubmitted failure's short mark: ``→ 58721477 CD``, the newest of a longer chain after it
+    (``→ 31327620 F → 31327999 CD``); "" for none."""
+    if not after:
+        return ""
+    out = f"→ {after[0].key.label} {after[0].state.value}"
+    if len(after) > 1:
+        out += f" → {after[-1].key.label} {after[-1].state.value}"
+    return out
+
+
 def row_cells(item: Ranked, now: datetime, util_t: tuple[float, float] = theme.DEFAULT_UTIL_THRESHOLDS) -> Cells:
-    """Detail / util / time of one list row (§7.4 cell contents)."""
+    """Detail / util / time of one list row (§7.4 cell contents); a resubmitted failure shows what carries it on."""
     j = item.job
     if item.group == "failed":
         summary = end_summary(j) or exit_summary(j)
         age = _age_s(j, now)
         when = "<1m ago" if age is not None and age < 60 else f"{humanize.age(age)} ago"
+        if item.after:
+            return Cells(Text(carried_on(item.after), style=theme.muted()), None, Text(when, style=theme.muted()))
         return Cells(Text(summary, style=theme.state_style(j.state) if j.state.group is StateGroup.FAILED
                           else theme.error()), None, Text(when, style=theme.muted()))
     if j.state.group is StateGroup.ACTIVE:
@@ -632,8 +668,11 @@ class Attention:
 
 
 def attention_tier(item: Ranked, cluster: bool) -> int | None:
-    """The tier of a ranked row that needs the user, None for the rest (normal running / pending, others' tasks):
-    Slurm ranks 0-3 as they are; a workstation's fresh failure 0, task with a hint 1, older failure (rank 4) 3."""
+    """The tier of a ranked row that needs the user, None for the rest (normal running / pending, others' tasks, a
+    failure that was resubmitted): Slurm ranks 0-3 as they are; a workstation's fresh failure 0, task with a hint 1,
+    older failure (rank 4) 3."""
+    if item.after:
+        return None
     if item.group == "failed":
         return 0 if item.rank == 0 else 3
     if cluster:
@@ -660,7 +699,8 @@ def attention(ranked: Iterable[tuple[str, bool, Sequence[Ranked]]]) -> list[Atte
 def attention_why(entry: Attention, now: datetime,
                   util_t: tuple[float, float] = theme.DEFAULT_UTIL_THRESHOLDS) -> Text:
     """Why an entry needs the user, from the card row's cells: ``exit 1 · 3h ago``, ``log idle 49m · 20m left``,
-    ``low on time · 12m left``, ``never: dependency failed · no est.``, ``held · no est.``."""
+    ``low on time · 12m left``, ``never: dependency failed · no est.``, ``held · no est.``; a job that carries on a bad
+    ending adds ``· resumes 58717472 (PREEMPTED)``."""
     item = entry.item
     cells = row_cells(item, now, util_t)
     detail = cells.detail
@@ -670,6 +710,9 @@ def attention_why(entry: Attention, now: datetime,
     if cells.time is not None:
         out.append(" · ", style=theme.dim())
         out.append_text(cells.time)
+    if item.resumes is not None:
+        out.append(" · ", style=theme.dim())
+        out.append(resumes_note(item.resumes), style=theme.muted())
     return out
 
 
@@ -1003,7 +1046,9 @@ def _where(t: TypeFree, wide: bool, order: Mapping[str, int]) -> Text:
 
 
 # ---------------------------------------------------------------- fleet panel: what changed
-GLYPHS = {"bad": "✖", "ok": "✓", "end": "■", "time_low": "◷", "restarted": "↻", "gpu_idle": "◌", "gpu_free": "◎"}
+GLYPHS = {"bad": "✖", "ok": "✓", "end": "■", "time_low": "◷", "restarted": "↻", "gpu_idle": "◌", "gpu_free": "◎",
+          "resubmitted": "↪"}
+_HISTORY_KINDS = ("time_low", "restarted", "gpu_idle", "resubmitted")    # the session events with an activity row
 
 
 @dataclass(frozen=True, slots=True)
@@ -1019,10 +1064,11 @@ class Activity:
 
 
 def activity_rows(jobs: Iterable[Job], history: Iterable[JobEvent], now: datetime, window: float,
-                  since: datetime, extra: Iterable[Activity] = ()) -> list[Activity]:
+                  since: datetime, extra: Iterable[Activity] = (), *, lineage: Lineage = EMPTY) -> list[Activity]:
     """What changed within ``window``, newest first: own job ends from the store (complete, survive a restart),
-    this session's ``time_low`` / ``restarted`` / ``gpu_idle`` events (one row per job and kind) and ``extra`` rows
-    (GPU watches that fired, :mod:`runfleet.ui.gpu_watch`) inside the window."""
+    this session's ``time_low`` / ``restarted`` / ``gpu_idle`` / ``resubmitted`` events (one row per job and kind) and
+    ``extra`` rows (GPU watches that fired, :mod:`runfleet.ui.gpu_watch`) inside the window. An end that ``lineage``
+    links to a resubmission keeps its glyph, says ``→ resubmitted as 58721477`` and is no longer bad news."""
     start = now - timedelta(seconds=window)
     out: list[Activity] = [a for a in extra if a.at >= start]
     for j in ended_since(jobs, start):
@@ -1034,16 +1080,19 @@ def activity_rows(jobs: Iterable[Job], history: Iterable[JobEvent], now: datetim
             glyph, summary, bad = GLYPHS["bad"], end_summary(j) or j.state.name.lower(), True
         else:
             glyph, summary, bad = GLYPHS["end"], end_summary(j) or exit_summary(j), False
+        nxt = lineage.next_of(j.key)
+        if nxt is not None:
+            summary, bad = f"{summary} → resubmitted as {nxt.key.label}", False
         out.append(Activity(end, j.key.host, glyph, j.name + array_suffix(j), summary, bad, end <= since, j.key))
     seen: set[tuple[str, str, str]] = set()
     for e in sorted(history, key=lambda e: e.at, reverse=True):
-        if e.kind not in ("time_low", "restarted", "gpu_idle") or e.at < start:
+        if e.kind not in _HISTORY_KINDS or e.at < start:
             continue
         key = (e.key.host, e.key.id, e.kind)
         if key in seen:
             continue
         seen.add(key)
-        out.append(Activity(e.at, e.key.host, GLYPHS[e.kind], e.name, e.summary, True, e.at <= since, e.key))
+        out.append(Activity(e.at, e.key.host, GLYPHS[e.kind], e.name, e.summary, e.bad, e.at <= since, e.key))
     out.sort(key=lambda a: a.at, reverse=True)
     return out
 
@@ -1112,7 +1161,7 @@ def activity_region(rows: Sequence[Activity], counts: str, head: str, n: int, wi
     host_w = min(10, max((cell_len(r.host) for r in rows), default=4))
     name_w = 28 if wide else max(10, width - 16 - host_w - 12 - (when_w - 5))
     glyph_style = {GLYPHS["bad"]: theme.error(), GLYPHS["ok"]: theme.ok(), GLYPHS["end"]: theme.muted(),
-                   GLYPHS["gpu_free"]: theme.ok()}
+                   GLYPHS["gpu_free"]: theme.ok(), GLYPHS["resubmitted"]: theme.ok()}
     for r, when in zip(shown, whens, strict=True):
         line = Text("  " if wide else " ")
         line.append_text(_cell(Text(when, style=theme.muted()), when_w))

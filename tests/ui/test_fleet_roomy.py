@@ -319,3 +319,32 @@ async def test_needs_you_list_fits_a_short_terminal() -> None:
         await pilot.resize_terminal(80, 40)
         await pilot.pause(0.3)
         assert menu.region.height == 24                                  # a tall terminal: the usual 24 rows
+
+
+async def test_a_resubmitted_failure_leaves_the_needs_you_picker_but_stays_on_its_card() -> None:
+    """lyra's PREEMPTED 31354789 resubmitted as 31358335 (completed): `a` no longer lists it, its card row says what
+    carries it on, and the counts (history) do not change."""
+    import dataclasses
+    from datetime import timedelta
+
+    from runfleet.models import JobState
+    from runfleet.ui.screens.attention import AttentionScreen
+    from tests.ui.fakes import slurm_job
+
+    app = _app(persist_state=False)
+    async with app.run_test(size=(172, 62)) as pilot:
+        await pilot.pause(0.3)
+        _with_needs(app)
+        svc: Any = app.service
+        new = slurm_job("lyra", "31358335", "orb-swp--train--places-cosinewarm--s47--a01", JobState.COMPLETED,
+                        elapsed=timedelta(hours=2), ended_ago=15 * 3600, submit_ago=17.5 * 3600, exit_code=0,
+                        gpu_type="rtx6000", node="r71-00", partition="free-gpu", user="alice07")
+        svc.put_job(dataclasses.replace(new, is_mine=True))
+        await pilot.pause(0.3)
+        lyra = next(c for c in app.screen.query(HostCard) if c.host == "lyra")
+        text = "\n".join(x.plain for x in lyra.lines)
+        assert "→ 31358335 CD" in text and "F 2" in text
+        await pilot.press("a")
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, AttentionScreen)
+        assert [str(e.key) for e in app.screen.entries] == ["vega:724999", "k2:2334999", "lyra:31327454"]

@@ -237,7 +237,8 @@ PROBLEM = ["action", "code", "hint", "message", "since"]
 ERROR = ["action", "code", "hint", "host", "job", "message", "since"]
 JOB = sorted("""id key host kind name user mine state group state_text reason reason_text held hints submitted_at started_at
 start_is_estimate ended_at elapsed_s limit_s left_s partition qos account gpus gpu_type cpus mem_bytes nodes gpu_use exit
-workdir logs array restarts observed_at cost""".split())
+workdir logs array restarts observed_at cost resubmitted_as resumes""".split())
+LINK = ["group", "id", "key", "state"]
 COST = sorted("""cpu_h gpu_h gpu_h_by_model billing billing_basis qos usage_factor billing_h charged_su projected_su free live
 as_of""".split())
 GPU_USE = ["mean_pct", "mem_used_mib", "peak_pct", "sampled_at", "source"]
@@ -264,7 +265,8 @@ def test_envelope_and_host_keys_are_pinned(demo: FleetView) -> None:
 def test_brief_keys(demo: FleetView) -> None:
     d = view.brief(demo).data
     assert keys(d["counts"]) == ["cancelled_recent", "done_recent", "ended_recent", "failed_recent",
-                                 "lower_bound_hosts", "queued", "recent_window_s", "running", "unknown_hosts"]
+                                 "lower_bound_hosts", "queued", "recent_window_s", "resubmitted_recent", "running",
+                                 "unknown_hosts"]
     for a in d["attention"]:
         assert keys(a) == ["at", "code", "host", "hosts", "job", "kind", "name", "state", "text"]
     for f in d["free_gpus"]:
@@ -285,6 +287,8 @@ def test_job_projection_keys(demo: FleetView) -> None:
         assert j["logs"] is None or keys(j["logs"]) == LOGS
         assert j["array"] is None or keys(j["array"]) == ARRAY
         assert j["gpu_use"] is None or keys(j["gpu_use"]) == GPU_USE
+        assert j["resubmitted_as"] is None or keys(j["resubmitted_as"]) == sorted([*LINK, "latest"])
+        assert j["resumes"] is None or keys(j["resumes"]) == LINK
     assert any(j["array"] for j in d["jobs"]) and any(j["exit"] for j in d["jobs"])
 
 
@@ -1986,7 +1990,8 @@ def test_no_command_advice_states_the_concrete_change() -> None:
     assert tr["advice"] == ("no command printed: a value you gave (--name) holds text RunFleet redacts or escapes; "
                             "repeat your command with --limit 3")
     # text cut but JSON holds everything: "add --json"
-    many = [mk_job("k2", str(1000 + i), name="订单実験" * 21) for i in range(30)]   # with job cost (~250 B each)
+    # with job cost (~250 B each); no log paths: the JSON (~1.3 KB a row) holds all 30 rows the text cannot
+    many = [mk_job("k2", str(1000 + i), name="订单実験" * 21, logs=()) for i in range(30)]
     doc = view.jobs(fleet(mk_host("k2", many), config_path=secret_c), view.JobFilter(), limit=80)
     footer = next(ln for ln in doc.text.splitlines() if ln.startswith("# +"))
     assert doc.data["truncated"] is None and footer == (

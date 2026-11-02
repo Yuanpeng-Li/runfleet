@@ -153,7 +153,7 @@ def test_frontmatter_is_strict_yaml_and_spec_compliant() -> None:
 def test_metadata_is_a_string_map_with_the_skill_revision() -> None:
     meta = _front()[0]["metadata"]
     assert isinstance(meta, dict) and meta and all(isinstance(k, str) and isinstance(v, str) for k, v in meta.items())
-    assert meta["runfleet-skill"] == "3"
+    assert meta["runfleet-skill"] == "4"
 
 
 def test_allowed_tools_is_a_list_of_narrow_patterns() -> None:
@@ -273,7 +273,7 @@ def test_not_found_fallback_first_looks_for_the_binary_then_names_the_removal_st
 
 def test_skill_md_stays_short() -> None:
     text = _read("SKILL.md")
-    assert len(text.splitlines()) < 80
+    assert len(text.splitlines()) <= 80                  # docs/AGENT_INTERFACE.md: SKILL.md ≤ 80 lines
     for section in ("## 1. Start here", "## 2. Commands", "## 3. Reading the answers", "## 4. With hpc-run / ws-run",
                     "## Safety rails (always)"):
         assert section in text
@@ -312,3 +312,16 @@ def test_openai_yaml_is_strict_and_shaped_for_codex() -> None:
     assert ui["display_name"] == "RunFleet"
     assert 25 <= len(ui["short_description"]) <= 64
     assert "$runfleet" in ui["default_prompt"] and "<" not in text and ">" not in text
+
+
+def test_resubmitted_jobs_are_followed_never_resubmitted_again() -> None:
+    """§5.2.12: `resubmitted_as` means the run was resumed already (hpc-run or the user): follow the latest job."""
+    body = _front()[1]
+    para = next(p for p in _paragraphs(body) if "resubmitted_as" in p)
+    assert "never resubmit" in para and "`latest`" in para and "hpc-run or the user" in para
+    runs = _read("references/with-run-skills.md")
+    assert "Never propose another resubmit" in runs and "`resumes HOST:ID`" in runs
+    reading = _read("references/reading-output.md")
+    for word in ("`resubmitted_as", "`resumes", "`counts.resubmitted_recent`", "`resubmitted`",
+                 "never \"not resubmitted\""):
+        assert word in reading, word

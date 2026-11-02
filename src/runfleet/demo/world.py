@@ -1866,6 +1866,11 @@ def _build_lyra(world: DemoWorld) -> None:
     _ended(world, c, job, state="PREEMPTED", started_ago=18 * 3600, ran=64, nodes=["lyra-gpu-s71-01"],
            log=f"slurmstepd: error: *** JOB 32354789 ON lyra-gpu-s71-01 CANCELLED AT "
                f"{local_ts(t0 - 18 * 3600 + 64, c.tz, '%Y-%m-%dT%H:%M:%S')} DUE TO PREEMPTION ***\n")
+    # lyra's PreemptMode is CANCEL: the launcher resubmitted it 13 min later under the same name (§5.2.12, a link)
+    job = _job(c, 32355120, "orb-swp--train--places-cosinewarm--s44--a01", submit=t0 - 18 * 3600 + 64 + 13 * 60,
+               **rtx)
+    _ended(world, c, job, state="COMPLETED", started_ago=18 * 3600 - 64 - 14 * 60, ran=10 * 3600 + 12 * 60 + 7,
+           nodes=["lyra-gpu-s71-02"], log="done · best vs_base -1.71% · saved final.pt\n")
     for k, (method, seed, ran) in enumerate((("warmup", 49, 150), ("const", 49, 148))):
         job = _job(c, 32327454 + k, f"orb-swp--train--{method}--s{seed}--a01", submit=t0 - 40 * 3600 - 1200, **rtx)
         _ended(world, c, job, state="FAILED", started_ago=40 * 3600, ran=ran, nodes=["lyra-gpu-r71-00"],

@@ -1005,7 +1005,8 @@ def sinfo_version(c: SimCluster) -> Out:
 
 def scontrol_partitions(c: SimCluster) -> Out:
     """`printf 'groups=…'; scontrol show partition -o`: open to every account and QOS unless `partition_fields` says
-    otherwise (AllowQos, the partition QoS, TRESBillingWeights: Account, §5.2.11), TRES from the nodes."""
+    otherwise (AllowQos, the partition QoS, TRESBillingWeights: Account, §5.2.11), TRES from the nodes; PreemptMode
+    the cluster's unless `partition_fields` sets one (Slurm prints it on every partition)."""
     parts: dict[str, list[SimNode]] = {}
     for node in c.nodes:
         for p in node.partitions:
@@ -1017,7 +1018,8 @@ def scontrol_partitions(c: SimCluster) -> Out:
         extra = c.partition_fields.get(name, {})
         weights = f" TRESBillingWeights={extra['TRESBillingWeights']}" if "TRESBillingWeights" in extra else ""
         rows.append(f"PartitionName={name} AllowGroups=ALL AllowAccounts=ALL AllowQos={extra.get('AllowQos', 'ALL')} "
-                    f"QoS={extra.get('QoS', 'N/A')} Hidden=NO State=UP TotalNodes={len(nodes)} "
+                    f"QoS={extra.get('QoS', 'N/A')} Hidden=NO PreemptMode={extra.get('PreemptMode', c.preempt_mode)} "
+                    f"State=UP TotalNodes={len(nodes)} "
                     f"TRES={tres}{f',gres/gpu={gpus}' if gpus else ''}{weights}\n")
     return Out("".join(rows))
 
