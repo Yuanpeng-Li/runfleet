@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-02
+
 ### Added
 - **Resubmitted jobs are linked to the job they carry on.** On a partition that preempts by cancelling
   (`PreemptMode=CANCEL`), a preempted job ends PREEMPTED and is resumed by a new `sbatch` under the same name; so is a
@@ -29,7 +31,7 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 - The PREEMPTED cause followed no PreemptMode: it said "resubmit or requeue" everywhere. It now reads the partition's
   `PreemptMode` (detected again once: DETECT_REV 4), else the cluster's: CANCEL says the job was killed and must be
-  resubmitted, REQUEUE that Slurm requeues it.
+  resubmitted, REQUEUE that it was not requeued (Slurm requeues only requeueable jobs) and must be resubmitted.
 - Same-id requeue (PreemptMode REQUEUE): when the requeued job's next attempt ended before the next accounting read,
   or while `sacct` was failing, RunFleet showed the previous attempt's PREEMPTED record and end time. Such a record no
   longer settles the job; it waits for (and looks up) the record of the last attempt.
@@ -589,7 +591,8 @@ First public release.
   opt-in with `--yes`); `scripts/gen_docs.py`; `scripts/screenshots.py`.
 - CI: lint, types and tests on Python 3.11 and 3.13, plus a packaging job that runs the demo from the built wheel.
 
-[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.7.1...v0.7.2
