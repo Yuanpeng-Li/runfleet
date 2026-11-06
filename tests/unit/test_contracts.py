@@ -49,12 +49,12 @@ core.forwards core.events core.attach core.logsearch
 ui ui.app ui.messages ui.keymap ui.render ui.theme ui.commands ui.query ui.everyday ui.fleet_layout
 ui.screens ui.screens.main ui.screens.job_detail ui.screens.host_detail ui.screens.log_viewer ui.screens.help
 ui.screens.confirm ui.screens.action_menu ui.screens.host_error ui.screens.settings ui.screens.forwards
-ui.notify ui.screens.notifications ui.screens.attention ui.termbg ui.saved_views ui.screens.save_view
+ui.notify ui.screens.notifications ui.screens.attention ui.screens.free_gpus ui.termbg ui.saved_views ui.screens.save_view
 ui.gpu_watch ui.screens.gpu_watch ui.screens.log_search ui.screens.found_logs ui.screens.account
 ui.widgets ui.widgets.header ui.widgets.hintbar ui.widgets.tabs ui.widgets.fleet_view ui.widgets.host_card
 ui.widgets.jobs_view ui.widgets.job_table ui.widgets.job_preview ui.widgets.gpus_view ui.widgets.gpu_panel
 ui.widgets.proc_table ui.widgets.node_table ui.widgets.log_view ui.widgets.filter_bar ui.widgets.attach_panel
-ui.widgets.fleet_panel
+ui.widgets.fleet_panel ui.widgets.row_links
 demo demo.world demo.render demo.transport
 agent agent.data agent.view agent.events agent.source agent.skill agent.commands agent.mcp
 """.split()

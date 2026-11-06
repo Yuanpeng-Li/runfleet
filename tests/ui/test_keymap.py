@@ -11,6 +11,7 @@ from runfleet.ui.app import RunFleetApp
 from runfleet.ui.screens.account import AccountScreen
 from runfleet.ui.screens.action_menu import ActionLogScreen, ActionMenuScreen
 from runfleet.ui.screens.attention import AttentionScreen
+from runfleet.ui.screens.free_gpus import FreeGpusScreen
 from runfleet.ui.screens.confirm import AttachConfirmScreen, ConfirmScreen
 from runfleet.ui.screens.forwards import ForwardsScreen, PortPromptScreen
 from runfleet.ui.screens.found_logs import FoundLogsScreen
@@ -37,7 +38,7 @@ OWNERS: dict[str, tuple[type, ...]] = {
     "host_ws": (HostDetailScreen,), "host_cluster": (HostDetailScreen,), "log": (LogScreen,),
     "confirm": (ConfirmScreen,), "attach_confirm": (AttachConfirmScreen,), "action_menu": (ActionMenuScreen,), "help": (HelpScreen,),
     "host_error": (HostErrorScreen,), "modal": (ActionLogScreen,), "settings": (SettingsScreen,),
-    "notifications": (NotificationsScreen,), "digest": (DigestScreen,), "attention": (AttentionScreen,),
+    "notifications": (NotificationsScreen,), "digest": (DigestScreen,), "attention": (AttentionScreen,), "free_gpus": (FreeGpusScreen,),
     "forwards": (ForwardsScreen,), "prompt": (PortPromptScreen, SaveViewScreen, WatchPromptScreen),
     "watches": (WatchesScreen,), "search_prompt": (SearchPromptScreen,), "log_hits": (LogSearchScreen,),
     "found_logs": (FoundLogsScreen,), "account": (AccountScreen,),

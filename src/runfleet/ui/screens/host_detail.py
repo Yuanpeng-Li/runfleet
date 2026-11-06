@@ -195,15 +195,17 @@ class HostDetailScreen(FleetScreen):
     HELP_CONTEXTS = ("host_ws", "host_detail", "global")
     HELP_TITLE = "Host detail"
 
-    def __init__(self, host: str) -> None:
+    def __init__(self, host: str, *, partition: str | None = None, free_only: bool = False,
+                 gpu: int | None = None) -> None:
+        """``partition`` / ``free_only`` (cluster) and ``gpu`` (workstation): where to open (the free GPUs dialog)."""
         super().__init__()
         self.host = host
         self.show_others = True                 # set from ui.json on mount (`u` remembers; others shown by default)
-        self.gpu: int | None = None             # workstation: the GPU whose processes the table shows (all users)
+        self.gpu: int | None = gpu              # workstation: the GPU whose processes the table shows (all users)
         self.sort = "gpu_mem"
         self.reverse = False
-        self.free_only = False
-        self.partition: str | None = None
+        self.free_only = free_only
+        self.partition: str | None = partition
         self.cluster = False
         self.unknown = False
 

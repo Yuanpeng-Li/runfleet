@@ -149,6 +149,7 @@ class SlurmCollector(SchedulerCollector):
         self._sinfo_parts: tuple[str, ...] = ()            # partitions of the last planned sinfo
         self._sstat_last: dict[str, datetime] = {}         # job id -> when its usage was last planned
         self._last_usage_at: datetime | None = None         # when the last background sstat was planned
+        self._logstat_ran = False                            # a real logstat was planned once (then idle = no-op)
         self._smi_model: dict[str, tuple[str, float | None]] = {}   # display id -> (gres-style type, MiB per GPU)
         self._occupants: tuple[Occupant, ...] = ()         # every user's running jobs in scope (§5.2.9)
         self._occupants_at: datetime | None = None
@@ -415,7 +416,12 @@ class SlurmCollector(SchedulerCollector):
                     paths[ref.path] = None
         valid = [p for p in paths if _valid_path(p)][:MAX_LOGSTAT_PATHS]
         if not valid:
-            return None
+            if not self._logstat_ran:
+                return None
+            # The last running job ended: no log is left to stat. An empty success (a shell no-op, like sstat's)
+            # replaces the last logstat outcome, so an old timeout does not keep an idle host degraded for good.
+            return Section("slurm.logstat", ":", timeout=1, meta={"paths": []})
+        self._logstat_ran = True
         return Section("slurm.logstat", cmds.logstat_cmd(valid), timeout=10, requires=("stat",),
                        meta={"paths": valid})
 

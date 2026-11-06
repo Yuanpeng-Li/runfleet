@@ -914,6 +914,72 @@ def free_by_type(hosts: Mapping[str, HostState], now: datetime,
     return FreeGPUs(types, tuple(unknown), oldest)
 
 
+@dataclass(frozen=True, slots=True)
+class FreeSpot:
+    """Where one type's GPUs are, for the free GPUs dialog: a cluster partition (its nodes with free GPUs, most free
+    first) or a workstation (its free GPU indices)."""
+    key: str                                  # the type's key in FreeGPUs.types
+    label: str
+    host: str
+    partition: str | None                     # None: a workstation
+    free: int
+    total: int
+    planned: int = 0
+    nodes: tuple[tuple[str, int, int], ...] = ()   # (node, free, total): nodes with a free GPU of this type
+    gpus: tuple[int, ...] = ()                     # workstation: the free GPU indices
+
+
+@dataclass(slots=True)
+class _SpotAcc:
+    label: str
+    free: int = 0
+    total: int = 0
+    planned: int = 0
+    nodes: dict[str, list[int]] = field(default_factory=dict)    # node -> [free, total], MIG profiles summed
+
+
+def free_spots(hosts: Mapping[str, HostState], now: datetime,
+               old: Callable[[HostState, GPU], bool] | None = None, rate: float = 1.0) -> list[FreeSpot]:
+    """Every (type, host, partition) of :func:`free_by_type`, node by node: the same counting rules (each node once,
+    in the first listed partition it is in; problem and stale hosts left out), so the dialog adds up to the panel.
+    Spots with no free GPU are kept (a type of yours with 0 free still says where it lives)."""
+    out: list[FreeSpot] = []
+    for name, state in hosts.items():
+        source, _age = free_source(state, now, rate)
+        snap = state.snapshot
+        if source not in ("cluster", "ws") or snap is None:
+            continue
+        if source == "ws":
+            per: dict[str, list[GPU]] = {}
+            for g in snap.gpus:
+                per.setdefault(type_label(g.name), []).append(g)
+            for label, gpus in per.items():
+                idle = tuple(g.index for g in gpus
+                             if not render.gpu_in_use(g) and not (old is not None and old(state, g)))
+                out.append(FreeSpot(label, label, name, None, len(idle), len(gpus), gpus=idle))
+            continue
+        listed = [p.name for p in snap.partitions]
+        acc: dict[tuple[str, str], _SpotAcc] = {}            # (type key, partition)
+        for node in snap.nodes:
+            inside = [p for p in listed if p in node.partitions]
+            if not inside:
+                continue
+            for gtype, free, total, planned in node_free(node):
+                mig = humanize.is_mig(gtype)
+                label = "MIG slices" if mig else type_label(gtype)
+                a = acc.setdefault((f"MIG slices ({name})" if mig else label, inside[0]), _SpotAcc(label))
+                a.free += free
+                a.total += total
+                a.planned += planned
+                n = a.nodes.setdefault(node.name, [0, 0])
+                n[0] += free
+                n[1] += total
+        for (key, part), a in acc.items():
+            nodes = sorted(((node, f, t) for node, (f, t) in a.nodes.items() if f), key=lambda n: (-n[1], n[0]))
+            out.append(FreeSpot(key, a.label, name, part, a.free, a.total, a.planned, tuple(nodes)))
+    return out
+
+
 def _host_types(snap: HostSnapshot) -> tuple[set[str], dict[str, datetime]]:
     """One host's GPU labels of own jobs: those of live jobs, and label -> newest end of the ended ones."""
     live: set[str] = set()
@@ -963,11 +1029,42 @@ def my_types(hosts: Mapping[str, HostState], now: datetime, window: float, memo:
     return out
 
 
+ALL_FREE = "*"                   # the panel key of the free part's header / ``also free`` lines: every type
+
+
+def free_split(free: FreeGPUs, mine: set[str]) -> tuple[list[TypeFree], list[TypeFree]]:
+    """Your types (fleet total descending, then name; MIG buckets never) and the other types with free GPUs (free
+    descending, then name, then host)."""
+    yours = sorted((t for t in free.types.values() if t.label in mine and t.host is None),
+                   key=lambda t: (-t.total, t.label))
+    picked = {id(t) for t in yours}
+    others = sorted((t for t in free.types.values() if id(t) not in picked and t.free),
+                    key=lambda t: (-t.free, t.label, t.host or ""))
+    return yours, others
+
+
+def free_needed(free: FreeGPUs, mine: set[str]) -> int:
+    """Lines the free part takes when every type gets its own row: the header, your types, then ``also free`` and one
+    row per other type with free GPUs (:func:`panel_split` caps it; :func:`free_region` then packs the others)."""
+    yours, others = free_split(free, mine)
+    return 1 + len(yours) + (1 + len(others) if others else 0)
+
+
 def free_lines(free: FreeGPUs, mine: set[str], rows: int, width: int, *, wide: bool,
                host_order: Sequence[str] = ()) -> list[Text]:
-    """The panel's free part in at most ``rows`` lines: header (``sinfo Nm ago`` on the right), your types (fleet total
-    descending, then name; 0 free shown dim), then ``also free …`` for the other types with free GPUs."""
+    """The lines of :func:`free_region`."""
+    return free_region(free, mine, rows, width, wide=wide, host_order=host_order)[0]
+
+
+def free_region(free: FreeGPUs, mine: set[str], rows: int, width: int, *, wide: bool,
+                host_order: Sequence[str] = ()) -> tuple[list[Text], list[str]]:
+    """The panel's free part in at most ``rows`` lines, and the key each line opens on a click (a key of
+    ``free.types``, :data:`ALL_FREE` for the header and ``also free`` lines): header (``sinfo Nm ago`` on the right),
+    your types (fleet total descending, then name; 0 free shown dim), then the other types with free GPUs: one row
+    each under ``also free`` when they all fit, else packed after ``also free`` over the lines left, ending in
+    ``+N more`` when even those are too few. No type with free GPUs is dropped silently."""
     order = {h: i for i, h in enumerate(host_order)}
+    keyed = {id(t): k for k, t in free.types.items()}
     head = Text("free GPUs now · your types first", style=theme.label())
     if free.unknown:
         head.append("  " + " ".join(f"{h} ?" for h in free.unknown), style=theme.warn())
@@ -977,38 +1074,96 @@ def free_lines(free: FreeGPUs, mine: set[str], rows: int, width: int, *, wide: b
         gap = width - head.cell_len - tail.cell_len
         head = head + Text(" " * gap) + tail if gap >= 1 else render.fit(head, width)
     lines = [render.fit(head, width)]
-    yours = sorted((t for t in free.types.values() if t.label in mine and t.host is None),
-                   key=lambda t: (-t.total, t.label))
-    picked = {id(t) for t in yours}
-    others = sorted((t for t in free.types.values() if id(t) not in picked and t.free),
-                    key=lambda t: (-t.free, t.label, t.host or ""))
+    keys = [ALL_FREE]
+    yours, others = free_split(free, mine)
     room = rows - 1
     if len(yours) > room - (1 if others else 0):
         keep = max(0, room - 1)
         others = sorted([*(t for t in yours[keep:] if t.free), *others], key=lambda t: (-t.free, t.label))
         yours = yours[:keep]
-    lab_w = max(10 if wide else 9, max((len(t.label) + 1 for t in yours), default=0))   # GH200-480G: counts align
-    for t in yours:
-        line = Text("  " if wide else " ")
+    one_each = bool(others) and room - len(yours) >= 1 + len(others)
+    shown = yours + (others if one_each else [])
+    lab_w = max(10 if wide else 9, max((len(t.label) + 1 for t in shown), default=0))   # GH200-480G: counts align
+    indent = "  " if wide else " "
+
+    def type_line(t: TypeFree) -> Text:
+        line = Text(indent)
         line.append(t.label.ljust(lab_w), style=theme.muted() if t.free else theme.dim())
-        line.append(f"{t.free:>3}" if wide else f"{t.free:>3}", style=theme.ok() if t.free else theme.dim())
+        line.append(f"{t.free:>3}", style=theme.ok() if t.free else theme.dim())
         if t.free:
             line.append("   " if wide else "  ")
             line.append_text(_where(t, wide, order))
-        lines.append(render.fit(line, width))
-    if others and len(lines) < rows:
-        line = Text("  " if wide else " ")
-        line.append("also free".ljust(lab_w + (2 if wide else 1)), style=theme.muted())
-        sep = Text(" · ", style=theme.dim())
-        for i, t in enumerate(others):
-            if i:
+        return render.fit(line, width)
+
+    for t in yours:
+        lines.append(type_line(t))
+        keys.append(keyed.get(id(t), ALL_FREE))
+    if not others or len(lines) >= rows:
+        return lines[:rows], keys[:rows]
+    if one_each:
+        lines.append(render.fit(Text(indent + "also free", style=theme.muted()), width))
+        keys.append(ALL_FREE)
+        for t in others:
+            lines.append(type_line(t))
+            keys.append(keyed.get(id(t), ALL_FREE))
+        return lines[:rows], keys[:rows]
+    packed = _packed_others(others, rows - len(lines), width, indent + "also free".ljust(lab_w + len(indent)))
+    lines += packed
+    keys += [ALL_FREE] * len(packed)
+    return lines[:rows], keys[:rows]
+
+
+def _packed_others(others: Sequence[TypeFree], n: int, width: int, prefix: str) -> list[Text]:
+    """``also free MIG slices 17 (g2) · A30 8 · …`` wrapped over at most ``n`` lines (continuations under the first
+    item); what does not fit ends the last line as ``+N more`` (types), never cut off unseen."""
+    items: list[Text] = []
+    for t in others:
+        item = Text(t.label + " ", style=theme.muted())
+        item.append(str(t.free), style=theme.ok())
+        if t.host:
+            item.append(f" ({t.host})", style=theme.dim())
+        items.append(item)
+    if n <= 0:
+        return []
+    sep = Text(" · ", style=theme.dim())
+    pad = " " * cell_len(prefix)
+    out: list[Text] = []
+    line = Text(prefix, style=theme.muted())
+    fresh = True                                 # nothing on this line yet
+    i = 0
+    while i < len(items):
+        item = items[i]
+        last = len(out) == n - 1
+        rest = len(items) - i - 1                # items after this one
+        more = Text(f"+{rest} more", style=theme.dim()) if last and rest else None
+        need = (0 if fresh else sep.cell_len) + item.cell_len + (sep.cell_len + more.cell_len if more else 0)
+        if line.cell_len + need <= width or (fresh and cell_len(prefix) + item.cell_len > width):
+            if not fresh:
                 line.append_text(sep)
-            line.append(t.label + " ", style=theme.muted())
-            line.append(str(t.free), style=theme.ok())
-            if t.host:
-                line.append(f" ({t.host})", style=theme.dim())
-        lines.append(render.fit(line, width))
-    return lines[:rows]
+            if line.cell_len + need > width:      # an item wider than a line: cut it, never the ``+N more`` after it
+                item = item.copy()
+                item.truncate(max(1, width - line.cell_len - (need - item.cell_len)), overflow="ellipsis")
+            line.append_text(item)
+            if more is not None and line.cell_len + sep.cell_len + more.cell_len > width:
+                line.append_text(sep)
+                line.append_text(more)
+                out.append(render.fit(line, width))
+                return out
+            fresh = False
+            i += 1
+            continue
+        if last:                                 # no line left: say how many types are not shown
+            tail = Text(f"+{len(items) - i} more", style=theme.dim())
+            if not fresh:
+                line.append_text(sep)
+            line.append_text(tail)
+            out.append(render.fit(line, width))
+            return out
+        out.append(render.fit(line, width))
+        line = Text(pad)
+        fresh = True
+    out.append(render.fit(line, width))
+    return out[:max(0, n)]
 
 
 def _where(t: TypeFree, wide: bool, order: Mapping[str, int]) -> Text:

@@ -625,6 +625,38 @@ async def test_finished_job_sstat_error_does_not_leave_idle_host_degraded(histor
         assert poller.status.error is not None and poller.status.error.section == "slurm.sacct"
 
 
+async def test_logstat_timeout_does_not_outlive_the_last_running_job() -> None:
+    """User report (hpc3 stayed "degraded · slurm.logstat timed out" for hours): a logstat timed out while a job
+    ran; the job ended, no log was left to stat, the section was no longer planned and its old timeout was kept
+    forever. With nothing to stat the group now runs a no-op that replaces it, and no Slurm or stat command runs."""
+    from runfleet.core.poller import BackendHooks
+    from tests.backends.factories import ctx
+    from tests.backends.factories import result as section_result
+    from tests.backends.slurm.test_collector import squeue
+
+    cx = ctx("k2")
+    clock = ManualClock(cx.now)
+    store = FleetStore([cx.host])
+    transport = FakeTransport(cx.host.name, clock=clock)
+    transport.results["slurm.squeue"] = squeue()
+    transport.results["slurm.logstat"] = section_result("slurm.logstat", rc=None, outcome=SectionOutcome.TIMEOUT)
+    poller = HostPoller(cx.host, transport, store, clock, random.Random(1),
+                        HostLanes(asyncio.Semaphore(8)), general=cx.general, hooks=BackendHooks.default(),
+                        caps=replace(cx.caps, profile=("slurm",)), caps_at=cx.now)
+    assert await poller.collect_once() is None
+    assert not poller.status.sections["slurm.logstat"].ok and poller.status.state is ConnState.DEGRADED
+
+    transport.set_result("slurm.squeue")                       # the last running job ended
+    del transport.results["slurm.logstat"]                     # (the fake answers by name, whatever the command)
+    for _ in range(3):                                         # jobs, then logstat (and the rest) come due
+        clock.advance(300)
+        await poller.poll_tick(force_all=True)
+    stat = [s for r in transport.probes for s in r.script.sections if s.name == "slurm.logstat"][-1]
+    assert stat.cmd == ":" and stat.meta["paths"] == []        # nothing ran on the cluster for it
+    assert poller.status.sections["slurm.logstat"].ok
+    assert poller.status.state is ConnState.OK, poller.status.error
+
+
 async def test_slow_successful_probe_is_fresh_when_it_lands(rig_factory: Callable[..., Rig]) -> None:
     rig = rig_factory(latency=12.0)                                    # detect 0..12 s, first poll 12..24 s
     await run_for(rig.clock, 24)
