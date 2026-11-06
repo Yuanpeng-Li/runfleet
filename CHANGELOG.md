@@ -5,6 +5,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **The fleet panel says where the free GPUs are.** A click on a free-GPU row of the Fleet view's panel opens a dialog
+  for that type: each cluster partition with its nodes that have a free GPU (most free first, `n 4/8`), each
+  workstation with its free GPU indices, counted exactly like the panel; a click on the header or `also free`, or `g`
+  in the Fleet view (any layout), lists every type. `enter` opens the host there: a cluster on that partition with
+  free-GPU nodes only, a workstation on that GPU. Clickable rows of the panel and the cards are underlined under the
+  mouse, so it is visible that they open something.
+
+### Fixed
+- **No free GPU type is cut off the fleet panel any more.** `also free` was one line cut at the panel's edge, so the
+  types with the fewest free GPUs (often a workstation's: one free PRO 6000) were never seen. Each other type now gets
+  its own row when there is room; otherwise they wrap over the lines left and end in `+N more`.
+- **A `slurm.logstat` timeout no longer keeps a host degraded after its last job ended.** With no running job there is
+  no log to stat, so the section was no longer planned and its last outcome (a timeout) stayed for good. Like `sstat`,
+  it now runs a shell no-op (no Slurm or file system access) that replaces the old outcome.
+
 ## [0.9.1] - 2026-11-02
 
 ### Added
