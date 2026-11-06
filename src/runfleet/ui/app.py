@@ -859,6 +859,14 @@ class RunFleetApp(App[None]):
         if host in self.store.hosts:
             self.push_screen(HostDetailScreen(host))
 
+    def open_host_at(self, host: str, *, partition: str | None = None, gpu: int | None = None) -> None:
+        """Host detail opened from the free GPUs dialog: a cluster on ``partition`` with free-GPU nodes only, a
+        workstation on GPU ``gpu`` (its processes)."""
+        from runfleet.ui.screens.host_detail import HostDetailScreen
+
+        if host in self.store.hosts:
+            self.push_screen(HostDetailScreen(host, partition=partition, free_only=partition is not None, gpu=gpu))
+
     def action_open_job(self, key: str) -> None:
         host, _, jid = key.partition(":")
         self.open_job(JobKey(host, jid))

@@ -7,7 +7,8 @@ the selected host, ``enter``/double-click opens its host screen.
 A tall view gets roomy cards (tier T1, :mod:`runfleet.ui.fleet_layout`): the row heights follow from the view size and
 each card's shape only (never from the data), each card lists the jobs that need the user, and the fleet panel fills
 the empty grid cell. ui.json ``fleet_layout = "compact"`` keeps today's cards. A click on a job row of a card or on an
-activity row of the panel opens that job; ``a`` lists what needs the user across the fleet, from the same rankings, in
+activity row of the panel opens that job, one on its free part (or ``g``, in any layout) says where the free GPUs are
+(:class:`~runfleet.ui.screens.free_gpus.FreeGpusScreen`); ``a`` lists what needs the user across the fleet, from the same rankings, in
 any layout (:class:`~runfleet.ui.screens.attention.AttentionScreen`). Nothing here polls anything.
 """
 
@@ -379,6 +380,40 @@ class FleetView(Widget, can_focus=False):
         self.app.push_screen(
             AttentionScreen(self.attention(now), now, colors, util_t=self.rf.service.config.ui.gpu_util_thresholds),
             lambda key: self.rf.open_listed_job(key) if key is not None else None)
+
+    def on_fleet_panel_free_clicked(self, event: FleetPanel.FreeClicked) -> None:
+        self.open_free(None if event.key == fleet_layout.ALL_FREE else event.key)
+
+    def action_where_free(self) -> None:
+        """``g``: the free GPUs dialog, every type."""
+        self.open_free(None)
+
+    def open_free(self, only: str | None) -> None:
+        """The free GPUs dialog for one type key of the panel (None: every type); enter opens the host it names."""
+        from runfleet.ui.screens.free_gpus import FreeGpusScreen
+
+        now = self.rf.now()
+        hosts = self.rf.store.hosts
+        rate = getattr(self.rf, "multiplier", 1.0)
+
+        def old(state: HostState, gpu: Any) -> bool:
+            return old_reading(state, gpu, now)
+
+        free = fleet_layout.free_by_type(hosts, now, old, self._memo, rate)
+        mine = fleet_layout.my_types(hosts, now, self.rf.service.config.general.recent_window, self._memo)
+        yours, others = fleet_layout.free_split(free, mine)
+        keyed = {id(t): k for k, t in free.types.items()}
+        order = [keyed[id(t)] for t in (*yours, *others)]
+        colors = {name: theme.host_color(state.config, i) for i, (name, state) in enumerate(hosts.items())}
+        self.app.push_screen(
+            FreeGpusScreen(fleet_layout.free_spots(hosts, now, old, rate), order, only=only, mine=mine,
+                           unknown=free.unknown, sinfo_age_s=free.sinfo_age_s, host_order=list(hosts),
+                           host_colors=colors),
+            self._open_free_target)
+
+    def _open_free_target(self, target: Any) -> None:
+        if target is not None:
+            self.rf.open_host_at(target.host, partition=target.partition, gpu=target.gpu)
 
 
 _SHORT_STATE = {ConnState.RETRYING: "retry", ConnState.NEEDS_AUTH: "auth", ConnState.CONNECTING: "conn…",

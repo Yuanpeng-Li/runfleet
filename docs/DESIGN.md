@@ -370,6 +370,7 @@ src/runfleet/
     screens/  main.py job_detail.py host_detail.py log_viewer.py help.py confirm.py action_menu.py host_error.py
               settings.py forwards.py notifications.py
               attention.py ("needs you" picker of the Fleet view, `a`, §7.4)
+              free_gpus.py (where the free GPUs are: a click on the fleet panel's free part, `g` in the Fleet view, §7.4)
               save_view.py (palette › Save view as…: the name prompt, §7.6)
               gpu_watch.py (palette › Watch free GPUs… prompt and the Watches list, §7.14)
               log_search.py (palette › Search logs… / ^f in Jobs: the prompt and the results, §4.7.1)
@@ -379,6 +380,7 @@ src/runfleet/
               gpus_view.py gpu_panel.py proc_table.py node_table.py log_view.py filter_bar.py
               attach_panel.py (Attach status line + live GPU rows, §7.16)
               fleet_panel.py (roomy Fleet view: free GPUs by type + what changed, §7.4)  [WP3]
+              row_links.py (clickable lines of the cards and the fleet panel, underlined under the mouse)
   agent/
     __init__.py          `runfleet agent …`: read-only, cache-first view of the fleet for AI agents (§8.7)  [WP4]
     data.py              shapes shared by the agent's IO and pure parts: HostView, HostHealth, FleetView, problem codes, Document  [WP4]
@@ -3786,6 +3788,7 @@ added; `tests/integration/test_signal_script.py` runs the real one.
 | ActionMenuScreen (modal) | `screens/action_menu.py` | `x`, right-click | `OptionList` of `actions_for()`, disabled ones greyed with reason; optional single-key accelerators (copy menu) |
 | HostErrorScreen (modal) | `screens/host_error.py` | `e`, click on a red chip | classified error, stderr excerpt, ssh log tail, next retry; Connect / Retry now / Disable host |
 | AttentionScreen (modal) | `screens/attention.py` | `a` in the Fleet view | "needs you": the actionable entries of every card's ranking, fleet-wide, in rank order; `enter` opens the job (§7.4) |
+| FreeGpusScreen (modal) | `screens/free_gpus.py` | `g` in the Fleet view, a click on the fleet panel's free part | where one type's (or every type's) free GPUs are: partitions with their free-GPU nodes, workstation GPU indices; `enter` opens the host on that partition / GPU (§7.4) |
 | SaveViewScreen (modal) | `screens/save_view.py` | palette › Save view as… | one-line name prompt for a saved Jobs view (keymap context `prompt`); shows what is saved and why a name cannot be used (§7.6) |
 | WatchPromptScreen (modal) | `screens/gpu_watch.py` | palette › Watch free GPUs…, `n` in the Watches list | one-line prompt for a GPU availability watch (keymap context `prompt`): how the text was read, what matches now, why it cannot be saved (§7.14) |
 | WatchesScreen (modal) | `screens/gpu_watch.py` | palette › Watches | the GPU watches with what each is doing (waiting, holds 1 of 2, fired, quiet until, paused); `d` removes, `n` adds (§7.14) |

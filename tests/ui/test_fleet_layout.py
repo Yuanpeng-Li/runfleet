@@ -3,6 +3,7 @@ free GPUs by type and the activity rows; plus the T0 identity of the cards."""
 
 from __future__ import annotations
 
+import re
 import dataclasses
 import json
 from datetime import timedelta
@@ -881,3 +882,77 @@ def test_activity_rows_say_resubmitted_and_drop_the_bad_news() -> None:
     plain = fl.activity_rows(ended, (), T0, DAY, T0 - timedelta(hours=6))          # no links known: bad news
     assert next(r for r in plain if r.key == JobKey("k2", "58717472")).bad
     assert fl.count_text(ended, hist, T0 - timedelta(hours=6)) == "2 failed · 1 preempted"   # counts stay history
+
+
+def _many_types() -> fl.FreeGPUs:
+    types = {"3090": fl.TypeFree("3090", 37, 76, where={("k2", "gpu"): [37, 0]}),
+             "H200": fl.TypeFree("H200", 2, 4, where={("k2", "lab"): [2, 2]}),
+             "MIG slices (k2)": fl.TypeFree("MIG slices", 17, 30, host="k2", where={("k2", "gpu"): [17, 0]}),
+             "A30": fl.TypeFree("A30", 8, 80, where={("lyra", "gpu"): [8, 0]}),
+             "V100-16G": fl.TypeFree("V100-16G", 6, 6, where={("k2", "gpu"): [6, 0]}),
+             "P100-16G": fl.TypeFree("P100-16G", 1, 1, where={("k2", "gpu"): [1, 0]}),
+             "PRO6000": fl.TypeFree("PRO6000", 1, 6, gpus={"lynx": [0]})}
+    return fl.FreeGPUs(types, (), 60.0)
+
+
+def test_free_region_gives_every_other_type_a_row_when_there_is_room() -> None:
+    """User report: `also free` was one line cut at the panel's edge, so lynx's one free PRO6000 (the last, fewest
+    free) never showed. Each other type now gets its own clickable row."""
+    free = _many_types()
+    mine = {"3090", "H200"}
+    assert fl.free_needed(free, mine) == 1 + 2 + 1 + 5
+    lines, keys = fl.free_region(free, mine, 9, 60, wide=False, host_order=["k2", "lyra", "lynx"])
+    plain = [x.plain.rstrip() for x in lines]
+    assert plain[3].strip() == "also free" and keys[3] == fl.ALL_FREE
+    assert keys[0] == fl.ALL_FREE and keys[1:3] == ["3090", "H200"]
+    assert keys[4:] == ["MIG slices (k2)", "A30", "V100-16G", "P100-16G", "PRO6000"]
+    assert "lynx 1" in plain[-1] and plain[-1].strip().startswith("PRO6000")
+    assert all(x.cell_len <= 60 for x in lines)
+
+
+def test_free_region_packs_the_others_and_says_how_many_are_cut() -> None:
+    free = _many_types()
+    lines, keys = fl.free_region(free, {"3090", "H200"}, 5, 60, wide=False)
+    plain = [x.plain.rstrip() for x in lines]
+    assert len(lines) == 5 and keys[3:] == [fl.ALL_FREE, fl.ALL_FREE]
+    assert plain[3].strip().startswith("also free") and "PRO6000 1" in " ".join(plain[3:])   # wraps, not cut
+    tight, _ = fl.free_region(free, {"3090", "H200"}, 4, 40, wide=False)
+    assert len(tight) == 4 and re.search(r"\+\d+ more$", tight[3].plain.rstrip()), tight[3].plain
+    assert all(x.cell_len <= 40 for x in tight)
+
+
+def test_free_spots_add_up_to_the_panel_counts() -> None:
+    nodes = (
+        _node("n-a", ("free-gpu",), "mixed", "v100", 4, 1),
+        _node("n-b", ("free-gpu", "free-gpuxl"), "idle", "v100", 4, 0),
+        _node("n-c", ("free-gpuxl",), "allocated", "v100", 4, 4, idle_cpus=0),
+        dataclasses.replace(_node("n-m", ("free-gpu",), "mixed", "nvidia_a100_1g.10gb", 7, 0),
+                            gres=(GresCount("gpu", "nvidia_a100_1g.10gb", 7, 0, None),
+                                  GresCount("gpu", "nvidia_a100_2g.20gb", 2, 0, None))),
+    )
+    st = _states()
+    hosts = {"k2": _cluster(nodes, ("free-gpu", "free-gpuxl")), "labstation": st["labstation"]}
+    free = fl.free_by_type(hosts, T0)
+    spots = fl.free_spots(hosts, T0)
+    for key, t in free.types.items():
+        mine = [s for s in spots if s.key == key]
+        assert sum(s.free for s in mine) == t.free and sum(s.total for s in mine) == t.total, key
+    assert next(s for s in spots if s.key == "MIG slices (k2)").nodes == (("n-m", 9, 9),)
+    v100 = next(s for s in spots if s.key == "V100" and s.partition == "free-gpu")
+    assert v100.nodes == (("n-b", 4, 4), ("n-a", 3, 4))
+    mig = [s for s in spots if s.key.startswith("MIG")]
+    assert all(len({n for n, _f, _t in s.nodes}) == len(s.nodes) for s in mig)   # one entry per node, profiles summed
+    ws = [s for s in spots if s.host == "labstation"]
+    assert ws and all(s.partition is None and len(s.gpus) == s.free for s in ws)
+
+
+def test_packed_others_never_cut_the_more_count_after_a_wide_item() -> None:
+    """Codex review: a MIG bucket of a long host name filled the last line, then `+1 more` was cut off with it."""
+    types = {"H200": fl.TypeFree("H200", 2, 4, where={("k2", "lab"): [2, 0]}),
+             "MIG slices (a-very-long-cluster-hostname)": fl.TypeFree(
+                 "MIG slices", 17, 30, host="a-very-long-cluster-hostname",
+                 where={("a-very-long-cluster-hostname", "gpu"): [17, 0]}),
+             "PRO6000": fl.TypeFree("PRO6000", 1, 2, gpus={"lynx": [0]})}
+    lines = fl.free_lines(fl.FreeGPUs(types, (), None), {"H200"}, 3, 52, wide=False)
+    assert len(lines) == 3 and lines[2].plain.rstrip().endswith("+1 more"), lines[2].plain
+    assert all(x.cell_len <= 52 for x in lines)
