@@ -3,11 +3,13 @@ and heights that stay put while the demo world runs for an hour."""
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
 
 from runfleet.core.clock import ManualClock
+from runfleet.models import JobKey
 from runfleet.ui import fleet_layout
 from runfleet.ui.app import RunFleetApp
 from runfleet.ui.widgets.fleet_panel import FleetPanel
@@ -81,7 +83,8 @@ async def test_panel_is_not_a_card() -> None:
         view.selected = names[1]
         view.focus_selection()
         await pilot.pause(0.1)
-        await pilot.click(FleetPanel, offset=(10, 5))
+        blank = next(i for i, k in enumerate(panel.row_keys) if k is None)     # a line that opens nothing
+        await pilot.click(FleetPanel, offset=(10, blank + 1))
         await pilot.pause(0.2)
         focused = app.screen.focused
         assert isinstance(focused, HostCard) and focused.host == names[1] and view.selected == names[1]
@@ -208,13 +211,60 @@ async def test_click_on_a_panel_activity_row_opens_that_job() -> None:
     async with app.run_test(size=(172, 62)) as pilot:
         await pilot.pause(0.3)
         panel = app.screen.query_one(FleetPanel)
-        row = next(i for i, k in enumerate(panel.row_keys) if k is not None)
+        row = next(i for i, k in enumerate(panel.row_keys) if isinstance(k, JobKey))
         key = panel.row_keys[row]
-        job = app.store.job(key) if key is not None else None
+        assert isinstance(key, JobKey)
+        job = app.store.job(key)
         assert job is not None and job.name[:12] in panel.lines[row].plain
         await pilot.click(FleetPanel, offset=(10, row + 1))
         await pilot.pause(0.3)
         assert isinstance(app.screen, JobDetailScreen) and app.screen.key == key
+
+
+async def test_click_on_a_panel_free_row_says_where_and_opens_the_host() -> None:
+    """A free-GPU row opens the dialog for that type (its spots add up to the row); enter opens the host there; the
+    header opens every type; `g` does too, and a clickable row is underlined under the mouse."""
+    from textual.widgets import OptionList
+
+    from runfleet.ui import fleet_layout
+    from runfleet.ui.screens.free_gpus import FreeGpusScreen
+    from runfleet.ui.screens.host_detail import HostDetailScreen
+
+    app = _app(persist_state=False)
+    async with app.run_test(size=(172, 62)) as pilot:
+        await pilot.pause(0.3)
+        panel = app.screen.query_one(FleetPanel)
+        assert panel.row_keys[0] == fleet_layout.ALL_FREE
+        counts = {i: int(m.group(1)) for i, k in enumerate(panel.row_keys)
+                  if isinstance(k, str) and k != fleet_layout.ALL_FREE
+                  and (m := re.match(r"\s*\D.*?\s(\d+)(\s|$)", panel.lines[i].plain))}
+        row = next(i for i, n in counts.items() if n)
+        key = panel.row_keys[row]
+        await pilot.hover(FleetPanel, offset=(10, row + 1))
+        await pilot.pause(0.1)
+        assert panel._hover == row
+        await pilot.click(FleetPanel, offset=(10, row + 1))
+        await pilot.pause(0.3)
+        screen = app.screen
+        assert isinstance(screen, FreeGpusScreen) and screen.only == key
+        assert sum(s.free for _k, spots in screen.groups for s in spots) == counts[row]
+        target = screen.targets[0]
+        screen.query_one(OptionList).action_select()
+        await pilot.pause(0.3)
+        detail = app.screen
+        assert isinstance(detail, HostDetailScreen) and detail.host == target.host
+        if target.partition is not None:
+            assert detail.partition == target.partition and detail.free_only
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        await pilot.click(FleetPanel, offset=(10, 1))
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, FreeGpusScreen) and app.screen.only is None
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        await pilot.press("g")
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, FreeGpusScreen) and app.screen.only is None
 
 
 def _with_needs(app: RunFleetApp) -> None:
@@ -237,7 +287,6 @@ async def test_needs_you_picker_in_every_layout(size: tuple[int, int]) -> None:
     enter opens the highlighted job."""
     from textual.widgets import OptionList
 
-    from runfleet.models import JobKey
     from runfleet.ui.screens.attention import AttentionScreen
     from runfleet.ui.screens.job_detail import JobDetailScreen
 

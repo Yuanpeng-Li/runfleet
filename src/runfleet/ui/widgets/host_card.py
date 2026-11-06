@@ -20,7 +20,6 @@ from typing import Any
 
 from rich.text import Text
 from textual import events
-from textual.widgets import Static
 
 from runfleet.core.store import HostState
 from runfleet.models import ConnState, ErrorKind, HostSnapshot, HostStatus, Job, JobKey, JobKind, StateGroup
@@ -28,6 +27,7 @@ from runfleet.ui import fleet_layout, render, theme
 from runfleet.ui.fleet_layout import Ranked
 from runfleet.ui.query import ended_at
 from runfleet.ui.widgets.gpus_view import sample_age
+from runfleet.ui.widgets.row_links import RowLinks
 from runfleet.util import humanize
 
 LABEL_W = 10
@@ -467,9 +467,9 @@ def _right(left: Text, right: Text, width: int) -> Text:
     return Text.assemble(left, " " * gap, right)
 
 
-class HostCard(Static, can_focus=True):
+class HostCard(RowLinks, can_focus=True):
     """One host's card; focus = selection (arrows/hjkl move it, click selects, double-click opens; `space` or a click
-    on the header chip scopes)."""
+    on the header chip scopes). A job row of its list is underlined under the mouse and opens on a click."""
 
     DEFAULT_CSS = """
     HostCard { height: auto; }
@@ -479,7 +479,6 @@ class HostCard(Static, can_focus=True):
         super().__init__("", id=f"card-{index}")
         self.host = host
         self.index = index
-        self.lines: list[Text] = []
         self.row_keys: list[JobKey | None] = []    # the job each content line opens on a click (list rows only)
 
     def set_lines(self, title: Text, lines: list[Text], pad_to: int, *, stale: bool, problem: bool,
@@ -487,18 +486,9 @@ class HostCard(Static, can_focus=True):
         """Replace the content; rows of a grid are padded to the same height so borders line up. ``keys``: the job
         of each line (a click on it opens the job)."""
         self.border_title = title
-        self.lines = lines
-        self.row_keys = list(keys)[:len(lines)]
-        self.update(Text("\n").join(lines + [Text("")] * max(0, pad_to - len(lines))))
+        self.show_lines(lines, keys, pad_to)
         self.set_class(stale, "-stale")
         self.set_class(problem, "-problem")
-
-    def key_at(self, event: events.MouseEvent) -> JobKey | None:
-        """The job of the list row under the mouse (None: not on a job row)."""
-        offset = event.get_content_offset(self)
-        if offset is None or not 0 <= offset.y < len(self.row_keys):
-            return None
-        return self.row_keys[offset.y]
 
     def on_click(self, event: events.Click) -> None:
         # select only: a click (or the first click of a double-click) must not silently scope the whole app

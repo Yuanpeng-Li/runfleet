@@ -100,6 +100,8 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("enter",), "open_host", "host detail", "nav", "↵ / double-click", hint="host detail"),
         Key(("a",), "attention", "jobs that need you, fleet-wide: failed, low on time, never start (↵ opens one)",
             "nav", hint="needs you"),
+        Key(("g",), "where_free", "free GPUs by type: which partitions and nodes, which workstation GPUs (↵ opens the "
+            "host; a click on the panel's free part opens it too)", "nav", hint="free GPUs"),
         Key(("space",), "scope_host", "scope to this host", "act", "space", hint="scope"),
         Key(("c",), "app.connect_host", "connect (log in: Duo / password prompts)", "act", hint="connect"),
         Key(("C",), "app.login_all", "log in to every host needing auth (one terminal session)", "act"),
@@ -294,6 +296,14 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("escape", "q"), "close", "close", "nav", "esc"),
         Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
     ),
+    "free_gpus": (
+        Key(("j",), "cursor_down", "move down", "nav", "j/k", summary="move"),
+        Key(("k",), "cursor_up", "move up", "nav", in_help=False),
+        Key(("enter",), "noop", "open that host (cluster: that partition, free-GPU nodes only)", "nav", "↵",
+            bind=False),
+        Key(("escape", "q"), "close", "close", "nav", "esc"),
+        Key(("f1",), "app.help", "help (this dialog)", "view", "F1"),
+    ),
     "watches": (
         Key(("j",), "cursor_down", "move down", "nav", "j/k", summary="move"),
         Key(("k",), "cursor_up", "move up", "nav", in_help=False),
@@ -399,7 +409,7 @@ CONTEXT_TITLES: dict[str, str] = {
     "attach_confirm": "srun confirmation (live readings)",
     "action_menu": "Action menu", "help": "Help", "host_error": "Host error", "modal": "Dialogs",
     "settings": "Settings", "notifications": "Notifications", "digest": "Since you were away",
-    "attention": "Needs you (Fleet a)", "watches": "GPU watches",
+    "attention": "Needs you (Fleet a)", "free_gpus": "Free GPUs (Fleet g)", "watches": "GPU watches",
     "forwards": "Port forwards", "prompt": "Prompt", "search_prompt": "Search logs (prompt)",
     "log_hits": "Search logs (results)", "found_logs": "Other log files (f)", "account": "Account usage ($)",
 }

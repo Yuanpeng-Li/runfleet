@@ -2,8 +2,11 @@
 
 It fills the empty grid cell after the last card (or a full-width row under the grid) when the plan of
 :mod:`runfleet.ui.fleet_layout` leaves room for it. It is not a HostCard: it never takes focus and arrows skip it; a
-click on an activity row opens that job, a click anywhere else does nothing. Everything it shows is already in the
+click on an activity row opens that job, one on the free part the free GPUs dialog. Everything it shows is already in the
 store or in this session's alert history (GPU watches that fired, :mod:`runfleet.ui.gpu_watch`, included).
+
+A click on a free-GPU row opens the free GPUs dialog for that type (on the header or ``also free``: every type), which
+says which partitions and nodes or which workstation GPUs those are; the clickable row under the mouse is underlined.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from rich.text import Text
 from textual import events
-from textual.widgets import Static
+from textual.message import Message
 
 from runfleet.core.events import JobEvent
 from runfleet.models import JobKey
@@ -22,6 +25,7 @@ from runfleet.ui import fleet_layout, theme
 from runfleet.ui.gpu_watch import WatchEvent
 from runfleet.ui.notify import since_label
 from runfleet.ui.widgets.host_card import old_reading
+from runfleet.ui.widgets.row_links import RowLinks
 from runfleet.util import humanize
 from runfleet.util.lineage import link
 
@@ -41,9 +45,10 @@ def panel_lines(hosts: Mapping[str, HostState], now: datetime, *, rows: int, wid
 def panel_body(hosts: Mapping[str, HostState], now: datetime, *, rows: int, width: int, wide: bool, window: float,
                history: Iterable[JobEvent] = (), digest_since: datetime | None = None,
                memo: fleet_layout.Memo | None = None, rate: float = 1.0,
-               watch_events: Iterable[WatchEvent] = ()) -> tuple[list[Text], list[JobKey | None]]:
-    """The panel body in exactly ``rows`` lines: the free part (at most half), then the activity part; and the job
-    each line opens on a click (the activity rows; None elsewhere).
+               watch_events: Iterable[WatchEvent] = ()) -> tuple[list[Text], list[JobKey | str | None]]:
+    """The panel body in exactly ``rows`` lines: the free part (at most half), then the activity part; and what each
+    line opens on a click: a job (activity rows), a free GPU type key or :data:`fleet_layout.ALL_FREE` (the free
+    part), None (the count line, padding).
 
     ``memo`` keeps the fleet-wide scans between calls: the node and job scans until a host's data changes, the
     activity rows until then, a new alert or the moment a row leaves the window (the 1 Hz tick only re-renders
@@ -62,10 +67,8 @@ def panel_body(hosts: Mapping[str, HostState], now: datetime, *, rows: int, widt
                        lambda: link(j for _name, snap in snaps for j in snap.jobs.values()))
     free = fleet_layout.free_by_type(hosts, now, lambda state, gpu: old_reading(state, gpu, now), memo, rate)
     mine = fleet_layout.my_types(hosts, now, window, memo)
-    yours = {id(t) for t in free.types.values() if t.label in mine and t.host is None}
-    others = any(t.free for t in free.types.values() if id(t) not in yours)
-    n_free = fleet_layout.panel_split(rows, 1 + len(yours) + (1 if others else 0))
-    out = fleet_layout.free_lines(free, mine, n_free, width, wide=wide, host_order=names)
+    n_free = fleet_layout.panel_split(rows, fleet_layout.free_needed(free, mine))
+    out, free_keys = fleet_layout.free_region(free, mine, n_free, width, wide=wide, host_order=names)
     since = digest_since or (now - timedelta(seconds=window))
     away = " (you were away)" if wide else ""
     head = (f"since {since_label(since, now)}{away}: " if digest_since is not None
@@ -87,7 +90,7 @@ def panel_body(hosts: Mapping[str, HostState], now: datetime, *, rows: int, widt
                                     (window, since_key, len(history), len(fired)), activity, now=now,
                                     expires=lambda v: v[2])
     colors = {name: theme.host_color(state.config, i) for i, (name, state) in enumerate(hosts.items())}
-    keys: list[JobKey | None] = [None] * len(out)
+    keys: list[JobKey | str | None] = list(free_keys)
     lines, act_keys = fleet_layout.activity_region(acts, counts, head, rows - len(out), width, wide=wide,
                                                    host_style=lambda h: colors.get(h, ""), now=now)
     out += lines
@@ -96,39 +99,39 @@ def panel_body(hosts: Mapping[str, HostState], now: datetime, *, rows: int, widt
     return out + [Text("")] * pad, keys + [None] * pad
 
 
-class FleetPanel(Static, can_focus=False):
+class FleetPanel(RowLinks, can_focus=False):
     """The fleet panel (see the module docstring); hidden while the plan has no room for it. A click on an activity
-    row opens its job."""
+    row opens its job, one on the free part posts :class:`FleetPanel.FreeClicked` (the Fleet view opens the dialog)."""
 
     DEFAULT_CSS = """
     FleetPanel { height: auto; }
     """
 
+    class FreeClicked(Message):
+        """A click on the free part: ``key`` is a type key of the free GPUs, or ALL_FREE."""
+
+        def __init__(self, key: str) -> None:
+            super().__init__()
+            self.key = key
+
     def __init__(self) -> None:
         super().__init__("", id="fleet-panel")
         self.border_title = Text(fleet_layout.PANEL_TITLE, style=theme.muted())
-        self.lines: Sequence[Text] = ()
-        self.row_keys: list[JobKey | None] = []    # the job each shown line opens on a click (activity rows only)
 
-    def set_lines(self, lines: Sequence[Text], span: int, rows: int, keys: Sequence[JobKey | None] = ()) -> None:
+    def set_lines(self, lines: Sequence[Text], span: int, rows: int,
+                  keys: Sequence[JobKey | str | None] = ()) -> None:
         self.border_title = Text(fleet_layout.PANEL_TITLE, style=theme.muted())
-        self.lines = list(lines)
-        self.row_keys = list(keys)[:min(rows, len(self.lines))]
         if self.styles.column_span != span:
             self.styles.column_span = span
         if self.styles.height is None or self.styles.height.value != rows + 2:
             self.styles.height = rows + 2
-        self.update(Text("\n").join(list(lines)[:rows]))
-
-    def key_at(self, event: events.MouseEvent) -> JobKey | None:
-        """The job of the activity row under the mouse (None: not on one)."""
-        offset = event.get_content_offset(self)
-        if offset is None or not 0 <= offset.y < len(self.row_keys):
-            return None
-        return self.row_keys[offset.y]
+        self.show_lines(list(lines)[:rows], list(keys)[:rows], rows)
 
     def on_click(self, event: events.Click) -> None:
         key = self.key_at(event)
-        if key is not None:
+        if isinstance(key, JobKey):
             event.stop()
             self.app.open_listed_job(key)  # type: ignore[attr-defined]
+        elif isinstance(key, str):
+            event.stop()
+            self.post_message(self.FreeClicked(key))
