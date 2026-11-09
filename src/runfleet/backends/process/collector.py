@@ -27,6 +27,7 @@ from runfleet.models import (GPU, ActionResult, Capabilities, HostError, Job, Jo
                              Proc, StateGroup)
 from runfleet.probe.section import Section, SectionResult
 from runfleet.util.logscan import PENDING_EXIT_HINT
+from runfleet.util.shell import guarded_logstat
 from runfleet.util.slurmfmt import split_rows
 
 log = logging.getLogger("runfleet.backends.process.collector")
@@ -62,7 +63,8 @@ def parse_fd_stats(text: str) -> dict[str, StatInfo]:
 
 
 def logstat_cmd(paths: Sequence[str]) -> str:
-    return "stat -L -c '%n|%s|%Y' -- " + " ".join(shlex.quote(p) for p in paths) + " 2>&1; true"
+    """stat of the task logs, skipped while an earlier one still hangs (:func:`runfleet.util.shell.guarded_logstat`)."""
+    return guarded_logstat(" ".join(shlex.quote(p) for p in paths))
 
 
 def exitscan_cmd(tasks: Sequence[tuple[str, Sequence[str]]]) -> str:
@@ -154,8 +156,9 @@ class ProcessCollector(SchedulerCollector):
             paths = list(dict.fromkeys(r.path for j in self._jobs.values() for r in j.logs
                                        if r.path and _valid_path(r.path)))[:MAX_LOGSTAT_PATHS]
             if paths:
+                # log sizes are extra information: a hung file system (an NFS home) must not make the host DEGRADED
                 out.append(Section("process.logstat", logstat_cmd(paths), timeout=5, requires=("stat",),
-                                   meta={"paths": paths}))
+                                   meta={"paths": paths}, advisory=True, late=True))
         if "process.exitscan" in due and self._exitscan:
             tasks = [(tid, paths) for tid, paths in self._exitscan.items()][:16]
             self._exitscan_planned = tuple(tid for tid, _ in tasks)

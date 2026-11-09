@@ -127,7 +127,8 @@ def sstat_cmd(ids_raw: Sequence[str]) -> str:              # fields never contai
 
 
 def logstat_cmd(paths: Sequence[str]) -> str:              # parse with rsplit("|", 2): paths may contain "|"
-    return "stat -L -c '%n|%s|%Y' -- " + _q(check_path(p) for p in paths) + " 2>&1; true"
+    """stat of the logs, skipped while an earlier one still hangs (:func:`runfleet.util.shell.guarded_logstat`)."""
+    return shell.guarded_logstat(_q(check_path(p) for p in paths))
 
 
 def sinfo_cmd(partitions: Sequence[str], sep: str = SEP) -> str:

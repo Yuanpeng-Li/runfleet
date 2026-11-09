@@ -5,6 +5,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **hpc3 no longer shows "degraded" for things that are not wrong with it.** Investigated live: HPC3 does not limit
+  monitoring (no Slurm RPC rate limit, every Slurm command answers in < 50 ms, ssh is never refused). The episodes came
+  from (1) the BeeGFS `/pub` file system the job logs are on, whose `stat` timed out on every try for 40 minutes on
+  end, and (2) failures RunFleet kept after their cause was gone.
+  - Extra-information sections are now *advisory*: their failure is shown on the section (host detail, `e`) and backs
+    off their group, but never makes the host DEGRADED. These are log sizes (`slurm.logstat`), pending-job priority
+    (`sprio`/`sshare`), account balances and usage (`slurm.acct_*`) and the host detail's occupants (`occupants`/`names`).
+    The log `stat` also runs last in the probe, so a hung one cannot hold up the Slurm sections. It is skipped while
+    an earlier one of yours still hangs (checked with `ps`), so stuck processes never pile up on a shared login node.
+  - A failed section that will never run again to clear itself is retired:
+    - every group that plans it left the cadences (the pending job started; the host detail was closed);
+    - only event groups still plan it and they have not retried it for 15 min (a vanished job resolved by the
+      accounting window, a job that left squeue before its scontrol retry).
+    Before, the host stayed DEGRADED until RunFleet restarted. A group that is due but plans nothing keeps its
+    failure (nvidia-smi hung: GPU polling paused on purpose), and a retired section keeps its last success.
+  - The same goes for workstations: their log `stat` (`process.logstat`) is advisory, late and guarded too.
+  - `sstat` that only says "couldn't get steps" for jobs that all ended since squeue is an answer, not a failure.
+  - Each section that starts or stops failing is written once to `runfleet.log` (outcome, rc, time, stderr), so the
+    cause of a past "degraded" can be looked up.
+
 ## [0.9.2] - 2026-11-06
 
 ### Added
