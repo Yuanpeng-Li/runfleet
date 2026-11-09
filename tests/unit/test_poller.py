@@ -628,7 +628,9 @@ async def test_finished_job_sstat_error_does_not_leave_idle_host_degraded(histor
 async def test_logstat_timeout_does_not_outlive_the_last_running_job() -> None:
     """User report (hpc3 stayed "degraded · slurm.logstat timed out" for hours): a logstat timed out while a job
     ran; the job ended, no log was left to stat, the section was no longer planned and its old timeout was kept
-    forever. With nothing to stat the group now runs a no-op that replaces it, and no Slurm or stat command runs."""
+    forever. With nothing to stat the group now runs a no-op that replaces it, and no Slurm or stat command runs.
+    (Since 0.9.3 a logstat failure no longer makes the host DEGRADED at all; the section's own status still has to
+    clear.)"""
     from runfleet.core.poller import BackendHooks
     from tests.backends.factories import ctx
     from tests.backends.factories import result as section_result
@@ -644,7 +646,8 @@ async def test_logstat_timeout_does_not_outlive_the_last_running_job() -> None:
                         HostLanes(asyncio.Semaphore(8)), general=cx.general, hooks=BackendHooks.default(),
                         caps=replace(cx.caps, profile=("slurm",)), caps_at=cx.now)
     assert await poller.collect_once() is None
-    assert not poller.status.sections["slurm.logstat"].ok and poller.status.state is ConnState.DEGRADED
+    assert not poller.status.sections["slurm.logstat"].ok
+    assert poller.status.state is ConnState.OK                 # log sizes are advisory: the host is not DEGRADED
 
     transport.set_result("slurm.squeue")                       # the last running job ended
     del transport.results["slurm.logstat"]                     # (the fake answers by name, whatever the command)
@@ -717,3 +720,176 @@ async def test_unchanged_jobmeta_is_touched_hourly() -> None:
         with pytest.raises(asyncio.CancelledError):
             await task
     assert 2 <= len(cache.jobmeta) <= 4, cache.jobmeta                 # first sighting + ~hourly touches
+
+
+# ---------------------------------------------------------------- advisory sections, retiring stale failures
+class _ExtraSlurm(StubSlurm):
+    """StubSlurm plus the shapes of the real collector's conditional groups: `slurm.priority` exists only while
+    `pending` (sprio), `slurm.account` plans sbank only while `want_bank`, the `slurm.vanished` event plans sacct_ids
+    when fired, and `slurm.logstat` is advisory."""
+
+    pending = True
+    want_bank = True
+    broken_cadences = False
+    occupants_sinfo = False
+
+    def cadences(self, ctx):  # type: ignore[no-untyped-def]
+        from runfleet.backends.base import Cadence
+        if type(self).broken_cadences:
+            raise ValueError("cadence bug")
+        extra = [Cadence("slurm.account", 600.0, floor=60), Cadence("slurm.vanished", 0.0, mode="event"),
+                 Cadence("slurm.logstat", 120.0, floor=60)]
+        if type(self).pending:
+            extra.append(Cadence("slurm.priority", 600.0, floor=60))
+        return [*super().cadences(ctx), *extra]
+
+    def sections(self, due, ctx):  # type: ignore[no-untyped-def]
+        from tests.unit import stubs
+        out = super().sections(due, ctx)
+        if "slurm.priority" in due:
+            out.append(stubs.Section("slurm.sprio", "sprio", timeout=15))
+        if "slurm.account" in due:
+            out.append(stubs.Section("slurm.acct_share", "sshare -A x", timeout=15))
+            if type(self).want_bank:
+                out.append(stubs.Section("slurm.acct_sbank", "sbank", timeout=20))
+        if "slurm.vanished" in due:
+            out.append(stubs.Section("slurm.sacct_ids", "sacct -j 7", timeout=30))
+        if "slurm.logstat" in due:
+            out.append(stubs.Section("slurm.logstat", "stat x", timeout=10, advisory=True, late=True))
+        if "slurm.occupants" in due and type(self).occupants_sinfo and "slurm.sinfo" not in {x.name for x in out}:
+            out.insert(0, stubs.Section("slurm.sinfo", "sinfo", timeout=20))   # like the real occupants group
+        return out
+
+
+def _extra_rig(**flags: bool) -> tuple[HostPoller, FakeTransport, ManualClock]:
+    from runfleet.core.poller import BackendHooks
+    from tests.unit import stubs
+
+    cls = type("ExtraSlurm", (_ExtraSlurm,), dict(flags))
+    hooks = BackendHooks(collectors=lambda: {**stubs.REGISTRY, "slurm": cls},
+                         detect_sections=stubs.stub_detect_sections,
+                         build_capabilities=stubs.stub_build_capabilities)
+    clock = ManualClock(CLOCK_START)
+    t = FakeTransport(SLURM.name, clock=clock)
+    t.set_result("detect.id", "user=me")
+    t.set_result("slurm.squeue", "101 R")
+    p = HostPoller(SLURM, t, FleetStore([SLURM]), clock, random.Random(1), HostLanes(asyncio.Semaphore(8), t.mux),
+                   general=GeneralSettings(), hooks=hooks)
+    p._cls = cls  # type: ignore[attr-defined]
+    return p, t, clock
+
+
+def _timeout(t: FakeTransport, name: str) -> None:
+    t.set_result(name, rc=124)
+
+
+async def test_an_advisory_section_failing_never_makes_the_host_degraded() -> None:
+    """hpc3: the BeeGFS /pub hung `stat` for minutes; log sizes are extra information, not the jobs. The failure is
+    kept on the section (host detail, `e`) and its group still backs off, but the host stays OK."""
+    p, t, clock = _extra_rig()
+    _timeout(t, "slurm.logstat")
+    assert await p.collect_once() is None
+    sec = p.status.sections["slurm.logstat"]
+    assert not sec.ok and sec.outcome == "timeout"
+    assert p.status.state is ConnState.OK and p.status.error is None
+    assert p._group_fail.get("slurm.logstat") == 1                      # it still backs off
+
+
+async def test_a_failure_of_a_group_that_left_the_cadences_is_retired() -> None:
+    """sprio timed out while a job was pending; the job started, `slurm.priority` left the cadences and sprio was
+    never planned again: the host stayed DEGRADED until a restart."""
+    p, t, clock = _extra_rig()
+    _timeout(t, "slurm.sprio")
+    assert await p.collect_once() is None
+    assert p.status.state is ConnState.DEGRADED and not p.status.sections["slurm.sprio"].ok
+    p._cls.pending = False                                              # type: ignore[attr-defined]
+    clock.advance(30)
+    await p.poll_tick()
+    assert "slurm.sprio" not in p.status.sections
+    assert p.status.state is ConnState.OK, p.status.error
+
+
+async def test_a_group_that_is_due_but_plans_nothing_keeps_its_failure() -> None:
+    """Review: a collector may hold a failing section back on purpose (nvidia-smi hung 3 times: GPU polling paused
+    for 5 min). "Due but nothing planned" is not "nothing left to look up": the failure stays."""
+    p, t, clock = _extra_rig()
+    _timeout(t, "slurm.acct_sbank")
+    assert await p.collect_once() is None
+    assert p.status.state is ConnState.DEGRADED
+    p._cls.want_bank = False                                            # type: ignore[attr-defined]
+    clock.advance(1300)                                                 # backed off ×2: the group is due again
+    await p.poll_tick()
+    assert p.status.sections["slurm.acct_share"].ok and not p.status.sections["slurm.acct_sbank"].ok
+    assert p.status.state is ConnState.DEGRADED
+
+
+async def test_a_section_two_groups_plan_stays_failed_while_one_of_them_is_left() -> None:
+    """Review: slurm.sinfo is planned by slurm.nodes and by the host detail's slurm.occupants. Closing the detail
+    must retire the occupants failure, not sinfo's: slurm.nodes still runs it."""
+    p, t, clock = _extra_rig(occupants_sinfo=True)
+    _timeout(t, "slurm.sinfo")
+    _timeout(t, "slurm.occupants")
+    assert await p.collect_once() is None
+    p.set_visibility(Visibility.FOCUSED)
+    clock.advance(15)
+    await p.poll_tick(force_all=True)
+    clock.advance(30)                                                   # an occupants-only tick plans sinfo
+    p._forced.add("slurm.occupants")
+    await p.poll_tick()
+    assert not p.status.sections["slurm.occupants"].ok and not p.status.sections["slurm.sinfo"].ok
+    p.set_visibility(Visibility.VISIBLE)
+    clock.advance(15)
+    await p.poll_tick()
+    assert "slurm.occupants" not in p.status.sections                  # the detail is closed: gone
+    assert not p.status.sections["slurm.sinfo"].ok and p.status.state is ConnState.DEGRADED
+
+
+async def test_a_retired_failure_that_comes_back_keeps_its_last_success() -> None:
+    """Review: retiring dropped last_ok, so the same failure coming back later read as "never worked"."""
+    p, t, clock = _extra_rig()
+    assert await p.collect_once() is None
+    worked = p.status.sections["slurm.sprio"].last_ok
+    assert worked is not None
+    _timeout(t, "slurm.sprio")
+    clock.advance(1300)
+    await p.poll_tick()
+    assert not p.status.sections["slurm.sprio"].ok
+    p._cls.pending = False                                              # type: ignore[attr-defined]
+    clock.advance(15)
+    await p.poll_tick()
+    assert "slurm.sprio" not in p.status.sections
+    p._cls.pending = True                                               # type: ignore[attr-defined]
+    clock.advance(15)
+    await p.poll_tick(force_all=True)
+    assert not p.status.sections["slurm.sprio"].ok and p.status.sections["slurm.sprio"].last_ok == worked
+
+
+async def test_an_event_section_not_run_again_is_retired_after_a_while() -> None:
+    """sacct -j for a vanished job timed out; the accounting window then resolved the job, so the lookup was never
+    retried. The failure counts for EVENT_RETIRE_S (the retries of a still-vanished job refresh it), then goes."""
+    from runfleet.core.poller import EVENT_RETIRE_S
+
+    p, t, clock = _extra_rig()
+    assert await p.collect_once() is None
+    _timeout(t, "slurm.sacct_ids")
+    p._events.add("slurm.vanished")
+    clock.advance(15)
+    await p.poll_tick(force_all=True)
+    assert p.status.state is ConnState.DEGRADED and not p.status.sections["slurm.sacct_ids"].ok
+    clock.advance(EVENT_RETIRE_S / 2)
+    await p.poll_tick()
+    assert p.status.state is ConnState.DEGRADED                         # not yet: a retry may still come
+    clock.advance(EVENT_RETIRE_S / 2 + 15)
+    await p.poll_tick()
+    assert "slurm.sacct_ids" not in p.status.sections
+    assert p.status.state is ConnState.OK, p.status.error
+
+
+async def test_nothing_is_retired_while_the_collector_cannot_say_its_groups() -> None:
+    p, t, clock = _extra_rig()
+    _timeout(t, "slurm.sprio")
+    assert await p.collect_once() is None
+    assert p.status.state is ConnState.DEGRADED
+    p._cls.broken_cadences = True                                       # type: ignore[attr-defined]
+    p._update_sections({}, p._plan({}, p.context(), p._cadences(p.context())), [], clock.now())
+    assert not p.status.sections["slurm.sprio"].ok                      # unknown groups: kept, not "gone"

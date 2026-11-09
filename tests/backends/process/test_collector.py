@@ -74,6 +74,7 @@ def test_fds_logs_and_logstat() -> None:
     assert "process.fds" not in {s.name for s in c.sections(frozenset({"process.ps"}), cx)}
     (ls,) = c.sections(frozenset({"process.logstat"}), cx)
     assert ls.meta["paths"] == ["/data/home/alice07/projects/orb/logs/l.out"]
+    assert ls.advisory and ls.late and "ps -u" in ls.cmd      # a hung NFS home: log sizes never make it DEGRADED
     mtime = int((cx.now - timedelta(minutes=45)).timestamp())
     out = c.ingest({"process.logstat": result("process.logstat",
                                               f"/data/home/alice07/projects/orb/logs/l.out|5000|{mtime}")},
