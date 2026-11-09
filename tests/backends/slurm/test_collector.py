@@ -855,3 +855,32 @@ def test_job_that_dies_in_its_first_second_settles() -> None:
     out = tick(c, at(cx, 15), _squeue_rows(), _sacct_row("1003", "FAILED", S0))
     assert out.jobs is not None and out.jobs["1003"].source == "sacct" and out.jobs["1003"].state is JobState.FAILED
     assert c.sections(frozenset({"slurm.vanished"}), at(cx, 15)) == []
+
+
+# ------------------------------------------------------------------ what a failure means for the host
+def test_extra_information_sections_are_advisory() -> None:
+    """Log sizes, priority, account and the detail's occupants are extra information: their failure is shown on the
+    section, the host stays OK. The jobs, accounting, usage and nodes sections are not."""
+    c, cx, _ = started()
+    secs = {s.name: s for g in ("slurm.jobs", "slurm.history", "slurm.usage", "slurm.logstat", "slurm.nodes")
+            for s in c.sections(frozenset({g}), cx)}
+    assert secs["slurm.logstat"].advisory and secs["slurm.logstat"].late
+    assert not any(secs[n].advisory for n in ("slurm.squeue", "slurm.sacct", "slurm.sstat", "slurm.sinfo"))
+    assert "ps -u" in secs["slurm.logstat"].cmd and "stat -L -c '%n|%s|%Y'" in secs["slurm.logstat"].cmd
+
+
+def test_sstat_of_jobs_that_all_ended_is_an_answer() -> None:
+    """A cluster that preempts often: every job sstat was asked about ended since squeue; sstat printed only "couldn't get
+    steps" on stderr. That is no usage, not a failure of the host."""
+    from runfleet.backends.slurm.collector import sstat_steps_gone
+
+    c, cx, _ = started()
+    gone = result("slurm.sstat", stderr="sstat: error: couldn't get steps for JobId=59298659\n"
+                                        "sstat: error: couldn't get steps for JobId=59298660")
+    assert sstat_steps_gone(gone)
+    out = tick(c, cx, gone)
+    assert "slurm.sstat" in out.handled and not [e for e in out.errors if e.section == "slurm.sstat"]
+    other = result("slurm.sstat", stderr="sstat: error: Socket timed out on send/recv operation")
+    assert not sstat_steps_gone(other)
+    out = tick(c, cx, other)
+    assert "slurm.sstat" not in out.handled and [e for e in out.errors if e.section == "slurm.sstat"]

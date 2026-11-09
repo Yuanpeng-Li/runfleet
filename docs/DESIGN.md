@@ -1156,6 +1156,7 @@ class Section:
     timeout: float = 15.0        # remote `timeout -k 2 <t>` when available
     requires: tuple[str, ...] = ()           # tools that must exist (`command -v`), else MISSING
     late: bool = False           # rendered after all non-late sections (may hang in D state: nvidia.*)
+    advisory: bool = False       # failure shown on the section, never makes the host DEGRADED (§4.4)
     meta: Mapping[str, object] = field(default_factory=dict)   # structured args for Fake/Demo transports (Appendix A)
     max_stdout: int = 8_000_000  # client-side truncation guard
 
@@ -2200,6 +2201,20 @@ Notes that matter:
 - A transport failure is: ssh rc 255 with a classified stderr, a spawn error, or a local timeout **before any section
   end marker** (§4.2 partial rule). Section failures and partial timeouts never touch the transport backoff; they back
   off their own cadence group (×2 up to `Cadence.max_backoff`) and set `DEGRADED` with the error per section.
+- **Advisory sections** (`Section.advisory`): their failure is kept on the section (host detail, `e`) and backs off
+  their group, but never makes the host `DEGRADED` — extra information whose loss does not make the jobs, accounting,
+  usage or nodes wrong: `slurm.logstat` / `process.logstat` (a stalled shared file system can hold `stat` for minutes),
+  `slurm.sprio`/`sshare`, the periodic `slurm.acct_*`, `slurm.occupants`/`names`.
+- **Retiring stale failures** (`HostPoller._retired`): a failed section's status is replaced only when it runs again,
+  and a conditional section may never run again once its cause is gone. A failed status is therefore dropped when
+  every group that ever planned it left the cadences (no own job pending: `slurm.priority`; the host detail closed:
+  `slurm.occupants` — not `slurm.sinfo`, which `slurm.nodes` plans too), or when the groups left that plan it are
+  event groups that have not run it for `EVENT_RETIRE_S` = 15 min (a vanished job resolved by the accounting window,
+  a job that left squeue before its scontrol retry; retries of a live cause refresh the error). A group that is due
+  but plans nothing keeps its failures (a collector may hold a failing section back on purpose: nvidia-smi hung, GPU
+  polling paused 5 min), and nothing is dropped while the collector's `cadences()` / `sections()` raised. A retired
+  section's last success is kept for when it fails again. Each section that starts or stops failing is logged once
+  (runfleet.log) with its outcome, rc, time and stderr.
 - `NEEDS_AUTH`/`HOSTKEY` stop polling. A manual `r` makes exactly one more BatchMode attempt (`prepare(force=True)`:
   the 30 s master throttle does not swallow it). `c` runs the interactive
   connect (§4.6), then `after_connect()` → `CONNECTING`.
@@ -2660,7 +2675,7 @@ def choose_profile(caps: Capabilities, host: HostConfig) -> tuple[str, ...]: ...
 | `slurm.usage` (interval) | `slurm.sstat` | 60 s / 30 s / ×3 / ×0.5 (≥ `JobAcctGatherFrequency`) | ≥ 1 own RUNNING job; ≤ 20 ids, most recently started first |
 | `slurm.history` (interval) | `slurm.sacct` | 120 s / 60 s / ×3 / ×1 | always (incremental window) |
 | `slurm.vanished` (event) | `slurm.sacct_ids` | — | ids that left squeue and are not yet terminal in history |
-| `slurm.logstat` (interval) | `slurm.logstat` | 120 s / 60 s / ×3 / ×0.5 | RUNNING jobs with a known stdout path (≤ 30) |
+| `slurm.logstat` (interval) | `slurm.logstat` | 120 s / 60 s / ×3 / ×0.5 | RUNNING jobs with a known stdout path (≤ 30); late and advisory; skipped (stderr only) while an earlier `stat` of the user still hangs; a `:` no-op once no job is left to stat |
 | `slurm.nodes` (interval) | `slurm.sinfo` | 120 s / 60 s / ×5 / ×1 | partitions known: config `partitions`, else partitions of the user's jobs (live + history) ∪ non-empty association partitions ∪ `caps.gpu_partitions` (GPU partitions you may use but have not used lately, e.g. a lab's paid partition) |
 | `slurm.occupants` (interval, **focused only**) | `slurm.sinfo` + `slurm.occupants` | 30 s / 30 s / — / ×1 | the host's detail screen (or a job detail on it) is open and partitions are known; not after the squeue `-o` fallback (§5.2.9) |
 | `slurm.names` (event) | `slurm.names` | — | users in the last `slurm.occupants` reading never looked up (≤ 200 per probe) |
@@ -3411,7 +3426,7 @@ follow `latest`, never propose another resubmit.
 | `procfs.host` (interval on workstations) | `procfs.host` (procfs) | 5 s / 2 s / ×3 / ×1 | see below |
 | `process.ps` (interval) | `process.ps` (process) | 10 s / 5 s / ×3 / ×0.5 | `date +%s; ps -ww -u "$(id -un)" -o pid=,ppid=,pgid=,etimes=,pcpu=,pmem=,rss=,stat=,args=` |
 | `process.ps` | `process.fds` (process) | same group, only pids not yet cached | `for p in <pids>; do c=$(readlink /proc/$p/cwd …); o=$(readlink /proc/$p/fd/1 …); e=$(readlink /proc/$p/fd/2 …); printf '%s\|%s\|%s\|%s\n' "$p" "$c" "$o" "$e"; for t in "$o" "$e"; do case "$t" in /dev/*\|*' (deleted)') ;; /*) stat -c '@@stat %n\|%s\|%Y' -- "$t" 2>/dev/null ;; esac; done; done; true` — the `@@stat` lines give new log paths their size/mtime in the same round (a 2-round `snapshot` never reaches `process.logstat`; M3 F9 residual) |
-| `process.logstat` (interval) | `process.logstat` (process) | 60 s / 30 s / ×3 / ×0.5 | `stat -c '%n\|%s\|%Y' -- <task log paths> 2>&1; true` |
+| `process.logstat` (interval) | `process.logstat` (process) | 60 s / 30 s / ×3 / ×0.5 | `stat -L -c '%n\|%s\|%Y' -- <task log paths> 2>&1; true`, skipped while an earlier `stat` of the user still hangs (`util.shell.guarded_logstat`); late and advisory |
 | `process.exitscan` (event) | `process.exitscan` (process) | — | per ended task: `tail -c 8192 -- <stdout> [<stderr>]` (§5.3.2 step 8) |
 
 On a workstation the tick is 5 s; `process.*` groups run every second tick. On a Slurm profile `procfs` declares
@@ -5824,7 +5839,7 @@ the UI. Each row names the detection rule implemented in `transport/classify.py`
 | 28 | MaxSessions / too many sessions | stderr #7; lane limits | — | — | ≤ 3 sessions on a user master, global cap 8, lane drops to 1 on refusal |
 | 29 | Second RunFleet instance | a host's `instance.lock.*` held | — | toast once | none (user decides) |
 | 30 | Unattended for hours | no input for `idle_pause_after` | all hosts paused | header "paused (idle)" | any key/mouse resumes and refreshes |
-| 31 | Account sections fail (Account, §5.2.11) | `slurm.acct_*` outcome / stderr (slurmdbd as #11) | DEGRADED (account) | summary and report keep their last values with ages; one red line in the Account box | `slurm.account` backoff ×2 ≤ 2 h; reports only on demand |
+| 31 | Account sections fail (Account, §5.2.11) | `slurm.acct_*` outcome / stderr (slurmdbd as #11) | section error, advisory: the host stays OK (§4.4) | summary and report keep their last values with ages; one red line in the Account box | `slurm.account` backoff ×2 ≤ 2 h; reports only on demand |
 | 32 | sacct refuses a wide date range (k2) | empty stdout + `Too wide of a date range` on stderr (rc 0 through a pipe → STDERR_ONLY) | report error (REMOTE) | "sacct refused the date range" — never "no jobs" | none needed: chunks are ≤ 30 days; a cluster refusing even those keeps the error |
 
 ---

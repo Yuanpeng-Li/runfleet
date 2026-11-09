@@ -204,8 +204,12 @@ def section_error(r: SectionResult, now: datetime) -> HostError | None:
 
 
 def is_failure(status: SectionStatus) -> bool:
-    """Counts toward DEGRADED and group backoff (a MISSING tool is a capability fact, not a failure)."""
+    """Counts toward group backoff, and toward DEGRADED unless the section is advisory (:attr:`Section.advisory`); a
+    MISSING tool is a capability fact, not a failure."""
     return not status.ok and status.outcome != SectionOutcome.MISSING.value
+
+
+EVENT_RETIRE_S = 900.0   # a failed section of an event group not run again for this long no longer counts (below)
 
 
 class ControllerBackoff:
@@ -253,6 +257,9 @@ class _GroupPlan:
     sections: list[Section] = field(default_factory=list)
     group_of: dict[str, str] = field(default_factory=dict)
     owner_groups: dict[str, set[str]] = field(default_factory=dict)   # collector name -> due groups
+    served: set[str] = field(default_factory=set)       # groups whose collector was asked for sections this tick
+    raised: set[str] = field(default_factory=set)       # ... and raised (nothing is known about their sections)
+    groups: dict[str, str] = field(default_factory=dict)  # every group of the current cadences -> its mode
 
 
 # ======================================================================================= the poller
@@ -287,6 +294,10 @@ class HostPoller:
         self._events: set[str] = set()
         self._forced: set[str] = set()
         self._unplanned: set[str] = set()   # due at the last tick but produced no section (nothing known yet)
+        self._section_groups: dict[str, set[str]] = {}   # section -> every group that planned it (retiring, below)
+        self._retired_last_ok: dict[str, datetime] = {}  # last success of a retired section, kept for its return
+        self._advisory: set[str] = set()           # sections whose failure never makes the host DEGRADED
+        self._cadence_failed: set[str] = set()     # collectors whose cadences() raised at the last call
         self.controller = ControllerBackoff()
         self._visibility = Visibility.VISIBLE
         self._multiplier = 1.0
@@ -552,6 +563,7 @@ class HostPoller:
     # ------------------------------------------------------------ cadence arithmetic
     def _cadences(self, ctx: HostContext) -> dict[str, list[Cadence]]:
         out: dict[str, list[Cadence]] = {}
+        self._cadence_failed = set()
         for c in self.profile:
             try:
                 focused = self._visibility is Visibility.FOCUSED
@@ -559,6 +571,7 @@ class HostPoller:
             except Exception as e:
                 self._internal_error(e, collector=c.name)
                 out[c.name] = []
+                self._cadence_failed.add(c.name)
         return out
 
     def _host_factor(self) -> float:
@@ -654,17 +667,21 @@ class HostPoller:
         return self.clock.now() + timedelta(seconds=max(0.0, mono - self.clock.monotonic()))
 
     # ------------------------------------------------------------ one tick
-    def _plan(self, due: Mapping[str, set[str]], ctx: HostContext) -> _GroupPlan:
+    def _plan(self, due: Mapping[str, set[str]], ctx: HostContext,
+              cadences: Mapping[str, list[Cadence]] | None = None) -> _GroupPlan:
         plan = _GroupPlan()
+        plan.groups = {c.group: c.mode for cs in (cadences or {}).values() for c in cs}
         for c in self.profile:
             groups = due.get(c.name, set())
             if not groups:
                 continue
             plan.owner_groups[c.name] = set(groups)
             for g in sorted(groups):
+                plan.served.add(g)
                 try:
                     secs = c.sections(frozenset({g}), ctx)
                 except Exception as e:
+                    plan.raised.add(g)
                     self._internal_error(e, collector=c.name)
                     continue
                 for s in secs:
@@ -676,6 +693,11 @@ class HostPoller:
                         continue
                     plan.group_of[s.name] = g
                     plan.sections.append(s)
+                    self._section_groups.setdefault(s.name, set()).add(g)
+                    if s.advisory:
+                        self._advisory.add(s.name)
+                    else:
+                        self._advisory.discard(s.name)
         return plan
 
     async def poll_tick(self, *, anchor: bool = False, force_all: bool = False) -> None:
@@ -691,7 +713,7 @@ class HostPoller:
             self._schedule_next(now_m, tick, anchor=anchor)
             return
         served = {g for gs in due.values() for g in gs}
-        plan = self._plan(due, ctx)
+        plan = self._plan(due, ctx, cadences)
         self._unplanned = served - set(plan.group_of.values())
         results: Mapping[str, SectionResult] = {}
         received = now
@@ -818,6 +840,7 @@ class HostPoller:
                          errors: Sequence[HostError], now: datetime, *, probed: bool = True,
                          handled: frozenset[str] = frozenset()) -> None:
         prev = dict(self.status.sections)
+        old_sections = self.status.sections
         by_section = {e.section: e for e in errors if e.section}
         host_errors = [e for e in errors if not e.section]
         failed_groups: set[str] = set()
@@ -825,19 +848,25 @@ class HostPoller:
             ok = (r.ok or name in handled) and name not in by_section    # handled: an answer, not a failure
             err = None if ok else by_section.get(name) or section_error(r, now)
             old = prev.get(name)
+            before = old.last_ok if old is not None else self._retired_last_ok.get(name)
             st = SectionStatus(name=name, outcome=r.outcome.value, ok=ok, rc=r.rc, ms=r.ms,
-                               last_ok=now if ok else (old.last_ok if old else None), error=None if ok else err)
+                               last_ok=now if ok else before, error=None if ok else err)
+            self._retired_last_ok.pop(name, None)
             prev[name] = st
             if is_failure(st) and name in plan.group_of:
                 failed_groups.add(plan.group_of[name])
         for name, err in by_section.items():      # errors about sections that did not run this tick
             if name not in results and name in prev:
                 prev[name] = dataclasses.replace(prev[name], ok=False, error=err)
+        for name in self._retired(prev, results, by_section, plan, now):
+            if (gone := prev.pop(name).last_ok) is not None:
+                self._retired_last_ok[name] = gone      # a failure that comes back still says when it last worked
+        self._log_changes(old_sections, prev)
         ran = {plan.group_of[n] for n in results if n in plan.group_of}
         for g in ran - failed_groups:
             self._group_fail.pop(g, None)
         self._back_off(failed_groups)
-        failing = [s for s in prev.values() if is_failure(s)]
+        failing = [s for s in prev.values() if is_failure(s) and s.name not in self._advisory]
         degraded = bool(failing or host_errors)
         error = host_errors[0] if host_errors else (failing[0].error if failing else None)
         changes: dict[str, object] = {"state": ConnState.DEGRADED if degraded else ConnState.OK, "error": error,
@@ -845,6 +874,52 @@ class HostPoller:
         if probed:                     # last_ok = last time the host actually answered
             changes["last_ok"] = now
         self._publish(**changes)
+
+    def _retired(self, prev: Mapping[str, SectionStatus], results: Mapping[str, SectionResult],
+                 by_section: Mapping[str, HostError], plan: _GroupPlan, now: datetime) -> list[str]:
+        """Failed sections whose cause is gone and that will not run again to say so. A failed status is replaced only
+        when its section runs again, and a conditional section may never run again: it is dropped when every group
+        that ever planned it left the cadences (no own job pending any more: `slurm.priority`; the host detail closed:
+        `slurm.occupants` — not `slurm.sinfo`, which `slurm.nodes` plans too), or when the groups left that plan it are
+        event groups that have not run it for :data:`EVENT_RETIRE_S` (the vanished job was resolved by the accounting
+        window, the job left squeue before its scontrol retry; retries of a live cause refresh the error). A group
+        that is due but plans nothing keeps its failures: a collector may hold a failing section back on purpose
+        (nvidia-smi hung: GPU polling paused for 5 min). Nothing is dropped while the collector's cadences() or
+        sections() raised. Without this the host stayed DEGRADED until a restart."""
+        if not plan.groups:
+            return []
+        out = []
+        for name, st in prev.items():
+            if not is_failure(st) or name in results or name in by_section:
+                continue
+            groups = self._section_groups.get(name)
+            if not groups or groups & plan.raised or name.split(".", 1)[0] in self._cadence_failed:
+                continue
+            live = [g for g in groups if g in plan.groups]
+            if not live:
+                out.append(name)
+            elif (all(plan.groups[g] == "event" for g in live) and st.error is not None and st.error.at is not None
+                  and (now - st.error.at).total_seconds() >= EVENT_RETIRE_S):
+                out.append(name)
+        return out
+
+    def _log_changes(self, old: Mapping[str, SectionStatus], new: Mapping[str, SectionStatus]) -> None:
+        """One log line per section that starts or stops failing (runfleet.log): what failed, how, for how long."""
+        for name, st in new.items():
+            was = old.get(name)
+            if is_failure(st) and (was is None or not is_failure(was) or was.error != st.error):
+                if was is not None and is_failure(was) and was.outcome == st.outcome:
+                    continue                                  # the same failure again: logged once
+                err = st.error
+                detail = " ".join((err.detail if err is not None else "").split())[:300]
+                log.info("%s: %s %s%s (rc %s, %s ms)%s%s", self.name, name, st.outcome,
+                         " [advisory]" if name in self._advisory else "", st.rc, st.ms,
+                         f": {err.summary}" if err is not None else "", f" — {detail}" if detail else "")
+            elif was is not None and is_failure(was) and not is_failure(st):
+                log.info("%s: %s ok again", self.name, name)
+        for name, was in old.items():
+            if name not in new and is_failure(was):
+                log.info("%s: %s no longer runs: its %s is dropped", self.name, name, was.outcome)
 
     def _back_off(self, groups: Iterable[str]) -> None:
         for g in groups:

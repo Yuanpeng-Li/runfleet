@@ -24,6 +24,8 @@ class Section:
     timeout: float = 15.0        # remote `timeout -k 2 <t>` when available
     requires: tuple[str, ...] = ()           # tools that must exist (`command -v`), else MISSING
     late: bool = False           # rendered after all non-late sections (may hang in D state: nvidia.*)
+    advisory: bool = False       # its failure is shown on the section but never makes the host DEGRADED: extra
+                                 # information (log sizes, priority, account, the detail's occupants), not the jobs
     meta: Mapping[str, object] = field(default_factory=dict)   # structured args for Fake/Demo transports (Appendix A)
     max_stdout: int = 8_000_000  # client-side truncation guard
 

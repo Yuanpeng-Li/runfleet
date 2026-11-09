@@ -282,16 +282,16 @@ class SlurmCollector(SchedulerCollector):
         out: list[Section] = []
         if not tools or "sshare" in tools:
             out.append(Section("slurm.acct_share", cmds.acct_share_cmd(names), timeout=15, requires=("sshare",),
-                               max_stdout=cmds.ACCT_SHARE_MAX_STDOUT, meta={"accounts": names}))
+                               max_stdout=cmds.ACCT_SHARE_MAX_STDOUT, meta={"accounts": names}, advisory=True))
         self._acct_no_sreport = bool(tools) and "sreport" not in tools
         if not self._acct_no_sreport:
             days = WINDOW_DAYS.get(ctx.general.usage_window, 30)
             out.append(Section("slurm.acct_sreport", cmds.acct_sreport_cmd(names, f"now-{days}days", totals=False),
                                timeout=20, requires=("sreport",), max_stdout=cmds.ACCT_SREPORT_MAX_STDOUT,
-                               meta={"accounts": names, "days": days}))
+                               meta={"accounts": names, "days": days}, advisory=True))
         if "sbank" in tools and (self._acct_sbank_at is None or ctx.now - self._acct_sbank_at >= SBANK_PERIOD):
             out.append(Section("slurm.acct_sbank", cmds.acct_sbank_cmd(names), timeout=20, requires=("sbank",),
-                               max_stdout=cmds.ACCT_SBANK_MAX_STDOUT, meta={"accounts": names}))
+                               max_stdout=cmds.ACCT_SBANK_MAX_STDOUT, meta={"accounts": names}, advisory=True))
         return out
 
     def _priority_sections(self, ctx: HostContext) -> list[Section]:
@@ -302,9 +302,9 @@ class SlurmCollector(SchedulerCollector):
         out = []
         if not tools or "sprio" in tools:
             out.append(Section("slurm.sprio", cmds.SPRIO_CMD, timeout=15, requires=("sprio",),
-                               max_stdout=cmds.SPRIO_MAX_STDOUT, meta={"format": cmds.SPRIO_FORMAT}))
+                               max_stdout=cmds.SPRIO_MAX_STDOUT, meta={"format": cmds.SPRIO_FORMAT}, advisory=True))
         if prio.settings(ctx.caps.slurm_config).weight("fairshare") > 0 and (not tools or "sshare" in tools):
-            out.append(Section("slurm.sshare", cmds.SSHARE_CMD, timeout=15, requires=("sshare",),
+            out.append(Section("slurm.sshare", cmds.SSHARE_CMD, timeout=15, requires=("sshare",), advisory=True,
                                max_stdout=cmds.SSHARE_MAX_STDOUT, meta={"fields": cmds.SSHARE_FIELDS.split(",")}))
         return out
 
@@ -420,10 +420,13 @@ class SlurmCollector(SchedulerCollector):
                 return None
             # The last running job ended: no log is left to stat. An empty success (a shell no-op, like sstat's)
             # replaces the last logstat outcome, so an old timeout does not keep an idle host degraded for good.
-            return Section("slurm.logstat", ":", timeout=1, meta={"paths": []})
+            return Section("slurm.logstat", ":", timeout=1, meta={"paths": []}, advisory=True)
         self._logstat_ran = True
+        # Log sizes are extra information: a stall of the file system the logs are on (a parallel file system can
+        # hold stat for minutes) must not make the whole host DEGRADED. Late: a stat stuck in D state cannot hold up
+        # the Slurm sections of the same probe.
         return Section("slurm.logstat", cmds.logstat_cmd(valid), timeout=10, requires=("stat",),
-                       meta={"paths": valid})
+                       meta={"paths": valid}, advisory=True, late=True)
 
     def partitions(self, ctx: HostContext) -> list[str]:
         """sinfo scope (§5.2.1): config `partitions`, else partitions of the user's jobs (live + history) ∪ non-empty
@@ -465,7 +468,7 @@ class SlurmCollector(SchedulerCollector):
         if len(nodes) > cmds.MAX_OCCUPANT_NODES:
             nodes = []
         sep = self._occ_sep = self._sep["squeue"]
-        return [sinfo, Section("slurm.occupants", cmds.occupants_cmd(nodes, parts, sep), timeout=20,
+        return [sinfo, Section("slurm.occupants", cmds.occupants_cmd(nodes, parts, sep), timeout=20, advisory=True,
                                requires=("squeue",), meta={"nodes": nodes, "partitions": parts, "sep": sep})]
 
     def _unnamed(self) -> list[str]:
@@ -476,7 +479,7 @@ class SlurmCollector(SchedulerCollector):
         users = self._names_asked = self._unnamed()
         if not users:
             return None
-        return Section("slurm.names", cmds.names_cmd(users), timeout=10, requires=("getent",),
+        return Section("slurm.names", cmds.names_cmd(users), timeout=10, requires=("getent",), advisory=True,
                        meta={"users": users})
 
     # ------------------------------------------------------------ ingest
@@ -507,6 +510,8 @@ class SlurmCollector(SchedulerCollector):
         if self._ingest_occupants(results, ctx, errors) and self._unnamed():
             followups.add("slurm.names")
         handled = self._ingest_priority(results, ctx, errors)
+        if (r := results.get("slurm.sstat")) is not None and sstat_steps_gone(r):
+            handled |= {r.name}                            # every sampled job ended since squeue: an answer
         account = self._ingest_account(results, ctx, errors)
         if self._nodes is not None and ({"slurm.sinfo", "slurm.occupants", "slurm.names"} & set(results)):
             nodes = self._nodes_now(ctx)
@@ -645,7 +650,7 @@ class SlurmCollector(SchedulerCollector):
         if r is None:
             return {}
         now = ctx.now
-        if not r.ok:
+        if not r.ok and not sstat_steps_gone(r):
             errors.append(_err(r, now))
         if not usable(r):
             return {}
@@ -1523,6 +1528,17 @@ _NODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 
 def _valid_path(p: str) -> bool:
     return p.startswith("/") and "\x00" not in p and "\n" not in p
+
+
+_NO_STEPS = re.compile(r"^sstat: error: couldn't get steps for JobId=\S+$")
+
+
+def sstat_steps_gone(r: SectionResult) -> bool:
+    """sstat printed nothing but "couldn't get steps for JobId=N" for every job it was asked about: they all ended
+    between squeue and sstat (frequent where jobs are preempted). An answer (no usage), not a failure of the host."""
+    lines = [x.strip() for x in r.stderr.splitlines() if x.strip()]
+    return (r.outcome is SectionOutcome.STDERR_ONLY and not r.stdout.strip() and bool(lines)
+            and all(_NO_STEPS.match(x) for x in lines))
 
 
 def _err(r: SectionResult, at: datetime) -> HostError:
