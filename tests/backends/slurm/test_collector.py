@@ -870,7 +870,7 @@ def test_extra_information_sections_are_advisory() -> None:
 
 
 def test_sstat_of_jobs_that_all_ended_is_an_answer() -> None:
-    """hpc3 (preemptions): every job sstat was asked about ended since squeue; sstat printed only "couldn't get
+    """A cluster that preempts often: every job sstat was asked about ended since squeue; sstat printed only "couldn't get
     steps" on stderr. That is no usage, not a failure of the host."""
     from runfleet.backends.slurm.collector import sstat_steps_gone
 

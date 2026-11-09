@@ -74,7 +74,7 @@ STAT_BUSY = "runfleet: an earlier stat of these logs is still running (slow file
 
 def guarded_logstat(quoted_paths: str) -> str:
     """`stat -L -c '%n|%s|%Y' -- <paths>`, skipped (one stderr line, no stdout: a failure of the section) while a
-    stat of an earlier run by the same user still hangs. A stalled file system (hpc3's BeeGFS /pub) holds stat in D
+    stat of an earlier run by the same user still hangs. A stalled (parallel) file system holds stat in D
     state, which survives `timeout -k`; without the guard every retry would add one more stuck process on a shared
     login node. `ps -o args=` is POSIX; if ps fails the stat runs as before."""
     return ("if ps -u \"$(id -u)\" -o args= 2>/dev/null | grep -q '^ *stat -L -c %n|%s|%Y '; then echo "

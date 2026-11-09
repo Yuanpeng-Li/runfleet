@@ -626,7 +626,7 @@ async def test_finished_job_sstat_error_does_not_leave_idle_host_degraded(histor
 
 
 async def test_logstat_timeout_does_not_outlive_the_last_running_job() -> None:
-    """User report (hpc3 stayed "degraded · slurm.logstat timed out" for hours): a logstat timed out while a job
+    """User report (a cluster stayed "degraded · slurm.logstat timed out" for hours): a logstat timed out while a job
     ran; the job ended, no log was left to stat, the section was no longer planned and its old timeout was kept
     forever. With nothing to stat the group now runs a no-op that replaces it, and no Slurm or stat command runs.
     (Since 0.9.3 a logstat failure no longer makes the host DEGRADED at all; the section's own status still has to
@@ -784,7 +784,7 @@ def _timeout(t: FakeTransport, name: str) -> None:
 
 
 async def test_an_advisory_section_failing_never_makes_the_host_degraded() -> None:
-    """hpc3: the BeeGFS /pub hung `stat` for minutes; log sizes are extra information, not the jobs. The failure is
+    """A stalled file system held the log `stat` for minutes; log sizes are extra information, not the jobs. The failure is
     kept on the section (host detail, `e`) and its group still backs off, but the host stays OK."""
     p, t, clock = _extra_rig()
     _timeout(t, "slurm.logstat")

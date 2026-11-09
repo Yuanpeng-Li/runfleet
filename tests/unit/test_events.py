@@ -196,7 +196,7 @@ def seg(jid: str, state: JobState, *, submit: float, name: str = "orb-swp--train
         end: datetime | None = None, elapsed: float | None = 600) -> Job:
     """One run of a resubmitted job (same name and workdir), submitted ``submit`` seconds before T0."""
     return dataclasses.replace(job(jid, state, end=end, elapsed=elapsed, raw_state=state.name), name=name,
-                               submit_time=T0 - timedelta(seconds=submit), workdir="/pub/me/orb")
+                               submit_time=T0 - timedelta(seconds=submit), workdir="/scratch/me/orb")
 
 
 PREEMPTED = seg("58717472", JobState.PREEMPTED, submit=9 * 3600, end=T0 - timedelta(minutes=13))

@@ -8,10 +8,9 @@ All notable changes to this project are documented here. The format follows
 ## [0.9.3] - 2026-11-09
 
 ### Fixed
-- **hpc3 no longer shows "degraded" for things that are not wrong with it.** Investigated live: HPC3 does not limit
-  monitoring (no Slurm RPC rate limit, every Slurm command answers in < 50 ms, ssh is never refused). The episodes came
-  from (1) the BeeGFS `/pub` file system the job logs are on, whose `stat` timed out on every try for 40 minutes on
-  end, and (2) failures RunFleet kept after their cause was gone.
+- **A cluster no longer shows "degraded" for things that are not wrong with it.** The cluster did not limit
+  monitoring; the episodes came from (1) the shared file system the job logs are on, whose `stat` timed out on every
+  try for 40 minutes on end, and (2) failures RunFleet kept after their cause was gone.
   - Extra-information sections are now *advisory*: their failure is shown on the section (host detail, `e`) and backs
     off their group, but never makes the host DEGRADED. These are log sizes (`slurm.logstat`), pending-job priority
     (`sprio`/`sshare`), account balances and usage (`slurm.acct_*`) and the host detail's occupants (`occupants`/`names`).

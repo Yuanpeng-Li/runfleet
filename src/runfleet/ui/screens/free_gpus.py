@@ -41,7 +41,7 @@ class FreeTarget:
 
 
 def spot_text(spot: FreeSpot, width: int, *, host_w: int, part_w: int, host_style: str = "") -> Text:
-    """``g2          gpu-preempt      37 free / 76  (2 planned)`` and, under it, the nodes with a free GPU
+    """``k2          gpu-preempt      37 free / 76  (2 planned)`` and, under it, the nodes with a free GPU
     (``gpu-a01 4/8 · gpu-b02 2/4 · +3 more``) or the workstation's free GPUs (``GPU 0, 2``)."""
     head = Text()
     head.append(humanize.truncate(spot.host, host_w).ljust(host_w), style=f"bold {host_style}".strip())

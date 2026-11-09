@@ -24,7 +24,7 @@ def job(jid: str, state: JobState, *, name: str = NAME, host: str = "lyra", subm
         end = (start if start is not None else submit) + 1
     base = Job(key=JobKey(host, jid), kind=JobKind.SLURM, name=name, user="alice07", state=state,
                raw_state=state.name, job_id_raw=jid, submit_time=at(submit), start_time=at(start),
-               end_time=at(end) if state.is_terminal else None, workdir="/pub/alice07/mtl", source="sacct")
+               end_time=at(end) if state.is_terminal else None, workdir="/scratch/alice07/mtl", source="sacct")
     return dataclasses.replace(base, **kw)  # type: ignore[arg-type]
 
 
@@ -131,7 +131,7 @@ def test_other_users_hosts_workdirs_and_kinds_never_link() -> None:
     assert link([old, job("2", JobState.RUNNING, host="k2", **new)]) is EMPTY                       # type: ignore[arg-type]
     assert link([old, job("2", JobState.RUNNING, workdir="/elsewhere", **new)]) is EMPTY            # type: ignore[arg-type]
     assert link([old, job("2", JobState.RUNNING, workdir=None, **new)]).superseded(old.key)         # type: ignore[arg-type]
-    assert link([old, job("2", JobState.RUNNING, workdir="/pub/alice07/mtl/", **new)]).superseded(old.key)  # type: ignore[arg-type]
+    assert link([old, job("2", JobState.RUNNING, workdir="/scratch/alice07/mtl/", **new)]).superseded(old.key)  # type: ignore[arg-type]
     assert link([old, job("2", JobState.RUNNING, kind=JobKind.TASK, **new)]) is EMPTY              # type: ignore[arg-type]
     assert link([old, job("2", JobState.RUNNING, submit=0, start=21)]) is EMPTY                     # same submit time
     assert link([dataclasses.replace(old, submit_time=None), job("2", JobState.RUNNING, **new)]) is EMPTY  # type: ignore[arg-type]

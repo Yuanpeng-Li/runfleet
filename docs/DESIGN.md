@@ -2203,8 +2203,8 @@ Notes that matter:
   off their own cadence group (×2 up to `Cadence.max_backoff`) and set `DEGRADED` with the error per section.
 - **Advisory sections** (`Section.advisory`): their failure is kept on the section (host detail, `e`) and backs off
   their group, but never makes the host `DEGRADED` — extra information whose loss does not make the jobs, accounting,
-  usage or nodes wrong: `slurm.logstat` / `process.logstat` (hpc3's BeeGFS `/pub` hung `stat` for minutes), `slurm.sprio`/`sshare`,
-  the periodic `slurm.acct_*`, `slurm.occupants`/`names`.
+  usage or nodes wrong: `slurm.logstat` / `process.logstat` (a stalled shared file system can hold `stat` for minutes),
+  `slurm.sprio`/`sshare`, the periodic `slurm.acct_*`, `slurm.occupants`/`names`.
 - **Retiring stale failures** (`HostPoller._retired`): a failed section's status is replaced only when it runs again,
   and a conditional section may never run again once its cause is gone. A failed status is therefore dropped when
   every group that ever planned it left the cadences (no own job pending: `slurm.priority`; the host detail closed:
@@ -4247,7 +4247,7 @@ first, then "where it went"; a box that does not fit collapses to its title and 
 ┌ k2 · usage only: no SU limits on this cluster · billing = CPUs (no weights) · usage 2m ago ──────────────────────────┐
 │  ACCOUNT          MY CPU-h    MY GPU-h   MY BILL-h   MY RECENT (decays, half-life 14d)                               │
 │  lab               171,881      15,434     171,881   5,859 billing-h                                                 │
-│  partitions  gpu-preempt · cpu-preempt · tmw (qos ×1 everywhere)                                                     │
+│  partitions  gpu-preempt · cpu-preempt · lab (qos ×1 everywhere)                                                     │
 ├ Where it went · 30d · by experiment · 1,212 jobs · GPU-h ▼ ──────────────────────────────────────────────────────────┤
 │  EXPERIMENT                                   JOBS  RUN    CPU-h    GPU-h  BY MODEL                      BILL-h      │
 │▶ orb-swp--train--cifar-warmup--scratch         640    4   96,210    9,021  3090 6,010 · A100-40G 3,011  96,210       │

@@ -885,28 +885,28 @@ def test_activity_rows_say_resubmitted_and_drop_the_bad_news() -> None:
 
 
 def _many_types() -> fl.FreeGPUs:
-    types = {"3090": fl.TypeFree("3090", 37, 76, where={("g2", "gpu"): [37, 0]}),
-             "H200": fl.TypeFree("H200", 2, 4, where={("g2", "tmw"): [2, 2]}),
-             "MIG slices (g2)": fl.TypeFree("MIG slices", 17, 30, host="g2", where={("g2", "gpu"): [17, 0]}),
-             "A30": fl.TypeFree("A30", 8, 80, where={("hpc3", "gpu"): [8, 0]}),
-             "V100-16G": fl.TypeFree("V100-16G", 6, 6, where={("g2", "gpu"): [6, 0]}),
-             "P100-16G": fl.TypeFree("P100-16G", 1, 1, where={("g2", "gpu"): [1, 0]}),
-             "PRO6000": fl.TypeFree("PRO6000", 1, 6, gpus={"ucsb": [0]})}
+    types = {"3090": fl.TypeFree("3090", 37, 76, where={("k2", "gpu"): [37, 0]}),
+             "H200": fl.TypeFree("H200", 2, 4, where={("k2", "lab"): [2, 2]}),
+             "MIG slices (k2)": fl.TypeFree("MIG slices", 17, 30, host="k2", where={("k2", "gpu"): [17, 0]}),
+             "A30": fl.TypeFree("A30", 8, 80, where={("lyra", "gpu"): [8, 0]}),
+             "V100-16G": fl.TypeFree("V100-16G", 6, 6, where={("k2", "gpu"): [6, 0]}),
+             "P100-16G": fl.TypeFree("P100-16G", 1, 1, where={("k2", "gpu"): [1, 0]}),
+             "PRO6000": fl.TypeFree("PRO6000", 1, 6, gpus={"lynx": [0]})}
     return fl.FreeGPUs(types, (), 60.0)
 
 
 def test_free_region_gives_every_other_type_a_row_when_there_is_room() -> None:
-    """User report: `also free` was one line cut at the panel's edge, so ucsb's one free PRO6000 (the last, fewest
+    """User report: `also free` was one line cut at the panel's edge, so lynx's one free PRO6000 (the last, fewest
     free) never showed. Each other type now gets its own clickable row."""
     free = _many_types()
     mine = {"3090", "H200"}
     assert fl.free_needed(free, mine) == 1 + 2 + 1 + 5
-    lines, keys = fl.free_region(free, mine, 9, 60, wide=False, host_order=["g2", "hpc3", "ucsb"])
+    lines, keys = fl.free_region(free, mine, 9, 60, wide=False, host_order=["k2", "lyra", "lynx"])
     plain = [x.plain.rstrip() for x in lines]
     assert plain[3].strip() == "also free" and keys[3] == fl.ALL_FREE
     assert keys[0] == fl.ALL_FREE and keys[1:3] == ["3090", "H200"]
-    assert keys[4:] == ["MIG slices (g2)", "A30", "V100-16G", "P100-16G", "PRO6000"]
-    assert "ucsb 1" in plain[-1] and plain[-1].strip().startswith("PRO6000")
+    assert keys[4:] == ["MIG slices (k2)", "A30", "V100-16G", "P100-16G", "PRO6000"]
+    assert "lynx 1" in plain[-1] and plain[-1].strip().startswith("PRO6000")
     assert all(x.cell_len <= 60 for x in lines)
 
 
@@ -948,11 +948,11 @@ def test_free_spots_add_up_to_the_panel_counts() -> None:
 
 def test_packed_others_never_cut_the_more_count_after_a_wide_item() -> None:
     """Codex review: a MIG bucket of a long host name filled the last line, then `+1 more` was cut off with it."""
-    types = {"H200": fl.TypeFree("H200", 2, 4, where={("g2", "tmw"): [2, 0]}),
+    types = {"H200": fl.TypeFree("H200", 2, 4, where={("k2", "lab"): [2, 0]}),
              "MIG slices (a-very-long-cluster-hostname)": fl.TypeFree(
                  "MIG slices", 17, 30, host="a-very-long-cluster-hostname",
                  where={("a-very-long-cluster-hostname", "gpu"): [17, 0]}),
-             "PRO6000": fl.TypeFree("PRO6000", 1, 2, gpus={"ucsb": [0]})}
+             "PRO6000": fl.TypeFree("PRO6000", 1, 2, gpus={"lynx": [0]})}
     lines = fl.free_lines(fl.FreeGPUs(types, (), None), {"H200"}, 3, 52, wide=False)
     assert len(lines) == 3 and lines[2].plain.rstrip().endswith("+1 more"), lines[2].plain
     assert all(x.cell_len <= 52 for x in lines)

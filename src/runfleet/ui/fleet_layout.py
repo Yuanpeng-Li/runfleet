@@ -1114,7 +1114,7 @@ def free_region(free: FreeGPUs, mine: set[str], rows: int, width: int, *, wide: 
 
 
 def _packed_others(others: Sequence[TypeFree], n: int, width: int, prefix: str) -> list[Text]:
-    """``also free MIG slices 17 (g2) · A30 8 · …`` wrapped over at most ``n`` lines (continuations under the first
+    """``also free MIG slices 17 (k2) · A30 8 · …`` wrapped over at most ``n`` lines (continuations under the first
     item); what does not fit ends the last line as ``+N more`` (types), never cut off unseen."""
     items: list[Text] = []
     for t in others:

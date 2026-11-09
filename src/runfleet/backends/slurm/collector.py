@@ -422,8 +422,8 @@ class SlurmCollector(SchedulerCollector):
             # replaces the last logstat outcome, so an old timeout does not keep an idle host degraded for good.
             return Section("slurm.logstat", ":", timeout=1, meta={"paths": []}, advisory=True)
         self._logstat_ran = True
-        # Log sizes are extra information: a stall of the file system the logs are on (hpc3's BeeGFS /pub hung
-        # stat for minutes) must not make the whole host DEGRADED. Late: a stat stuck in D state cannot hold up
+        # Log sizes are extra information: a stall of the file system the logs are on (a parallel file system can
+        # hold stat for minutes) must not make the whole host DEGRADED. Late: a stat stuck in D state cannot hold up
         # the Slurm sections of the same probe.
         return Section("slurm.logstat", cmds.logstat_cmd(valid), timeout=10, requires=("stat",),
                        meta={"paths": valid}, advisory=True, late=True)
@@ -1535,7 +1535,7 @@ _NO_STEPS = re.compile(r"^sstat: error: couldn't get steps for JobId=\S+$")
 
 def sstat_steps_gone(r: SectionResult) -> bool:
     """sstat printed nothing but "couldn't get steps for JobId=N" for every job it was asked about: they all ended
-    between squeue and sstat (hpc3: preemptions). An answer (no usage), not a failure of the host."""
+    between squeue and sstat (frequent where jobs are preempted). An answer (no usage), not a failure of the host."""
     lines = [x.strip() for x in r.stderr.splitlines() if x.strip()]
     return (r.outcome is SectionOutcome.STDERR_ONLY and not r.stdout.strip() and bool(lines)
             and all(_NO_STEPS.match(x) for x in lines))
