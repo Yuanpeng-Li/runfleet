@@ -781,7 +781,7 @@ this shows within minutes.
 | `✖ hostkey` | unknown or changed host key | unknown: `c` lets ssh ask; changed: check it, then `ssh-keygen -R HOST` |
 | `◐ retry 38s` (yellow) | 1–2 failed connection attempts, backing off | nothing; `r` retries now |
 | `✖ unreachable` (red) | 3 failures in a row, or DNS failure; retries every ≤ 5 min | check the network/VPN; `e` shows the ssh error and log |
-| `!` (yellow) | connected, but a part failed (`slurmdbd` down, `nvidia-smi` hung, unparseable output) | the host screen lists the failing parts; the rest keeps updating |
+| `!` (yellow) | connected, but a part failed (`slurmdbd` down, `nvidia-smi` hung, unparseable output) | the host screen lists the failing parts; the rest keeps updating; `r` retries every failing part now |
 | rows marked `~`, dimmed | data older than two refreshes | it refreshes itself; the age is shown |
 
 In a narrow terminal the header shortens chips to `✖lynx:a` or `✖5:a`: `:a` needs auth, `:k` host key, `:d` down, so
@@ -879,7 +879,7 @@ mouse, hold `shift` while dragging (Windows Terminal), or start with `--no-mouse
 | `~/.local/state/runfleet/ui.json` | `%LOCALAPPDATA%\runfleet\ui.json` | view, sort, filter, preset, grouping, saved Jobs views, theme, Fleet card size; watched jobs, GPU watches and the last visit |
 | `~/.local/state/runfleet/runfleet.log` | `%LOCALAPPDATA%\runfleet\runfleet.log` | log (5 MB × 3); `--debug` adds `debug/` raw dumps; lines from `--demo` carry `[demo]` |
 | `~/.local/state/runfleet/bundles/` | `%LOCALAPPDATA%\runfleet\bundles\` | support bundles from the copy menu (`HOST-ID.md`, secrets scrubbed) |
-| `~/.local/state/runfleet/ssh-HOST.log` | `%LOCALAPPDATA%\runfleet\ssh-HOST.log` | ssh's own messages when making a connection |
+| `~/.local/state/runfleet/ssh-HOST.log` | `%LOCALAPPDATA%\runfleet\ssh-HOST.log` | ssh's own messages when making a connection (`.1`: the attempt before) |
 | `$XDG_RUNTIME_DIR/runfleet/` | `%LOCALAPPDATA%\runfleet\Cache\cm\` | RunFleet-managed ssh master sockets (none on Windows: one ssh login per host instead), per-host instance locks |
 
 The state directory is private (0700, files 0600) whatever your umask: it holds job names, paths and command lines.

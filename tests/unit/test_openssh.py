@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
@@ -13,7 +15,7 @@ from runfleet.models import ErrorKind
 from runfleet.probe import framing
 from runfleet.probe.section import Section, SectionOutcome
 from runfleet.sshconfig import SshSettings, parse_ssh_g
-from runfleet.transport import make_transport, mux
+from runfleet.transport import make_transport, mux, openssh
 from runfleet.transport.base import RunResult
 from runfleet.transport.local import LocalTransport
 from runfleet.transport.openssh import OpenSSHTransport
@@ -323,6 +325,186 @@ async def test_busy_socket_blocks_creation(fake_ssh: Path, tmp_path: Path, monke
     err = await t.prepare()
     assert err is not None and err.kind is ErrorKind.MUX and "not answering" in err.summary
     assert sock.exists() and "-fN" not in [c[0] for c in calls(tmp_path)]
+
+
+@pytest.mark.posix                # fake ssh shell script
+async def test_user_retry_replaces_a_managed_master_that_does_not_answer(
+        fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """User report (a managed master through a jump host hung): every automatic attempt said "ssh master not
+    answering" until two probes timed out, and `r` did not help. A user retry (`prepare(force=True)`: `r`, after
+    connect) now replaces our own master, like `c` does; an automatic attempt still leaves it alone."""
+    monkeypatch.setattr(openssh, "_pids_with_args", _no_pids)
+    monkeypatch.setattr(openssh, "_detached_ssh_with", _no_pids)
+    use_g(tmp_path, monkeypatch, G_LYRA)
+    t = transport(fake_ssh, tmp_path, HostConfig("lyra", "lyra"))
+    await t.resolve()
+    sock = Path(t.rendered_control_path or "")
+    sock.write_text("")
+    (tmp_path / "busy").write_text("")                                  # the socket is there, the master hangs
+    err = await t.prepare()
+    assert err is not None and "not answering" in err.summary and "-fN" not in [c[0] for c in calls(tmp_path)]
+    assert await t.prepare(force=True) is None
+    ops = [c[:2] for c in calls(tmp_path) if c[0] in ("-O", "-fN")]
+    assert ops[-3:] == [["-O", "check"], ["-fN", "-o"], ["-O", "check"]]
+    assert ["-O", "exit"] not in ops                                    # it just failed -O check: no 3 s wait again
+    assert not sock.exists()                                            # the hung master's socket is gone
+
+
+@pytest.mark.posix                # fake ssh shell script
+async def test_concurrent_forced_attempts_make_one_master(fake_ssh: Path, tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch,
+                                                          caplog: pytest.LogCaptureFixture) -> None:
+    """Review: the poller's cycle and an on-demand probe (or a second `r`) both forcing an attempt started two `ssh
+    -fN` logins racing for the socket. Attempts are serialized; the one that waited finds the new master."""
+    monkeypatch.setattr(openssh, "_pids_with_args", _no_pids)
+    monkeypatch.setattr(openssh, "_detached_ssh_with", _no_pids)
+    use_g(tmp_path, monkeypatch, G_LYRA)
+    t = transport(fake_ssh, tmp_path, HostConfig("lyra", "lyra"))
+    await t.resolve()
+    Path(t.rendered_control_path or "").write_text("")
+    (tmp_path / "busy").write_text("")
+    assert await asyncio.gather(t.prepare(force=True), t.prepare(force=True)) == [None, None]
+    assert [c[0] for c in calls(tmp_path)].count("-fN") == 1
+    assert sum("restarting it" in r.getMessage() for r in caplog.records) == 1
+
+
+@pytest.mark.posix                # fake ssh shell script, flock
+async def test_master_attempts_wait_for_another_runfleet(fake_ssh: Path, tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review: two RunFleets share a managed socket (the instance lock only warns). While one makes or resets the
+    master, the other's attempt waits on a file lock, then finds the new master instead of resetting it."""
+    from runfleet.util import platform as plat
+
+    use_g(tmp_path, monkeypatch, G_LYRA)
+    t = transport(fake_ssh, tmp_path, HostConfig("lyra", "lyra"))
+    other = transport(fake_ssh, tmp_path, HostConfig("lyra", "lyra"))
+    await t.resolve()
+    await other.resolve()
+    _, held = await other._lock_across_processes()                         # the other RunFleet is making the master
+    assert held is not None
+    try:
+        attempt = asyncio.ensure_future(t.prepare(force=True))
+        await asyncio.sleep(0.5)
+        assert not attempt.done() and "-fN" not in [c[0] for c in calls(tmp_path)]
+        (tmp_path / "master").write_text("")                            # … and it made it
+    finally:
+        plat.unlock(held)
+        os.close(held)
+    assert await attempt is None and "-fN" not in [c[0] for c in calls(tmp_path)]
+
+
+@pytest.mark.posix                # fake ssh shell script, flock
+async def test_connect_rechecks_after_a_recovery_it_waited_for(fake_ssh: Path, tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review: `c` while a forced attempt was replacing a hung master saw the old failure, waited, then reset the
+    healthy new master. The check and the reset now happen together under the master lock."""
+    from runfleet.util import platform as plat
+
+    use_g(tmp_path, monkeypatch, G_LYRA)
+    t = transport(fake_ssh, tmp_path, HostConfig("lyra", "lyra"))
+    await t.resolve()
+    sock = Path(t.rendered_control_path or "")
+    sock.write_text("")
+    (tmp_path / "busy").write_text("")                                  # hung, as the recovery starts
+    other = transport(fake_ssh, tmp_path, HostConfig("lyra", "lyra"))   # another RunFleet, mid-attempt
+    await other.resolve()
+    _, held = await other._lock_across_processes()
+    assert held is not None
+    try:
+        connect = asyncio.ensure_future(t.before_connect())
+        await asyncio.sleep(0.5)
+        assert not connect.done()
+        (tmp_path / "master").write_text("")                            # the recovery made a new master
+    finally:
+        plat.unlock(held)
+        os.close(held)
+    assert await connect is True and sock.exists()                      # already connected: nothing reset
+
+
+@pytest.mark.posix                # fake ssh shell script, flock
+async def test_a_stuck_master_lock_is_not_waited_for_forever(fake_ssh: Path, tmp_path: Path,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """A RunFleet suspended (ctrl+z) in the middle of an attempt keeps its lock. The others stop waiting after
+    connect_timeout + MASTER_LOCK_SLACK but do not act without the lock (review: the holder may resume and stop a
+    master made meanwhile): the attempt reports busy, a reset does nothing, and the next try goes through."""
+    from runfleet.util import platform as plat
+
+    use_g(tmp_path, monkeypatch, G_LYRA)
+    monkeypatch.setattr(openssh, "MASTER_LOCK_SLACK", 0.0)
+    monkeypatch.setattr(openssh, "_pids_with_args", _no_pids)
+    monkeypatch.setattr(openssh, "_detached_ssh_with", _no_pids)
+    t = transport(fake_ssh, tmp_path, HostConfig("lyra", "lyra", connect_timeout=1))
+    await t.resolve()
+    sock = Path(t.rendered_control_path or "")
+    sock.write_text("")
+    (tmp_path / "busy").write_text("")                                  # hung: a forced attempt would reset it
+    other = transport(fake_ssh, tmp_path, HostConfig("lyra", "lyra"))   # another RunFleet, stopped mid-attempt
+    await other.resolve()
+    _, held = await other._lock_across_processes()
+    assert held is not None
+    try:
+        err = await asyncio.wait_for(t.prepare(force=True), timeout=5)
+        assert err is not None and err.kind is ErrorKind.MUX and "another RunFleet" in err.summary
+        assert await asyncio.wait_for(t.reset_if_wedged(), timeout=5) is False
+        await asyncio.wait_for(t.reset_master(), timeout=5)
+        assert sock.exists() and "-fN" not in [c[0] for c in calls(tmp_path)]
+        assert not any(c[:2] == ["-O", "exit"] for c in calls(tmp_path))
+    finally:
+        plat.unlock(held)
+        os.close(held)
+    assert await t.prepare(force=True) is None                          # lock free: the forced attempt runs
+    assert [c[0] for c in calls(tmp_path)].count("-fN") == 1
+
+
+@pytest.mark.posix                # fake ssh shell script
+async def test_reset_if_wedged_spares_a_socket_replaced_during_the_check(
+        fake_ssh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two RunFleets share a managed master: if the other one replaced it while our `-O check` waited, ours must not
+    stop the new master on the strength of the old one's failed check."""
+    use_g(tmp_path, monkeypatch, G_LYRA)
+    t = transport(fake_ssh, tmp_path, HostConfig("lyra", "lyra"))
+    await t.resolve()
+    sock = Path(t.rendered_control_path or "")
+    sock.write_text("")
+    (tmp_path / "busy").write_text("")
+    check = t.check_master
+
+    async def replaced_meanwhile() -> bool:
+        ok = await check()
+        sock.unlink()
+        sock.write_text("")                                             # the other RunFleet's new master
+        return ok
+
+    monkeypatch.setattr(t, "check_master", replaced_meanwhile)
+    assert await t.reset_if_wedged() is False
+    assert sock.exists() and not any(c[:2] == ["-O", "exit"] for c in calls(tmp_path))
+    monkeypatch.setattr(t, "check_master", check)
+    monkeypatch.setattr(openssh, "_pids_with_args", _no_pids)
+    monkeypatch.setattr(openssh, "_detached_ssh_with", _no_pids)
+    assert await t.reset_if_wedged() is True and not sock.exists()      # still hung on a second look: stopped
+
+
+async def _no_pids(*args: object) -> list[int]:
+    """Stands in for the `ps` lookups of reset_master: never signal a real process from a test."""
+    return []
+
+
+@pytest.mark.posix                # fake ssh shell script
+async def test_ssh_log_keeps_the_previous_attempt(fake_ssh: Path, tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each master attempt starts the `-E` log afresh; what the failed attempt before it wrote is kept as `.1`."""
+    use_g(tmp_path, monkeypatch, G_LYRA)
+    (tmp_path / "mode").write_text("auth")
+    t = transport(fake_ssh, tmp_path, HostConfig("lyra", "lyra"))
+    assert await t.prepare() is not None
+    log, old = tmp_path / "ssh-h.log", tmp_path / "ssh-h.log.1"
+    assert "Permission denied" in log.read_text() and not old.exists()
+    (tmp_path / "mode").write_text("ok")
+    assert await t.prepare(force=True) is None
+    assert log.read_text() == "" and "Permission denied" in old.read_text()
+    assert old.stat().st_mode & 0o077 == 0
+    t._truncate_log()                                                   # an empty log never replaces the kept one
+    assert "Permission denied" in old.read_text()
 
 
 @pytest.mark.posix                # fake ssh shell script

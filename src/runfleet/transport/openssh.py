@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 import re
@@ -10,9 +12,9 @@ import shlex
 import shutil
 import signal
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 from runfleet import paths
 from runfleet.config import HostConfig
@@ -41,7 +43,18 @@ MANAGED_PERSIST_OPTS = ("-o", f"ControlPersist={mux.MANAGED_PERSIST}")
 MANAGED_KEEPALIVE_OPTS = ("-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4")
 MANAGED_MASTER_OPTS = MANAGED_PERSIST_OPTS + MANAGED_KEEPALIVE_OPTS
 ALREADY_EXISTS = "already exists, disabling multiplexing"
+MASTER_LOCK_POLL = 0.2          # s between tries of another RunFleet's master lock
+MASTER_LOCK_SLACK = 15.0        # waited for beyond connect_timeout; then "busy", retried later (a TUI suspended mid-attempt)
 PATH_TOO_LONG = "too long for Unix domain socket"
+
+
+@runtime_checkable
+class WedgedMasterReset(Protocol):
+    """Optional capability (not part of the frozen §3.5 Transport): stop a managed master that no longer answers, by
+    local means only (no login, so no `max_parallel_ssh` permit: a probe stuck on that master may hold the last one).
+    True if it was stopped; the next `prepare()` makes a new one. For `r` while a probe is stuck on the master."""
+
+    async def reset_if_wedged(self) -> bool: ...
 
 
 class OpenSSHTransport:
@@ -64,6 +77,7 @@ class OpenSSHTransport:
         self._last_ensure_error: HostError | None = None
         self._connect_pending = False
         self._last_check_err = ""
+        self._mlock: asyncio.Lock | None = None   # one master attempt or reset at a time (poller, `r`, on demand)
 
     # ------------------------------------------------------------ properties
     @property
@@ -200,7 +214,7 @@ class OpenSSHTransport:
     # ------------------------------------------------------------ master handling
     async def prepare(self, *, force: bool = False) -> HostError | None:
         """Resolve and ensure the master. `force`: a user-initiated retry (manual refresh, after connect) bypasses
-        the 30 s master-attempt throttle."""
+        the 30 s master-attempt throttle and replaces a managed master that does not answer."""
         err = await self.resolve()
         if err is not None:
             return err
@@ -220,19 +234,26 @@ class OpenSSHTransport:
         self._connect_pending = self.plan.uses_master
         if not self.plan.uses_master:
             return False
-        if await self.check_master():
-            self._connect_pending = False
-            return True
-        if self.plan.mode == "managed" and self._socket_exists() and not self._stale_check():
-            await self.reset_master()          # a wedged managed master would make the new one fail to bind
-        else:
-            self._clear_stale_socket()
-        self._truncate_log()                     # truncated by each connect/ensure (§4.2)
+        async with self._master_guard() as owned:   # checked and cleared together: never on another attempt's stale view
+            if await self.check_master():
+                self._connect_pending = False
+                return True
+            if not owned:                        # another RunFleet is still at it: leave the socket alone
+                return False
+            if self._wedged_managed():
+                await self._reset_master_locked(hung=True)   # a wedged managed master would block the new one's bind
+            else:
+                self._clear_stale_socket()
+            self._truncate_log()                 # truncated by each connect/ensure (§4.2)
         return False
 
     def _truncate_log(self) -> None:
-        """Empty the `-E` log (0600 in a 0700 dir: it names hosts, users and jump paths)."""
+        """Start the `-E` log afresh (0600 in a 0700 dir: it names hosts, users and jump paths). What the previous
+        attempt wrote is kept as `<log>.1`: a failure is usually over, and its log replaced, before anyone looks."""
         paths.ensure_private_dir(self._log_path.parent)
+        with contextlib.suppress(OSError):
+            if self._log_path.stat().st_size:
+                os.replace(self._log_path, self._log_path.with_name(self._log_path.name + ".1"))
         paths.write_private(self._log_path, b"")
 
     async def _check(self) -> tuple[bool, str]:
@@ -255,6 +276,89 @@ class OpenSSHTransport:
     def _stale_check(self) -> bool:
         """The last `-O check` found a socket file nobody listens on (a master killed with -9, OOM, a crash)."""
         return "Connection refused" in self._last_check_err
+
+    def _wedged_managed(self) -> bool:
+        """After a failed check: our own (managed) master's socket is there but the master does not answer."""
+        return (self.plan is not None and self.plan.mode == "managed" and self._socket_exists()
+                and not self._stale_check())
+
+    def _socket_id(self) -> tuple[int, int] | None:
+        """The socket file's identity: a master made meanwhile (another RunFleet on the same socket) binds a new one."""
+        if self.rendered_control_path is None:
+            return None
+        try:
+            st = os.lstat(self.rendered_control_path)
+        except OSError:
+            return None
+        return st.st_dev, st.st_ino
+
+    def _master_lock(self) -> asyncio.Lock:
+        if self._mlock is None:
+            self._mlock = asyncio.Lock()
+        return self._mlock
+
+    @contextlib.asynccontextmanager
+    async def _master_guard(self) -> AsyncIterator[bool]:
+        """One master attempt or reset at a time per socket: in this process (an asyncio lock) and across RunFleets
+        that share the socket (the instance lock only warns): `flock` on a file in the private mux dir named after the
+        socket — never a file beside a user ControlPath. Another holder is waited for up to `connect_timeout` +
+        MASTER_LOCK_SLACK s (a master attempt is bounded by connect_timeout + 5 s). Yields False when that wait ran
+        out: the caller must then neither make nor stop a master (the holder may still act), only report busy."""
+        async with self._master_lock():
+            owned, fd = await self._lock_across_processes()
+            try:
+                yield owned
+            finally:
+                if fd is not None:
+                    platform.unlock(fd)
+                    os.close(fd)
+
+    async def _lock_across_processes(self) -> tuple[bool, int | None]:
+        """(True, the locked descriptor); (True, None) when no lock is needed or possible (no socket, the mux dir
+        unusable); (False, None) when another RunFleet held it for the whole wait."""
+        path = self.rendered_control_path
+        if path is None or self.plan is None or not self.plan.uses_master:
+            return True, None
+        name = "master-" + hashlib.sha256(os.fsencode(path)).hexdigest()[:16] + ".lock"
+        try:
+            paths.ensure_private_dir(self.mux_dir())
+            fd = os.open(self.mux_dir() / name, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            return True, None
+        deadline = time.monotonic() + self.config.connect_timeout + MASTER_LOCK_SLACK
+        try:
+            while not platform.try_lock(fd):
+                if time.monotonic() >= deadline:
+                    log.warning("%s: another RunFleet has been making or resetting the ssh master for %.0f s: "
+                                "leaving it alone", self.host, self.config.connect_timeout + MASTER_LOCK_SLACK)
+                    os.close(fd)
+                    return False, None
+                await asyncio.sleep(MASTER_LOCK_POLL)
+        except OSError:
+            os.close(fd)
+            return True, None
+        except BaseException:              # cancelled while waiting
+            os.close(fd)
+            raise
+        return True, fd
+
+    async def _reset_if_wedged_locked(self) -> bool:
+        """Under the master lock: check, and stop our master if its socket is there but it does not answer — unless
+        the socket was replaced during the (up to 3 s) check, so a master another RunFleet just made is never hit."""
+        if self.plan is None or self.plan.mode != "managed":
+            return False
+        before = self._socket_id()
+        if before is None or await self.check_master():
+            return False
+        if not self._wedged_managed() or self._socket_id() != before:
+            return False
+        log.warning("%s: ssh master not answering (%s): restarting it", self.host, self._last_check_err.strip()[:200])
+        await self._reset_master_locked(hung=True)
+        return True
+
+    async def reset_if_wedged(self) -> bool:
+        async with self._master_guard() as owned:
+            return owned and await self._reset_if_wedged_locked()
 
     def _may_unlink_stale(self) -> bool:
         """Managed sockets are ours. At a user ControlPath we only do what the user's own `ssh` would do: OpenSSH
@@ -285,8 +389,20 @@ class OpenSSHTransport:
 
     async def ensure_master(self, *, force: bool = False) -> HostError | None:
         """§4.1: `-O check`, else create the master (BatchMode, waiting for the `-fN` process to exit), then check
-        again: `ControlMaster=yes` that could not bind the socket still exits 0 and stays up as a plain login."""
-        if await self.check_master():
+        again: `ControlMaster=yes` that could not bind the socket still exits 0 and stays up as a plain login. One
+        attempt at a time per socket (:meth:`_master_guard`): a caller that waited finds the master the other made."""
+        async with self._master_guard() as owned:
+            if not owned:
+                if await self.check_master():
+                    return None
+                return HostError(ErrorKind.MUX, "another RunFleet is making the ssh master",
+                                 "its attempt holds the master lock in the mux directory; retrying later")
+            return await self._ensure_master_locked(force=force)
+
+    async def _ensure_master_locked(self, *, force: bool) -> HostError | None:
+        # a user retry (force) replaces a hung managed master: else it stays "not answering" until two probes time out
+        replaced = force and await self._reset_if_wedged_locked()
+        if not replaced and await self.check_master():
             self._last_ensure_error = None
             return None
         now = self._monotonic()
@@ -345,11 +461,21 @@ class OpenSSHTransport:
                     os.kill(pid, signal.SIGTERM)
 
     async def reset_master(self) -> None:
+        async with self._master_guard() as owned:
+            if owned:
+                await self._reset_master_locked()
+
+    async def _reset_master_locked(self, *, hung: bool = False) -> None:
+        """`-O exit` (skipped when `hung`: a master that just failed `-O check` would only time out again), else
+        SIGTERM by command line; then remove the socket — the one that was there at the start, not a master made in
+        the meantime by a connect of another RunFleet."""
         if self.plan is None or self.plan.mode != "managed":
             return
+        sock = self._socket_id()
         res: RunResult | None = None
-        with contextlib.suppress(spawn.SpawnError):
-            res = await spawn.run(self.check_argv("exit"), timeout=CHECK_TIMEOUT)
+        if not hung:
+            with contextlib.suppress(spawn.SpawnError):
+                res = await spawn.run(self.check_argv("exit"), timeout=CHECK_TIMEOUT)
         if res is None or res.rc != 0:
             # a hung master did not take `-O exit`: once its socket is gone nothing could reach (or stop) it
             pids = await _pids_with_args(self.master_argv()) + await _pids_with_args(self.connect_argv() or [])
@@ -359,7 +485,7 @@ class OpenSSHTransport:
                 log.warning("%s: terminating unresponsive ssh master %d", self.host, pid)
                 with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.kill(pid, signal.SIGTERM)
-        if self.rendered_control_path:
+        if self.rendered_control_path and sock is not None and self._socket_id() == sock:
             with contextlib.suppress(OSError):
                 os.unlink(self.rendered_control_path)
         self._last_ensure = None

@@ -27,12 +27,12 @@ WS = HostConfig(name="lynx", ssh="lynx", backend="workstation")
 
 class Rig:
     def __init__(self, host: HostConfig, *, seed: int = 1, mux: str = "none", latency: float = 0.0,
-                 general: GeneralSettings | None = None, cached: bool = False) -> None:
+                 general: GeneralSettings | None = None, cached: bool = False, permits: int = 8) -> None:
         self.clock = ManualClock(CLOCK_START)
         self.store = FleetStore([host])
         self.t = FakeTransport(host.name, mux_mode=mux, clock=self.clock, latency=latency)  # type: ignore[arg-type]
         self.t.set_result("detect.id", "user=me")
-        self.lanes = HostLanes(asyncio.Semaphore(8), self.t.mux)
+        self.lanes = HostLanes(asyncio.Semaphore(permits), self.t.mux)
         caps = stub_caps(host) if cached else None
         self.p = HostPoller(host, self.t, self.store, self.clock, random.Random(seed), self.lanes,
                             general=general or GeneralSettings(), hooks=STUB_HOOKS, caps=caps,
@@ -356,6 +356,100 @@ async def test_single_in_flight_and_manual_refresh_floor(rig_factory: Callable[.
     assert len(times) == 2 and times[1] - times[0] >= 3.0              # ≥ 3 s after the previous probe
 
 
+async def test_manual_refresh_retries_failing_groups_at_once(rig_factory: Callable[..., Rig]) -> None:
+    """User report: a cluster stayed "degraded" after `r`, a restart fixed it at once. `r` forced only the fast groups
+    and kept the failure backoff (up to 10 min); it now clears every group's backoff and re-runs the failing ones."""
+    rig = rig_factory()
+    rig.t.set_result("slurm.sacct", "", 1, "Problem talking to the database")
+    await run_for(rig.clock, 130)                                      # failed at 0 s: next try 4 min later
+    assert rig.status.state is ConnState.DEGRADED and rig.p._group_fail.get("slurm.history") == 1
+    assert "slurm.sacct" not in rig.poll_names()[-1]
+    rig.t.set_result("slurm.sacct", "1|COMPLETED")                     # the database is back
+    rig.p.wake("manual")
+    await run_for(rig.clock, 4)
+    assert "slurm.sacct" in rig.poll_names()[-1] and rig.status.state is ConnState.OK
+    assert not rig.p._group_fail
+
+
+async def test_manual_refresh_reruns_slow_groups_unless_they_just_ran(rig_factory: Callable[..., Rig]) -> None:
+    rig = rig_factory()
+    await run_for(rig.clock, 40)                                       # sacct and sinfo ran at 0 s (period 120 s)
+    rig.p.wake("manual")
+    await run_for(rig.clock, 4)
+    assert {"slurm.squeue", "slurm.sacct", "slurm.sinfo"} <= set(rig.poll_names()[-1])
+    n = rig.t.count("poll")
+    rig.p.wake("manual")                                               # again 5 s later: only the fast group
+    await run_for(rig.clock, 4)
+    assert rig.t.count("poll") == n + 1
+    assert "slurm.squeue" in rig.poll_names()[-1] and "slurm.sacct" not in rig.poll_names()[-1]
+
+
+async def test_manual_refresh_during_a_poll_does_not_repeat_what_it_served(rig_factory: Callable[..., Rig]) -> None:
+    """Review: the groups were chosen at the press, from the runs before the poll in flight, so `r` during a poll that
+    was reading sacct and sinfo read them again right after it."""
+    rig = rig_factory(latency=2.0)
+    await run_for(rig.clock, 40)
+    rig.p.wake("manual")
+    await run_for(rig.clock, 0.5)                                      # the manual poll (sacct, sinfo) is in flight
+    assert rig.status.in_flight and "slurm.sacct" in rig.poll_names()[-1]
+    rig.p.wake("manual")
+    await run_for(rig.clock, 5)
+    names = rig.poll_names()[-1]
+    assert "slurm.squeue" in names and "slurm.sacct" not in names and "slurm.sinfo" not in names
+
+
+async def test_manual_refresh_forces_the_master_attempt_and_polls_through_it(rig_factory: Callable[..., Rig]) -> None:
+    """The master is gone (ControlPersist ran out during the idle pause): `r` makes the next attempt bypass the 30 s
+    throttle (and replace a hung managed master) and polls right after it instead of a tick later."""
+    rig = rig_factory(mux="managed")
+    await settle()
+    polls = rig.t.count("poll")
+    rig.t.master_ok = False
+    rig.p.wake("manual")
+    await run_for(rig.clock, 4)
+    assert rig.t.forced_prepares == 1 and rig.t.count("poll") == polls + 1
+    await run_for(rig.clock, 20)                                       # still no master: unforced attempts again
+    assert rig.t.forced_prepares == 1 and rig.t.calls.count("prepare") >= 3
+
+
+async def test_manual_refresh_replaces_a_hung_master_without_waiting_for_the_probe(
+        rig_factory: Callable[..., Rig]) -> None:
+    """A probe stuck on a managed master that stopped answering held `r` back until its local deadline (up to 90 s).
+    The hung master is stopped by local means at once — even when the stuck probe holds the only ssh permit
+    (`max_parallel_ssh = 1`) — and the poller alone makes the new one: one press, one login."""
+    rig = rig_factory(mux="managed", latency=60.0, permits=1)
+    rig.t.prepare_makes_master = True
+    await run_for(rig.clock, 61)                                       # detect done, the first poll is in flight
+    assert rig.status.in_flight and rig.t.count("poll") == 1
+    rig.p.wake("manual")                                               # the master answers: nothing is stopped
+    await settle()
+    assert rig.t.calls.count("reset_if_wedged") == 1 and rig.status.in_flight
+    rig.t.wedged = True
+    await run_for(rig.clock, 3)                                        # 3 s floor since the last wake's poll
+    rig.p.wake("manual")
+    await run_for(rig.clock, 4)
+    assert rig.t.calls.count("reset_if_wedged") == 2 and not rig.t.wedged
+    assert rig.t.count("poll") == 2                                    # cut off, re-made, polled: seconds, not 60
+    assert rig.t.forced_prepares == 1 and rig.t.master_ok
+
+
+async def test_transport_failures_are_logged_once_per_run(rig_factory: Callable[..., Rig],
+                                                          caplog: pytest.LogCaptureFixture) -> None:
+    rig = rig_factory()
+    await settle()
+    caplog.set_level("INFO", logger="runfleet.core.poller")
+    rig.t.fail_next(HostError(ErrorKind.REFUSED, "connection refused", "ssh: connect to host k2 port 22: "
+                              "Connection refused"), times=3)
+    while rig.status.consecutive_failures < 3:
+        await run_for(rig.clock, 1)
+    while rig.status.consecutive_failures:
+        await run_for(rig.clock, 1)
+    lines = [r.getMessage() for r in caplog.records if r.name == "runfleet.core.poller"]
+    failed = [x for x in lines if "connection refused" in x]
+    assert len(failed) == 1 and "retrying, attempt 1: refused" in failed[0] and "port 22" in failed[0]
+    assert any(x.startswith("k2: reachable again after") and "(3 failed attempts)" in x for x in lines)
+
+
 @pytest.mark.parametrize("mux", ["user", "session"])
 async def test_check_master_failure_ensures_and_skips_the_tick(rig_factory: Callable[..., Rig], mux: str) -> None:
     rig = rig_factory(mux=mux)                                         # a session (§4.8) is checked like a master
@@ -599,7 +693,8 @@ async def test_finished_job_sstat_error_does_not_leave_idle_host_degraded(histor
     store = FleetStore([cx.host])
     transport = FakeTransport(cx.host.name, clock=clock)
     transport.results["slurm.squeue"] = squeue()
-    transport.queue("slurm.sstat", result("slurm.sstat", stderr="sstat: error: No steps running for job 2332861"))
+    transport.queue("slurm.sstat", result("slurm.sstat", stderr="sstat: error: Unable to contact slurm controller "
+                                                      "(connect failure)"))
     poller = HostPoller(cx.host, transport, store, clock, random.Random(1),
                         HostLanes(asyncio.Semaphore(8)), general=cx.general, hooks=BackendHooks.default(),
                         caps=replace(cx.caps, profile=("slurm",)), caps_at=cx.now)
