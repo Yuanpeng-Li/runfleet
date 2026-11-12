@@ -40,11 +40,13 @@ from runfleet.probe import framing
 from runfleet.probe.section import ProbeScript, Section, SectionOutcome, SectionResult
 from runfleet.transport import classify
 from runfleet.transport.base import ProbeResult, Transport
+from runfleet.transport.openssh import WedgedMasterReset
 
 log = logging.getLogger("runfleet.core.poller")
 
 MAX_BACKOFF = 300.0              # transport backoff cap (§4.4)
 WAKE_FLOOR = 3.0                 # manual / post-action ticks: >= 3 s after the previous probe
+MANUAL_RERUN_AFTER = 30.0        # `r` re-runs a slower group that last ran (and did not fail) at least this long ago
 REDETECT_AFTER = 6 * 3600.0      # background re-detection (§5.1)
 SNAPSHOT_CAPS_MAX_AGE = 3600.0   # `snapshot` reuses cached capabilities this young instead of a detect probe
 DEFAULT_TICK = 15.0              # only if a profile declares no interval group at all
@@ -320,6 +322,12 @@ class HostPoller:
         self._wake_floor = True
         self._manual_retry = False
         self._force_prepare = False       # next prepare is user-initiated: bypass the 30 s master throttle
+        self._manual_pending = False      # a manual refresh (`r`) waits for the next cycle
+        self._manual_failing: set[str] = set()       # groups in backoff when `r` was pressed
+        self._manual_seen: dict[str, float] = {}     # _last_run when `r` was pressed (first press of the cycle)
+        self._master_kick: asyncio.Task[None] | None = None   # `r` checking a managed master while a probe waits
+        self._fail_since: float | None = None                  # monotonic start of the current transport failure run
+        self._logged_failure: tuple[ErrorKind, str] | None = None
         self._event = asyncio.Event()
         if caps is not None:
             self._rebuild_profile(caps)
@@ -330,23 +338,59 @@ class HostPoller:
         return self.store.hosts[self.name].status
 
     def wake(self, reason: str, groups: frozenset[str] = frozenset()) -> None:
-        """Serve an immediate tick (≥ 3 s after the previous probe). `groups` are forced due; a manual wake without
-        groups forces the fast groups (period ≤ 2 ticks) and retries a paused (auth) host exactly once."""
+        """Serve an immediate tick (≥ 3 s after the previous probe). `groups` are forced due. A manual wake without
+        groups (`r`) refreshes the whole host (:meth:`_manual_refresh`) and retries a paused (auth) host exactly
+        once."""
         if groups:
             self._forced |= set(groups)
         elif reason == "manual":
-            self._forced |= self._fast_groups()
+            self._manual_refresh()
         if reason in ("manual", "connect") and self._auth_paused:
             self._manual_retry = True
         self._wake_soft = reason == "focus" and (self._wake_soft or not self._wake_pending)
         self._wake_pending = True
         self._event.set()
 
+    def _manual_refresh(self) -> None:
+        """`r` does what a restart of RunFleet would, within the 3 s floor: every group's failure backoff is cleared
+        and, at the next cycle, every non-event group is forced (:meth:`_manual_groups`); that cycle's master
+        attempt bypasses the 30 s throttle and replaces a managed master that stopped answering
+        (`prepare(force=True)`). A probe in flight on a managed master that no longer answers is not waited for
+        (:meth:`_revive_master`)."""
+        failing = set(self._group_fail)
+        self._group_fail.clear()
+        self._manual_failing |= failing
+        if not self._manual_pending:
+            self._manual_seen = dict(self._last_run)
+        self._manual_pending = True
+        if failing:
+            log.info("%s: manual refresh: retrying %s now (backoff cleared)", self.name, ", ".join(sorted(failing)))
+        if (self.status.in_flight and self.transport.mux == "managed" and isinstance(self.transport, WedgedMasterReset)
+                and (self._master_kick is None or self._master_kick.done())):
+            try:
+                self._master_kick = asyncio.get_running_loop().create_task(self._revive_master(self.transport))
+            except RuntimeError:          # no running loop: the woken cycle checks the master itself
+                pass
+
+    async def _revive_master(self, transport: WedgedMasterReset) -> None:
+        """A managed master that stopped answering stalls the probe in flight until its local deadline (up to 90 s),
+        and every log stream on it. On `r` it is checked at once and, if it does not answer, stopped — local work,
+        no ssh permit, which the stuck probe may hold. The probe then fails now, and the woken cycle makes the new
+        master (the only creator, so one press never starts two logins) and polls through it."""
+        try:
+            await transport.reset_if_wedged()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:            # a bug must never take the host (or the app) down
+            self._internal_error(e)
+
     def reconnect(self) -> None:
         """After an interactive connect: reset backoff, re-prepare, poll now (no 3 s floor)."""
+        log.info("%s: connect: re-preparing and polling now", self.name)
         self._need_prepare = True
         self._redetect = True
         self._consecutive = 0
+        self._fail_since = self._logged_failure = None
         self._timeouts_in_row = 0
         self._auth_paused = False
         self._manual_retry = False
@@ -396,6 +440,8 @@ class HostPoller:
                 except Exception as e:      # a bug must never take the host (or the app) down
                     self._internal_error(e)
         except asyncio.CancelledError:
+            if self._master_kick is not None:
+                self._master_kick.cancel()
             if self.status.in_flight:
                 self._publish(in_flight=False)
             raise
@@ -435,11 +481,15 @@ class HostPoller:
 
     async def _cycle(self) -> None:
         was_wake = self._wake_pending
+        manual, self._manual_pending = self._manual_pending, False
+        if manual:
+            self._forced |= self._manual_groups(self._manual_failing, self._manual_seen)
+            self._manual_failing, self._manual_seen = set(), {}
         self._wake_pending = self._wake_soft = False
         self._wake_floor = True
         prepared_now = False
         if self._need_prepare or self.caps is None or not self.profile:
-            err = await self._prepare_and_detect()
+            err = await self._prepare_and_detect(force=manual)
             if err is not None:
                 await self._on_transport_failure(err)
                 return
@@ -448,12 +498,13 @@ class HostPoller:
             # §4.1: no probe while a master (or a session, §4.8) is being made; mux hosts never fall back to direct
             # probes
             self._publish(state=ConnState.CONNECTING)
-            err = await self._ensure_master()
+            err = await self._ensure_master(force=manual)
             if err is not None:
                 await self._on_transport_failure(err)
                 return
-            self._schedule_next(self.clock.monotonic())
-            return
+            if not was_wake:               # a wake (`r`, input after the idle pause) polls through the new master now
+                self._schedule_next(self.clock.monotonic())
+                return
         if not prepared_now and (self._redetect or (
                 self.caps_at is not None and (self.clock.now() - self.caps_at).total_seconds() >= REDETECT_AFTER)):
             self._redetect = False
@@ -464,15 +515,15 @@ class HostPoller:
         await self.poll_tick(anchor=was_wake)
 
     # ------------------------------------------------------------ prepare and detect
-    async def _ensure_master(self) -> HostError | None:
-        force, self._force_prepare = self._force_prepare, False
+    async def _ensure_master(self, *, force: bool = False) -> HostError | None:
+        force, self._force_prepare = force or self._force_prepare, False
         async with self.lanes.poll():
             return await self.transport.prepare(force=force)
 
-    async def _prepare_and_detect(self) -> HostError | None:
+    async def _prepare_and_detect(self, *, force: bool = False) -> HostError | None:
         if self.status.state not in (ConnState.RETRYING, ConnState.UNREACHABLE):
             self._publish(state=ConnState.CONNECTING)
-        err = await self._ensure_master()
+        err = await self._ensure_master(force=force)
         if err is not None:
             return err
         self._need_prepare = False
@@ -597,13 +648,27 @@ class HostPoller:
             periods = [self.effective_period(c) for cs in cadences.values() for c in cs if c.mode == "piggyback"]
         return min(periods) if periods else DEFAULT_TICK
 
-    def _fast_groups(self) -> set[str]:
+    def _manual_groups(self, failing: set[str], seen: Mapping[str, float]) -> set[str]:
+        """The non-event groups `r` forces, chosen when its cycle starts: the fast ones (period ≤ 2 ticks), and every
+        other one that has not run since the press (a poll in flight at the press already served it) and failed
+        before it or has not run for MANUAL_RERUN_AFTER."""
         if self.caps is None:
             return set()
         cad = self._cadences(self.context())
         t = self.tick_period(cad)
-        return {c.group for cs in cad.values() for c in cs
-                if c.mode != "event" and self.effective_period(c, with_backoff=False) <= 2 * t}
+        now_m = self.clock.monotonic()
+        out: set[str] = set()
+        for cs in cad.values():
+            for c in cs:
+                if c.mode == "event":
+                    continue
+                last = self._last_run.get(c.group)
+                fast = self.effective_period(c, with_backoff=False) <= 2 * t
+                ran_since = last is not None and last != seen.get(c.group)
+                if fast or (not ran_since and (c.group in failing or last is None
+                                               or now_m - last >= MANUAL_RERUN_AFTER)):
+                    out.add(c.group)
+        return out
 
     def _due(self, cadences: Mapping[str, list[Cadence]], now_m: float, tick: float,
              *, force_all: bool = False) -> dict[str, set[str]]:
@@ -927,6 +992,12 @@ class HostPoller:
 
     # ------------------------------------------------------------ transport outcomes (§4.4)
     def _on_transport_ok(self, res: ProbeResult) -> None:
+        if self._consecutive:
+            since = self._fail_since
+            took = f" after {self.clock.monotonic() - since:.0f} s" if since is not None else ""
+            log.info("%s: reachable again%s (%d failed attempt%s)", self.name, took, self._consecutive,
+                     "" if self._consecutive == 1 else "s")
+        self._fail_since = self._logged_failure = None
         self._consecutive = 0
         self._timeouts_in_row = 0
         self._auth_paused = False
@@ -937,6 +1008,8 @@ class HostPoller:
             self._wake_pending = self._wake_soft = False
         self._consecutive += 1
         n = self._consecutive
+        if n == 1:
+            self._fail_since = self.clock.monotonic()
         err = dataclasses.replace(err, at=err.at or self.clock.now())
         state = classify.state_for(err, n)
         if err.kind is ErrorKind.TIMEOUT:
@@ -946,6 +1019,8 @@ class HostPoller:
                 # NFS mount) must not end a healthy session, whose Duo login the BatchMode restart cannot redo
                 if self.transport.mux == "managed" or (self.transport.mux == "session"
                                                        and not await self.transport.check_master()):
+                    log.warning("%s: two timeouts in a row: restarting the %s", self.name,
+                                "ssh session" if self.transport.mux == "session" else "managed ssh master")
                     await self.transport.reset_master()
                     self._need_prepare = True
                     self._timeouts_in_row = 0
@@ -963,13 +1038,27 @@ class HostPoller:
             self._auth_paused = True
             self._need_prepare = True
             self._next_at = float("inf")
+            self._log_failure(err, state, n, None)
             self._publish(state=state, error=err, consecutive_failures=n, next_poll_at=None)
             return
         base = self.tick_period() if self.caps is not None else DEFAULT_TICK
         raw = MAX_BACKOFF if err.kind is ErrorKind.DNS else min(base * 2 ** min(n - 1, 16), MAX_BACKOFF)
         delay = raw * self.rng.uniform(0.8, 1.2)
         self._next_at = now_m + delay
+        self._log_failure(err, state, n, delay)
         self._publish(state=state, error=err, consecutive_failures=n, next_poll_at=self._wall(self._next_at))
+
+    def _log_failure(self, err: HostError, state: ConnState, n: int, delay: float | None) -> None:
+        """runfleet.log: the first failed attempt of a run and each change of error, not every retry of the same one
+        (the state shown, the error and ssh's stderr, which the next master attempt's log would replace)."""
+        key = (err.kind, err.summary)
+        if key == self._logged_failure:
+            return
+        self._logged_failure = key
+        detail = " ".join(err.detail.split())[:300]
+        log.info("%s: %s, attempt %d: %s %s%s; %s", self.name, state.value, n, err.kind.value, err.summary,
+                 f" — {detail}" if detail and detail != err.summary else "",
+                 "polling paused" if delay is None else f"next attempt in {delay:.0f} s")
 
     def _internal_error(self, e: BaseException, *, collector: str | None = None,
                         sections: Sequence[str] = (), publish: bool = True) -> list[HostError]:

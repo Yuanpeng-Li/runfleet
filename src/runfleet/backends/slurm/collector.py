@@ -1530,11 +1530,14 @@ def _valid_path(p: str) -> bool:
     return p.startswith("/") and "\x00" not in p and "\n" not in p
 
 
-_NO_STEPS = re.compile(r"^sstat: error: couldn't get steps for JobId=\S+$")
+# sstat's "this job has no steps (any more)" line; its wording differs between Slurm versions: "couldn't get steps for
+# JobId=N", "No steps running for JobId=N" (26.05), "... for job N"
+_NO_STEPS = re.compile(r"^sstat: error: (?:couldn't get steps|no steps running) for (?:JobId=|job )\S+$",
+                       re.IGNORECASE)
 
 
 def sstat_steps_gone(r: SectionResult) -> bool:
-    """sstat printed nothing but "couldn't get steps for JobId=N" for every job it was asked about: they all ended
+    """sstat printed nothing but "no steps" lines (:data:`_NO_STEPS`) for every job it was asked about: they all ended
     between squeue and sstat (frequent where jobs are preempted). An answer (no usage), not a failure of the host."""
     lines = [x.strip() for x in r.stderr.splitlines() if x.strip()]
     return (r.outcome is SectionOutcome.STDERR_ONLY and not r.stdout.strip() and bool(lines)

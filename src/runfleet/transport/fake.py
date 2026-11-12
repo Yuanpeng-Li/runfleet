@@ -88,6 +88,8 @@ class FakeTransport:
     latency: float = 0.0                 # seconds of clock.sleep per probe (needs `clock`)
     kind: Literal["openssh", "local", "fake", "demo"] = "fake"
     master_ok: bool = True
+    wedged: bool = False                 # the managed master hangs: probes wait out `latency`; reset_if_wedged stops it
+    prepare_makes_master: bool = False   # a successful prepare() sets master_ok (a master was made)
     results: dict[str, SectionResult] = field(default_factory=dict)
     queued: dict[str, deque[SectionResult]] = field(default_factory=dict)
     errors: deque[HostError] = field(default_factory=deque)
@@ -103,6 +105,7 @@ class FakeTransport:
     forward_errors: deque[HostError] = field(default_factory=deque)   # next forward() calls fail with these
     forwarded: set[tuple[int, str, int]] = field(default_factory=set)  # active (local port, node, remote port)
     cancel_errors: deque[HostError] = field(default_factory=deque)    # next cancel_forward() calls fail with these
+    _cut: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)   # set: master stopped
 
     # ------------------------------------------------------------ scripting
     def set_result(self, name: str, stdout: str = "", rc: int | None = 0, stderr: str = "", *,
@@ -135,7 +138,10 @@ class FakeTransport:
         self.calls.append("prepare")
         if force:
             self.forced_prepares += 1
-        return self.prepare_errors.popleft() if self.prepare_errors else None
+        err = self.prepare_errors.popleft() if self.prepare_errors else None
+        if err is None and self.prepare_makes_master:
+            self.master_ok = True
+        return err
 
     async def check_master(self) -> bool:
         self.calls.append("check_master")
@@ -153,13 +159,28 @@ class FakeTransport:
             return self.results[s.name]
         return result(s.name, "", 0, "")
 
+    async def _wait_latency(self) -> bool:
+        """Sleep `latency` on the clock; False if the master was stopped (reset_if_wedged) first."""
+        assert self.clock is not None
+        cut = self._cut
+        sleep, stop = asyncio.ensure_future(self.clock.sleep(self.latency)), asyncio.ensure_future(cut.wait())
+        try:
+            await asyncio.wait({sleep, stop}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            sleep.cancel()
+            stop.cancel()
+        return not cut.is_set()
+
     async def probe(self, script: ProbeScript, *, timeout: float) -> ProbeResult:
         self.probes.append(ProbeRecord(script, timeout, self.clock.monotonic() if self.clock else None))
         self.in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
         try:
             if self.clock is not None and self.latency > 0:
-                await self.clock.sleep(self.latency)
+                if not await self._wait_latency():
+                    run = RunResult(rc=255, stdout=b"", stderr=b"", elapsed_s=0.0, timed_out=False)
+                    err = HostError(ErrorKind.MUX, "ssh master gone", "mux_client_read_packet: read header failed")
+                    return ProbeResult(run=run, sections=framing.parse(b"", script).sections, error=err)
             else:
                 await asyncio.sleep(0)
             run = RunResult(rc=0, stdout=b"", stderr=b"", elapsed_s=self.latency, timed_out=False)
@@ -191,6 +212,16 @@ class FakeTransport:
 
     async def reset_master(self) -> None:
         self.calls.append("reset_master")
+
+    async def reset_if_wedged(self) -> bool:
+        """WedgedMasterReset: a hung master is stopped, which ends the probes stuck on it."""
+        self.calls.append("reset_if_wedged")
+        if not self.wedged:
+            return False
+        self.wedged, self.master_ok = False, False
+        cut, self._cut = self._cut, asyncio.Event()
+        cut.set()
+        return True
 
     async def close(self) -> None:
         self.calls.append("close")

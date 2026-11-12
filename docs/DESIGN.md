@@ -1256,7 +1256,8 @@ class Transport(Protocol):
 
 Lane limits (§4.2) are enforced by core (poller, LogService, ActionService), not by transports. The session
 transport's interactive login is NOT part of this contract: it is the optional `InteractiveLogin` protocol of
-`transport/session.py` (§4.8), which the UI reaches through `FleetAPI.connect_login` (§3.7).
+`transport/session.py` (§4.8), which the UI reaches through `FleetAPI.connect_login` (§3.7). Nor is
+`reset_if_wedged()`: the optional `WedgedMasterReset` protocol of `transport/openssh.py` (§4.4, manual `r`).
 
 ### 3.6 Collector contract — `src/runfleet/backends/base.py` (FROZEN)
 
@@ -2004,8 +2005,20 @@ per tick through jumpvm or vega's slow login would be impolite and count as time
    daemon(3), so the spawn's process group does not reach it) and SIGTERMed — never the master `-O check` names — and
    the result is a MUX error. rc ≠ 0 → classify `<log>` (§9); the hop of a jump rewrite logs into the same file (see
    §4.2), so a hop auth / host-key failure pauses the host as NEEDS_AUTH / HOSTKEY instead of retrying forever.
-   A user-initiated retry (manual `r` on a paused host, after `connect`) passes `prepare(force=True)` and bypasses the
-   30 s throttle, so "exactly one more attempt" really attempts.
+   A user-initiated retry (manual `r`, after `connect`) passes `prepare(force=True)` and bypasses the 30 s throttle,
+   so "exactly one more attempt" really attempts; it also replaces a managed master that does not answer (1a would
+   otherwise report "ssh master not answering" until two probes time out) — never a user master, and not when the
+   socket file changed during the check (another RunFleet on the same socket just made a new master). Attempts,
+   resets and `before_connect`'s check-and-clear are serialized per socket — in the process by an asyncio lock, across
+   RunFleets (the instance lock only warns) by `flock` on `<mux_dir>/master-<hash of the socket path>.lock` (never a
+   file beside a user ControlPath): the poller, on-demand probes, log streams, `r`, `c`'s preparation and a second
+   TUI do not start two BatchMode `ssh -fN` at once or reset a master another one just made; one that waited checks
+   again and finds it. A holder is waited for at most `connect_timeout` + 15 s (a TUI suspended mid-attempt); after
+   that nothing is made or stopped without the lock — the attempt is a MUX error "another RunFleet is making the ssh
+   master" and is retried with the usual backoff. Not covered: the interactive login of `c` itself (run while the
+   user types, outside the lock; a concurrent BatchMode attempt then meets the "already exists" reaping above). A
+   reset of a master that just failed `-O check` skips `-O exit` (it would only time out again), and a reset removes
+   the socket only if it is still the file that was there when the reset began.
 3. Every probe/stream on a mux host is preceded by `-O check` (local, ~5 ms). A master vanishing between check and probe
    turns that one probe into a direct BatchMode login — harmless; the next tick re-ensures.
 
@@ -2076,8 +2089,8 @@ config); managed → `-o ControlMaster=no -o ControlPath=<socket>`; off → `-o 
 the mux plan (an unresolved transport could only guess the user form, so lyra got no socket and a leaked session),
 clears a stale socket (a wedged managed master is reset), truncates `<log>`, and returns True when a working master is
 already up — then nothing is run ("already connected"). After the connect, `prepare()` reaps a stray `-fN` that logged
-"already exists". `<log>` = `~/.local/state/runfleet/ssh-<host>.log`, truncated by each connect/ensure and shown in
-HostErrorScreen. The ServerAlive options in BASE only matter for `mux = "off"` (mux clients use the master's
+"already exists". `<log>` = `~/.local/state/runfleet/ssh-<host>.log`, started afresh by each connect/ensure (the
+previous attempt's non-empty log is kept as `<log>.1`) and shown in HostErrorScreen. The ServerAlive options in BASE only matter for `mux = "off"` (mux clients use the master's
 keepalive). The remote command is one word list for the login shell (zsh on labstation/lynx); `exec sh -s` is portable
 across bash/zsh/tcsh, and the script itself is POSIX `sh`.
 
@@ -2214,11 +2227,17 @@ Notes that matter:
   but plans nothing keeps its failures (a collector may hold a failing section back on purpose: nvidia-smi hung, GPU
   polling paused 5 min), and nothing is dropped while the collector's `cadences()` / `sections()` raised. A retired
   section's last success is kept for when it fails again. Each section that starts or stops failing is logged once
-  (runfleet.log) with its outcome, rc, time and stderr.
+  (runfleet.log) with its outcome, rc, time and stderr. So is each run of transport failures — its first attempt and
+  every change of error (state, kind, summary, ssh's stderr, the next attempt), then "reachable again after N s" —
+  plus a master restart, a manual `r` that cleared backoff, and the idle pause and its end.
 - `NEEDS_AUTH`/`HOSTKEY` stop polling. A manual `r` makes exactly one more BatchMode attempt (`prepare(force=True)`:
   the 30 s master throttle does not swallow it). `c` runs the interactive
   connect (§4.6), then `after_connect()` → `CONNECTING`.
-- Two consecutive transport timeouts with a `managed` master → `reset_master()`, then re-ensure. A `session` is reset
+- Two consecutive transport timeouts with a `managed` master → `reset_master()`, then re-ensure. A manual `r` does not
+  wait for that: while a probe is in flight on a managed master it calls `reset_if_wedged()` at once (`-O check`; a
+  master that does not answer is stopped and its socket removed — local work, no `max_parallel_ssh` permit, which the
+  stuck probe may hold). The stalled probe fails now instead of at its local deadline, and the poller's next cycle,
+  the only creator, makes the new master (forced) and polls through it. A `session` is reset
   only when `check_master()` fails as well (its ping is a real round trip, unlike `-O check`): a probe stuck remotely
   must not end a healthy session, and a reset session on a Duo host needs `c` again (BatchMode cannot log in). With a `user` master we only show "shared
   ssh master unresponsive — press c to restart it".
@@ -3560,13 +3579,16 @@ wake still pending when a probe fails is dropped (the backoff deadline wins).
 Jitter: tick k is placed at `anchor + (k + U(0, 0.2)) × period` (fresh draw per tick; the grid is re-anchored when
 the period changes, after a wake and after a failure), so gaps vary ±20 % but the mean is exactly one period and
 ≤ 240 probes/hour holds deterministically (×U(0.9, 1.1) per tick made it a coin flip). Groups are requested per cadence group (`sections(frozenset({group}), ctx)` once per due group), so a failed
-section maps to its group's backoff. A manual refresh (`r`) forces only the fast groups (period ≤ 2 ticks), not
-history/nodes. At each tick the poller collects every group that is due (interval/piggyback: period
+section maps to its group's backoff. A manual refresh (`r`) does what a restart would: it clears every group's
+failure backoff and, when its cycle starts, forces every fast group (period ≤ 2 ticks) and every other non-event group
+that has not run since the press (a poll in flight at the press already served it) and either was failing at the
+press or has not run for `MANUAL_RERUN_AFTER` (30 s), so repeated presses stay polite; if the master has to be
+re-made, that cycle's attempt is forced (above) and the poll follows in the same cycle. At each tick the poller collects every group that is due (interval/piggyback: period
 elapsed at this tick ± half a tick; event: requested since the last tick; a collector follow-up may also name an
 interval group, which is then due at the next tick too — `slurm.nodes` when the partition set is first known or changes,
 `slurm.usage` when an own job starts running, so neither waits a full 60–120 s period), asks each collector for `sections(due)`,
 renders **one** `ProbeScript`, and runs it on the poll lane after `check_master()` (mux hosts; failing → ensure master,
-skip the tick, `CONNECTING`). Groups are never evaluated between ticks, so a Slurm host makes exactly one round trip
+skip the tick, `CONNECTING`; after a wake — `r`, input after the idle pause — the tick polls through the new master). Groups are never evaluated between ticks, so a Slurm host makes exactly one round trip
 per tick; `wake()` (manual `r`, post-action) serves an immediate tick no sooner than 3 s after the previous probe.
 **Routing**: each `SectionResult` goes to the collector named by `Section.owner`; every collector in the profile is
 ingested on every tick (empty results map if none of its sections ran); monitors ingest first, the scheduler last with
@@ -5180,8 +5202,8 @@ jobs):
 | `~/.local/state/runfleet/ui.json` | view, sort, filter text, state preset, grouping, saved Jobs views (`views`, `active_view`, §7.6), theme (auto/dark/light/ansi), Fleet card size (`fleet_layout`: auto/compact), watched jobs and the last visit (`watch`, `last_seen`), GPU availability watches (`watches`, §7.14), host detail's other users' processes (`host_others`, default shown) |
 | `~/.local/state/runfleet/update.json` | update check (§8.6): newest version on main, when asked, the last version announced |
 | `~/.local/state/runfleet/runfleet.log` | rotating log (5 MB × 3); `--debug` raises the level and adds `debug/` raw dumps; `--demo` records carry `[demo]` |
-| `~/.local/state/runfleet/ssh-<host>.log` | `-E` log of master creation / connect / the session ssh (§4.2, §4.8) |
-| `$XDG_RUNTIME_DIR/runfleet/` (else `~/.cache/runfleet/cm/`) | managed ControlMaster sockets, per-host `instance.lock.*` (0700) |
+| `~/.local/state/runfleet/ssh-<host>.log` | `-E` log of master creation / connect / the session ssh (§4.2, §4.8); `.1` holds the previous attempt's |
+| `$XDG_RUNTIME_DIR/runfleet/` (else `~/.cache/runfleet/cm/`) | managed ControlMaster sockets, per-host `instance.lock.*`, per-socket `master-*.lock` (§4.1) (0700) |
 
 The state dir and `debug/` are created 0700 and every file RunFleet writes there (log and rotations, cache, `ui.json`,
 `ssh-<host>.log`, dumps) 0600, whatever the umask: they hold job names, paths and command lines.

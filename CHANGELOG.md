@@ -5,6 +5,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`r` now refreshes a host the way restarting RunFleet did.** It used to re-read only the job list, so a host stayed
+  "degraded" or stale after `r` and only a restart helped.
+  - Every part that failed is retried at once: its backoff (up to 10 minutes) is cleared. Every other part is read
+    again too, unless it last ran fine less than 30 s ago or the poll running when you pressed `r` just read it, so
+    pressing `r` repeatedly stays gentle on the login node.
+  - When the ssh connection has to be made again, `r` no longer waits out the 30 s pause between attempts, and the
+    poll follows at once instead of a tick later. This also happens on the first key after the 2-hour idle pause.
+  - A RunFleet-managed ssh master that stopped answering is restarted by `r`, also while a poll is stuck on it,
+    instead of after two timed-out polls (up to 90 s each). A master from your own ssh config is never touched.
+    Making or restarting a master is now one attempt at a time per host, also across RunFleets running at once, so
+    the poller, log views, `r` and a second TUI no longer start two logins or stop a master another one just made.
+- **`sstat` from newer Slurm no longer makes a cluster "degraded" after a preemption.** Slurm 26.05 words its
+  no-steps answer "No steps running for JobId=N" instead of "couldn't get steps"; both, and the "for job N" forms, now
+  mean the jobs ended since squeue.
+- **Connection problems can be looked up afterwards.** `runfleet.log` records the following:
+  - each run of connection failures, logged once with ssh's error and once more whenever the error changes;
+  - when the host became reachable again;
+  - master restarts;
+  - the idle pause and its end.
+
+  `ssh-HOST.log` keeps the previous attempt's messages as `ssh-HOST.log.1` instead of erasing them.
+
 ## [0.9.3] - 2026-11-09
 
 ### Fixed

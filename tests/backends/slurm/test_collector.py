@@ -869,17 +869,26 @@ def test_extra_information_sections_are_advisory() -> None:
     assert "ps -u" in secs["slurm.logstat"].cmd and "stat -L -c '%n|%s|%Y'" in secs["slurm.logstat"].cmd
 
 
-def test_sstat_of_jobs_that_all_ended_is_an_answer() -> None:
-    """A cluster that preempts often: every job sstat was asked about ended since squeue; sstat printed only "couldn't get
-    steps" on stderr. That is no usage, not a failure of the host."""
+@pytest.mark.parametrize("line", [
+    "sstat: error: couldn't get steps for JobId={}",
+    "sstat: error: No steps running for JobId={}",      # Slurm 26.05 (stderr_only, rc 0)
+    "sstat: error: No steps running for job {}",
+    "sstat: error: couldn't get steps for job {}",      # the demo's wording
+])
+def test_sstat_of_jobs_that_all_ended_is_an_answer(line: str) -> None:
+    """A cluster that preempts often: every job sstat was asked about ended since squeue; sstat printed only "no steps"
+    lines on stderr (worded differently by different Slurm versions). That is no usage, not a failure of the host.
+    User report: Slurm 26.05's "No steps running for JobId=N" kept a cluster "degraded" until the next usage tick."""
     from runfleet.backends.slurm.collector import sstat_steps_gone
 
     c, cx, _ = started()
-    gone = result("slurm.sstat", stderr="sstat: error: couldn't get steps for JobId=59298659\n"
-                                        "sstat: error: couldn't get steps for JobId=59298660")
+    gone = result("slurm.sstat", stderr=line.format(59298659) + "\n" + line.format(59298660))
     assert sstat_steps_gone(gone)
     out = tick(c, cx, gone)
     assert "slurm.sstat" in out.handled and not [e for e in out.errors if e.section == "slurm.sstat"]
+    mixed = result("slurm.sstat", stderr=line.format(59298659) + "\nsstat: error: Socket timed out on send/recv "
+                                                                  "operation")
+    assert not sstat_steps_gone(mixed)                  # one real error among them: a failure
     other = result("slurm.sstat", stderr="sstat: error: Socket timed out on send/recv operation")
     assert not sstat_steps_gone(other)
     out = tick(c, cx, other)

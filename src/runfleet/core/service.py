@@ -730,6 +730,7 @@ class FleetService(FleetAPI):
     def note_user_activity(self) -> None:
         self._last_input = self.clock.monotonic()
         if self.store.idle_paused:
+            log.info("input after the idle pause: polling resumed")
             self.store.set_idle_paused(False)
             for host, p in self._pollers.items():
                 p.set_paused(False)
@@ -787,6 +788,7 @@ class FleetService(FleetAPI):
             delay: float | None
             if idle >= g.idle_pause_after:
                 if not self.store.idle_paused:
+                    log.info("no input for %.0f min: polling paused until the next key or click", idle / 60)
                     self.store.set_idle_paused(True)
                     for p in self._pollers.values():
                         p.set_paused(True)
