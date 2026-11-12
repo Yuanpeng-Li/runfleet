@@ -472,7 +472,8 @@ async def test_reset_if_wedged_spares_a_socket_replaced_during_the_check(
     async def replaced_meanwhile() -> bool:
         ok = await check()
         sock.unlink()
-        sock.write_text("")                                             # the other RunFleet's new master
+        await asyncio.sleep(0.05)                       # a login's time apart; more than a coarse file-time tick
+        sock.write_text("")                             # the other RunFleet's new master (ext4: often the same inode)
         return ok
 
     monkeypatch.setattr(t, "check_master", replaced_meanwhile)

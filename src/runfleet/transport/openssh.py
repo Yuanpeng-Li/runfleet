@@ -282,15 +282,17 @@ class OpenSSHTransport:
         return (self.plan is not None and self.plan.mode == "managed" and self._socket_exists()
                 and not self._stale_check())
 
-    def _socket_id(self) -> tuple[int, int] | None:
-        """The socket file's identity: a master made meanwhile (another RunFleet on the same socket) binds a new one."""
+    def _socket_id(self) -> tuple[int, int, int] | None:
+        """The socket file's identity: a master made meanwhile (another RunFleet on the same socket) binds a new one.
+        The inode number alone is not enough: ext4 hands a just-freed one to the next file, so the ctime is part of
+        it (a new socket is bound after the old one was removed, never at the same instant)."""
         if self.rendered_control_path is None:
             return None
         try:
             st = os.lstat(self.rendered_control_path)
         except OSError:
             return None
-        return st.st_dev, st.st_ino
+        return st.st_dev, st.st_ino, st.st_ctime_ns
 
     def _master_lock(self) -> asyncio.Lock:
         if self._mlock is None:
