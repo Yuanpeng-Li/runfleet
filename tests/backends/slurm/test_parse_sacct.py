@@ -190,6 +190,6 @@ def test_pipe_fallback_with_a_pipe_in_jobname_stays_bad() -> None:
     fields = format_fields(meta("k2", "sacct_ext")["cmd"])
     line = sample("k2", "sacct_ext").splitlines()[0]
     jid, raw, name, rest = line.split("|", 3)
-    rest = rest.replace("|gpu-preempt|", "|GPU|", 1)      # shifted into State it would pass as a state word
+    rest = rest.replace("|gpu-pooling|", "|GPU|", 1)      # shifted into State it would pass as a state word
     pr = parse_sacct(f"{jid}|{raw}|{name}|run|{rest}", fields, host="k2", tz=TZ["k2"], sep="|", me="alice0001")
     assert not pr.items and pr.bad_lines and pr.bad_ids == {"2332863"}

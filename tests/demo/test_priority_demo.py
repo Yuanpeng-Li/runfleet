@@ -32,8 +32,8 @@ async def test_k2_fairshare_evidence_round_trip(world: DemoWorld, clock: StepClo
     assert {"sprio", "sshare"} <= caps.tools and caps.slurm_config["PriorityWeightFairShare"] == "100000"
     out = await d.poll()
     assert not out.get("errors")
-    p = out["jobs"]["3372066"].priority                    # smoke-test, PD Priority, gpu-preempt
-    assert p is not None and p.ranked and p.dominant == "fairshare" and p.partition == "gpu-preempt"
+    p = out["jobs"]["3372066"].priority                    # smoke-test, PD Priority, gpu-pooling
+    assert p is not None and p.ranked and p.dominant == "fairshare" and p.partition == "gpu-pooling"
     assert p.priority == sum(f.value for f in p.factors)
     assert ("fairshare 0.03: your group (lab) used much more than its share recently; it recovers with a half-life "
             "of 14 days") in p.hints

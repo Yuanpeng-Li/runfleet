@@ -154,9 +154,9 @@ def _qos_list(items: Sequence[tuple[str, float]]) -> str:
 def partition_lines(caps: Capabilities | None, cells: Sequence[Any], width: int, *, usage_only: bool,
                     narrow: bool = False) -> list[Text]:
     """Charged and free partitions (§5.2.11 rule 5): `charged  gpu  cpu=1 · gpu=32 per hour  (qos normal ×1, high
-    ×1)` and `free     free-gpu · free-gpuxl  (AllowQos low ×0, guest ×0: billing-h are recorded but not charged)`;
-    a usage-only cluster where every QOS counts ×1: `partitions  gpu-preempt · labpi (qos ×1 everywhere)`. Narrow:
-    one line `charged gpu · free free-gpu, free-gpuxl (qos low ×0)`. [] without charging rules."""
+    ×1)` and `free     flex-gpu · flex-gpuxl  (AllowQos low ×0, guest ×0: billing-h are recorded but not charged)`;
+    a usage-only cluster where every QOS counts ×1: `partitions  gpu-pooling · labpi (qos ×1 everywhere)`. Narrow:
+    one line `charged gpu · free flex-gpu, flex-gpuxl (qos low ×0)`. [] without charging rules."""
     if caps is None or not caps.partition_charges:
         return []
     classes = costs.classify_partitions(caps, cells)

@@ -284,18 +284,18 @@ def _cluster(nodes: tuple[Node, ...], parts: tuple[str, ...], *, stale: bool = F
 
 def test_free_by_type_counts_each_node_once() -> None:
     nodes = (
-        _node("lyra-gpu-36-04", ("free-gpu",), "allocated", "v100", 4, 3, idle_cpus=0),   # 1 idle V100: not free
-        _node("n-both", ("free-gpu", "free-gpuxl"), "mixed", "v100", 4, 1),              # listed twice, counted once
+        _node("lyra-gpu-36-04", ("flex-gpu",), "allocated", "v100", 4, 3, idle_cpus=0),   # 1 idle V100: not free
+        _node("n-both", ("flex-gpu", "flex-gpuxl"), "mixed", "v100", 4, 1),              # listed twice, counted once
         _node("n-outside", ("labpi",), "idle", "v100", 8, 0),                            # not a listed partition
-        _node("n-mig", ("free-gpu",), "mixed", "nvidia_a100_80gb_pcie_1g.10gb", 7, 2, flags="-"),   # planned
+        _node("n-mig", ("flex-gpu",), "mixed", "nvidia_a100_80gb_pcie_1g.10gb", 7, 2, flags="-"),   # planned
     )
-    free = fl.free_by_type({"k2": _cluster(nodes, ("free-gpu", "free-gpuxl"))}, T0)
+    free = fl.free_by_type({"k2": _cluster(nodes, ("flex-gpu", "flex-gpuxl"))}, T0)
     v100 = free.types["V100"]
-    assert (v100.free, v100.total, v100.where) == (3, 8, {("k2", "free-gpu"): [3, 0]})
+    assert (v100.free, v100.total, v100.where) == (3, 8, {("k2", "flex-gpu"): [3, 0]})
     mig = free.types["MIG slices (k2)"]
     assert (mig.label, mig.host, mig.free, mig.planned) == ("MIG slices", "k2", 5, 5)
     assert free.unknown == () and free.sinfo_age_s == 180
-    stale = fl.free_by_type({"k2": _cluster(nodes, ("free-gpu",), stale=True)}, T0)
+    stale = fl.free_by_type({"k2": _cluster(nodes, ("flex-gpu",), stale=True)}, T0)
     assert stale.types == {} and stale.unknown == ("k2",)
 
 
@@ -479,14 +479,14 @@ def _with_sinfo(st, *, ok: bool = True, ago: float = 180.0, slow: float = 1.0, p
 def test_free_by_type_needs_a_good_recent_sinfo() -> None:
     """Deep review B: free GPUs were counted from a failed or long-stale `slurm.sinfo` section while the host itself was
     fresh (OK / DEGRADED); such a host is listed as "host ?" now."""
-    nodes = (_node("n1", ("free-gpu",), "idle", "v100", 4, 0),)
+    nodes = (_node("n1", ("flex-gpu",), "idle", "v100", 4, 0),)
 
     def seen(st, rate: float = 1.0) -> tuple[int | None, tuple[str, ...]]:
         free = fl.free_by_type({"k2": st}, T0, rate=rate)
         t = free.types.get("V100")
         return (t.free if t is not None else None), free.unknown
 
-    st = _with_sinfo(_cluster(nodes, ("free-gpu",)))
+    st = _with_sinfo(_cluster(nodes, ("flex-gpu",)))
     assert seen(st) == (4, ())
     bound = fl.sinfo_bound_s(st)
     assert bound == 2 * 120 * fl.NODES_HIDDEN_FACTOR * fl.IDLE_FACTOR + 5            # 80 min at the defaults
@@ -923,22 +923,22 @@ def test_free_region_packs_the_others_and_says_how_many_are_cut() -> None:
 
 def test_free_spots_add_up_to_the_panel_counts() -> None:
     nodes = (
-        _node("n-a", ("free-gpu",), "mixed", "v100", 4, 1),
-        _node("n-b", ("free-gpu", "free-gpuxl"), "idle", "v100", 4, 0),
-        _node("n-c", ("free-gpuxl",), "allocated", "v100", 4, 4, idle_cpus=0),
-        dataclasses.replace(_node("n-m", ("free-gpu",), "mixed", "nvidia_a100_1g.10gb", 7, 0),
+        _node("n-a", ("flex-gpu",), "mixed", "v100", 4, 1),
+        _node("n-b", ("flex-gpu", "flex-gpuxl"), "idle", "v100", 4, 0),
+        _node("n-c", ("flex-gpuxl",), "allocated", "v100", 4, 4, idle_cpus=0),
+        dataclasses.replace(_node("n-m", ("flex-gpu",), "mixed", "nvidia_a100_1g.10gb", 7, 0),
                             gres=(GresCount("gpu", "nvidia_a100_1g.10gb", 7, 0, None),
                                   GresCount("gpu", "nvidia_a100_2g.20gb", 2, 0, None))),
     )
     st = _states()
-    hosts = {"k2": _cluster(nodes, ("free-gpu", "free-gpuxl")), "labstation": st["labstation"]}
+    hosts = {"k2": _cluster(nodes, ("flex-gpu", "flex-gpuxl")), "labstation": st["labstation"]}
     free = fl.free_by_type(hosts, T0)
     spots = fl.free_spots(hosts, T0)
     for key, t in free.types.items():
         mine = [s for s in spots if s.key == key]
         assert sum(s.free for s in mine) == t.free and sum(s.total for s in mine) == t.total, key
     assert next(s for s in spots if s.key == "MIG slices (k2)").nodes == (("n-m", 9, 9),)
-    v100 = next(s for s in spots if s.key == "V100" and s.partition == "free-gpu")
+    v100 = next(s for s in spots if s.key == "V100" and s.partition == "flex-gpu")
     assert v100.nodes == (("n-b", 4, 4), ("n-a", 3, 4))
     mig = [s for s in spots if s.key.startswith("MIG")]
     assert all(len({n for n, _f, _t in s.nodes}) == len(s.nodes) for s in mig)   # one entry per node, profiles summed

@@ -3,7 +3,7 @@
   "my jobs   R 4   PD 2   F 0   CD 7            ",
   "my GPUs   5   A100-40G ×3 · H200 ×2          ",
   "job util  ▕███████████▏▏  93%   mem 166/401G ",
-  "free GPUs gpu-preempt 31/164 · labpi 2/16    ",
+  "free GPUs gpu-pooling 31/164 · labpi 2/16    ",
   "next      PD smoke-test · priority           ",
   "login     login02  load 2.3/32               "
  ],
@@ -11,7 +11,7 @@
   "my jobs   R 4   PD 2   F 0   CD 7            (last 24h)",
   "my GPUs   5   A100-40G ×3 · H200 ×2                    ",
   "job util  ▕████████████████████▌ ▏  93%   mem 166/401G ",
-  "free GPUs gpu-preempt 31/164 (4 planned) · labpi 2/16  ",
+  "free GPUs gpu-pooling 31/164 (4 planned) · labpi 2/16  ",
   "next      PD smoke-test · priority                     ",
   "login     login02  load 2.3/32                         "
  ],
@@ -19,7 +19,7 @@
   "my jobs   R 4   PD 2   F 0   CD 7                                      (last 24h)",
   "my GPUs   5   A100-40G ×3 · H200 ×2                                              ",
   "job util  ▕████████████████████████████████████████████▋   ▏  93%   mem 166/401G ",
-  "free GPUs gpu-preempt 31/164 (4 planned) · labpi 2/16                            ",
+  "free GPUs gpu-pooling 31/164 (4 planned) · labpi 2/16                            ",
   "next      PD smoke-test · priority                                               ",
   "login     login02  load 2.3/32                                                   "
  ],
@@ -51,7 +51,7 @@
   "my jobs   R 0   PD 0   F 2   CD 3            ",
   "my GPUs   0                                  ",
   "job util  n/a — no GPU accounting on this cl…",
-  "free GPUs free-gpu 9/120 · free-gpuxl 4/36   ",
+  "free GPUs flex-gpu 9/120 · flex-gpuxl 4/36   ",
   "! ssh: Connection timed out during banner ex…",
   "  (via jump host) · next retry in 38s · e in…"
  ],
@@ -59,7 +59,7 @@
   "my jobs   R 0   PD 0   F 2   CD 3            (last 24h)",
   "my GPUs   0                                            ",
   "job util  n/a — no GPU accounting on this cluster      ",
-  "free GPUs free-gpu 9/120 · free-gpuxl 4/36             ",
+  "free GPUs flex-gpu 9/120 · flex-gpuxl 4/36             ",
   "! ssh: Connection timed out during banner exchange     ",
   "  (via jump host) · next retry in 38s · e info         "
  ],
@@ -67,7 +67,7 @@
   "my jobs   R 0   PD 0   F 2   CD 3                                      (last 24h)",
   "my GPUs   0                                                                      ",
   "job util  n/a — no GPU accounting on this cluster                                ",
-  "free GPUs free-gpu 9/120 · free-gpuxl 4/36                                       ",
+  "free GPUs flex-gpu 9/120 · flex-gpuxl 4/36                                       ",
   "! ssh: Connection timed out during banner exchange                               ",
   "  (via jump host) · next retry in 38s · e info                                   "
  ],

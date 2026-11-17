@@ -156,7 +156,7 @@ def test_free_gpus_text_separates_mig() -> None:
     from runfleet.models import PartitionSummary
     from runfleet.ui import render
 
-    mig = PartitionSummary("gpu-preempt", 10, 103, 13, 0, {"nvidia_a100_80gb_pcie": (2, 2), "a30": (1, 1),
+    mig = PartitionSummary("gpu-pooling", 10, 103, 13, 0, {"nvidia_a100_80gb_pcie": (2, 2), "a30": (1, 1),
                                                            "nvidia_a100_80gb_pcie_1g.10gb": (10, 100)}, {})
     assert render.free_gpus(mig).plain == "3/3 +10 MIG"
     plain = PartitionSummary("h200", 13, 52, 4, 0, {"nvidia_h200_nvl": (4, 52)}, {})

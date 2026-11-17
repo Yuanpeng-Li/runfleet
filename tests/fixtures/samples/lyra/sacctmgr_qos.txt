@@ -8,7 +8,7 @@ highmempart|1.000000
 free-part|0.000000
 highmem-part|1.000000
 hugemem-part|1.000000
-free-gpu-part|0.000000
+flex-gpu-part|0.000000
 gpu-part|1.000000
 gpu-highmem|1.000000
 gpu-highmem-part|1.000000
@@ -17,12 +17,12 @@ standard-mem|1.000000
 standard-mem-part|1.000000
 standard-mem-pi02|1.000000
 gpuxl-part|1.000000
-free-gpuxl-part|1.000000
+flex-gpuxl-part|1.000000
 standard-mem-pi03|1.000000
 standard-part|1.000000
 free|1.000000
 standard|1.000000
 highmem|1.000000
 hugemem|1.000000
-free-gpu|1.000000
+flex-gpu|1.000000
 gpu|1.000000

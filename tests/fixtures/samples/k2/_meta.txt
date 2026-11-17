@@ -43,15 +43,15 @@ cmd: squeue --me --json | head -c 400000
 rc=0 ms=47
 
 ## squeue_parts_O
-cmd: squeue -p 'lab,gpu-preempt' -h -O 'JobID:|,ArrayJobID:|,ArrayTaskID:|,Name:|,UserName:|,State:|,StateCompact:|,Reason:|,TimeUsed:|,TimeLimit:|,TimeLeft:|,NumNodes:|,NumCPUs:|,MinMemory:|,Partition:|,QOS:|,Account:|,SubmitTime:|,StartTime:|,EndTime:|,NodeList:|,BatchHost:|,tres-alloc:|,tres-per-node:|,tres-per-job:|,RestartCnt:|,STDOUT:|,STDERR:|,WorkDir:|,Command:|' | head -25
+cmd: squeue -p 'lab,gpu-pooling' -h -O 'JobID:|,ArrayJobID:|,ArrayTaskID:|,Name:|,UserName:|,State:|,StateCompact:|,Reason:|,TimeUsed:|,TimeLimit:|,TimeLeft:|,NumNodes:|,NumCPUs:|,MinMemory:|,Partition:|,QOS:|,Account:|,SubmitTime:|,StartTime:|,EndTime:|,NodeList:|,BatchHost:|,tres-alloc:|,tres-per-node:|,tres-per-job:|,RestartCnt:|,STDOUT:|,STDERR:|,WorkDir:|,Command:|' | head -25
 rc=0 ms=35
 
 ## squeue_parts_legacy
-cmd: squeue -p 'lab,gpu-preempt' -h -o '%i|%j|%T|%M|%l|%D|%R|%b|%C|%m|%P|%V|%S|%Z|%o' | head -25
+cmd: squeue -p 'lab,gpu-pooling' -h -o '%i|%j|%T|%M|%l|%D|%R|%b|%C|%m|%P|%V|%S|%Z|%o' | head -25
 rc=0 ms=38
 
 ## squeue_parts_states
-cmd: squeue -p 'lab,gpu-preempt' -h -o '%T' | sort | uniq -c
+cmd: squeue -p 'lab,gpu-pooling' -h -o '%T' | sort | uniq -c
 rc=0 ms=34
 
 ## sacct_basic
@@ -86,11 +86,11 @@ cmd: scontrol show job 2334564 -d
 rc=0 ms=26
 
 ## sinfo_parts
-cmd: sinfo -h -p 'lab,gpu-preempt' -o '%P|%a|%l|%D|%T|%G|%N'
+cmd: sinfo -h -p 'lab,gpu-pooling' -o '%P|%a|%l|%D|%T|%G|%N'
 rc=0 ms=33
 
 ## sinfo_nodes_O
-cmd: sinfo -h -N -p 'lab,gpu-preempt' -O 'NodeList:|,Partition:|,StateLong:|,CPUsState:|,Memory:|,AllocMem:|,FreeMem:|,Gres:|,GresUsed:|,Reason:|'
+cmd: sinfo -h -N -p 'lab,gpu-pooling' -O 'NodeList:|,Partition:|,StateLong:|,CPUsState:|,Memory:|,AllocMem:|,FreeMem:|,Gres:|,GresUsed:|,Reason:|'
 rc=0 ms=32
 
 ## sinfo_summary

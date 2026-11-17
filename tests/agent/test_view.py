@@ -395,8 +395,8 @@ def test_array_parent_summarises(demo: FleetView) -> None:
 def test_gpus_mig_apart_and_scope(demo: FleetView) -> None:
     doc = view.gpus(demo)
     assert "# scope: Slurm counts cover only" in doc.text
-    k2 = next(p for p in doc.data["partitions"] if p["partition"] == "gpu-preempt")
-    # 11: the launcher job (demo.world.LAUNCHER_JOB, "find other log files") holds one H200 of gpu-preempt
+    k2 = next(p for p in doc.data["partitions"] if p["partition"] == "gpu-pooling")
+    # 11: the launcher job (demo.world.LAUNCHER_JOB, "find other log files") holds one H200 of gpu-pooling
     assert (k2["free"], k2["total"], k2["mig_free"]) == (11, 108, 11) and k2["planned"] == 14
     assert "11/108 +11 MIG (14 planned)" in doc.text
     h100 = view.gpus(demo, gpu_type="h100")

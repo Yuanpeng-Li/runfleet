@@ -355,7 +355,7 @@ def _instances() -> list[object]:
     share = m.FairShare(account="lab", user="usr", raw_shares="1", norm_shares=0.5, raw_usage=123456,
                         effective_usage=0.01, fairshare=0.95, level_fs=None)
     pprio = m.PendingPriority(ranked=True, priority=1234.0, partition="gpu", factors=(factor,), dominant="fairshare",
-                              others=(("gpu-preempt", 1.0),), fairshare=(share,), hints=("fairshare 0.95",),
+                              others=(("gpu-pooling", 1.0),), fairshare=(share,), hints=("fairshare 0.95",),
                               sampled_at=T0, half_life_s=14 * 86400.0)
     pending = m.Job(key=m.JobKey("k2", "2334564"), kind=m.JobKind.SLURM, name="smoke", user="usr",
                     state=m.JobState.PENDING, raw_state="PENDING", job_id_raw="2334564", priority=pprio)

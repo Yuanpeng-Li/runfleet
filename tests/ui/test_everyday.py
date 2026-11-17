@@ -119,7 +119,7 @@ def test_support_bundle_markdown_is_complete_and_scrubbed() -> None:
     md = everyday.support_bundle(job, detail, cluster="k2 (Slurm 25.05.8)", log_lines=lines, now=T0,
                                  version="0.1")
     assert md.startswith("# RunFleet support bundle · k2:2330539")
-    for part in ("**cluster:** k2 (Slurm 25.05.8)", f"**user:** {ME}", "gpu-preempt / normal / campus01",
+    for part in ("**cluster:** k2 (Slurm 25.05.8)", f"**user:** {ME}", "gpu-pooling / normal / campus01",
                  "2× GPU", "FAILED (F)", "exit 1:0", "n-38-01 (GPU IDX 0,1)", "**restarts:** 2",
                  "batch step exited with code 1", "## Efficiency", "mostly idle", "## Cause", "OOM-GPU",
                  "## Last 30 log lines", "secrets scrubbed"):

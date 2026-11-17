@@ -20,7 +20,7 @@ NAME = "orb-swp--train--places-cosinewarm--s44--a01"
 
 
 def lyra_job(jid: str, state: JobState, submit_ago: timedelta, end_ago: timedelta | None = None, **kw: Any) -> Job:
-    d: dict[str, Any] = dict(name=NAME, submit_time=T0 - submit_ago, partition="free-gpu")
+    d: dict[str, Any] = dict(name=NAME, submit_time=T0 - submit_ago, partition="flex-gpu")
     if end_ago is not None:
         d.update(start_time=T0 - submit_ago + M, end_time=T0 - end_ago)
     d.update(kw)
@@ -44,7 +44,7 @@ def failed_chain(last: JobState = JobState.COMPLETED) -> list[Job]:
 def lyra(jobs: list[Job], preempt_mode: str | None = "CANCEL") -> FleetView:
     hv = mk_host("lyra", jobs)
     assert hv.snapshot is not None and hv.snapshot.caps is not None
-    charge = PartitionCharge("free-gpu", preempt_mode=preempt_mode)
+    charge = PartitionCharge("flex-gpu", preempt_mode=preempt_mode)
     caps: Capabilities = dataclasses.replace(hv.snapshot.caps, partition_charges=(charge,))
     return fleet(dataclasses.replace(hv, snapshot=dataclasses.replace(hv.snapshot, caps=caps)))
 

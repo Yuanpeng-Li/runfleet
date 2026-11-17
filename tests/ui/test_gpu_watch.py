@@ -88,9 +88,9 @@ def test_a_watch_matches_per_node_never_a_fleet_sum() -> None:
                                               (MIG, 7, 0))))[0].free == 4
     assert gw.matches(GpuWatch(1, "H100"), rd(T0, ng("n1", ("nvidia_gh200_480gb", 4, 0)))) == []   # not GH200
     # partition: only nodes in it
-    w = GpuWatch(1, "H200", partition="gpu-preempt")
-    split = rd(T0, ng("n1", (H200, 4, 0), parts=("gpu",)), ng("n2", (H200, 1, 0), parts=("gpu-preempt",)),
-               parts=("gpu", "gpu-preempt"))
+    w = GpuWatch(1, "H200", partition="gpu-pooling")
+    split = rd(T0, ng("n1", (H200, 4, 0), parts=("gpu",)), ng("n2", (H200, 1, 0), parts=("gpu-pooling",)),
+               parts=("gpu", "gpu-pooling"))
     assert [m.node for m in gw.matches(w, split)] == ["n2"]
     assert gw.matches(GpuWatch(1, "H200"), rd(None, ng("n1", (H200, 4, 0)))) == []   # no fresh reading: nothing
 
@@ -256,20 +256,20 @@ def test_prompt_reads_leniently() -> None:
 
     assert watch("2 h200 k2") == GpuWatch(2, "H200", host="k2")
     assert watch("2x H200 on K2") == watch("2xh200 k2") == watch("x2 h200 @k2") == GpuWatch(2, "H200", host="k2")
-    assert watch("4 a100 k2/gpu-preempt planned") == GpuWatch(4, "A100", host="k2", partition="gpu-preempt",
+    assert watch("4 a100 k2/gpu-pooling planned") == GpuWatch(4, "A100", host="k2", partition="gpu-pooling",
                                                                planned=True)
     assert watch("free gpus on k2 partition=labpi") == GpuWatch(1, host="k2", partition="labpi")
     assert watch("2 3090") == watch("3090 2") == GpuWatch(2, "3090")         # a model that is a number
     assert watch("a100-80gb") == GpuWatch(1, "A100-80G")
     assert watch("1 mig k2") == GpuWatch(1, mig="", host="k2")
     assert watch("2 a100-3g.40gb") == watch("2 a100 3g.40gb") == GpuWatch(2, "A100", mig="3g.40gb")
-    assert watch("h200 gpu-preempt") == GpuWatch(1, "H200", partition="gpu-preempt")   # a partition some host lists
+    assert watch("h200 gpu-pooling") == GpuWatch(1, "H200", partition="gpu-pooling")   # a partition some host lists
     parsed = gw.parse("2 h300", fleet)
     assert parsed.watch == GpuWatch(2, "H300") and parsed.notes == ("no H300 GPUs seen in the fleet yet",)
     for text, problem in (("", "type what to wait for"), ("foo", "“foo” is not a host, partition or GPU type"),
                           ("2 h200 nowhere/gpu", "no host “nowhere”"), ("2 4 h200", "one count per watch"),
                           ("h200 a6000", "one GPU type per watch"), ("k2 vega", "one host per watch"),
-                          ("k2/h200", "k2 lists no partition “h200” (it lists gpu-preempt, labpi)"),
+                          ("k2/h200", "k2 lists no partition “h200” (it lists gpu-pooling, labpi)"),
                           ("labstation/gpu", "labstation has no partitions"), ("100 h200", "a count from 1 to 64"),
                           ("partition=nope", "no host lists a partition “nope”"), ("0 h200", "a count from 1")):
         got = gw.parse(text, fleet)

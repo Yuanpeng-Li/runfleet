@@ -47,9 +47,9 @@ def test_associations() -> None:
 
 
 @pytest.mark.parametrize(("host", "parts"), [
-    ("k2", ("gpu-preempt", "lab", "labpi")),          # lab/labpi: AllowGroups has one of yours; labpi: QOS labpi
+    ("k2", ("gpu-pooling", "lab", "labpi")),          # lab/labpi: AllowGroups has one of yours; labpi: QOS labpi
     ("vega", ("a30", "h100", "h200")),               # every GPU partition is open; normal/dev/vdi have no GPUs
-    ("lyra", ("free-gpu", "free-gpuxl", "gpu", "gpu-highmem", "gpuxl")),   # paid gpu/gpuxl via QOS normal/high
+    ("lyra", ("flex-gpu", "flex-gpuxl", "gpu", "gpu-highmem", "gpuxl")),   # paid gpu/gpuxl via QOS normal/high
 ])
 def test_gpu_partitions_you_may_submit_to(host: str, parts: tuple[str, ...]) -> None:
     assert caps_of(host)["gpu_partitions"] == parts
@@ -112,7 +112,7 @@ def test_gpu_partitions_names_with_spaces_and_partition_associations() -> None:
 
 # ---------------------------------------------------------------- charging rules (Account, §5.2.11)
 @pytest.mark.parametrize(("host", "count", "free"), [
-    ("lyra", 28, {"low", "guest", "free-part", "free-gpu-part"}),   # high ×2; free-gpuxl-part is ×1 (not decisive)
+    ("lyra", 28, {"low", "guest", "free-part", "flex-gpu-part"}),   # high ×2; flex-gpuxl-part is ×1 (not decisive)
     ("k2", 7, set()), ("vega", 9, set()),                           # usage only: every factor 1
 ])
 def test_qos_usage_factor(host: str, count: int, free: set[str]) -> None:
@@ -120,7 +120,7 @@ def test_qos_usage_factor(host: str, count: int, free: set[str]) -> None:
     assert isinstance(f, dict) and len(f) == count and f["normal"] == 1.0
     assert {q for q, v in f.items() if v == 0} == free
     if host == "lyra":
-        assert f["high"] == 2.0 and f["free-gpuxl-part"] == 1.0
+        assert f["high"] == 2.0 and f["flex-gpuxl-part"] == 1.0
     else:
         assert set(f.values()) == {1.0}
 
@@ -144,9 +144,9 @@ def test_partition_charges_from_lyra() -> None:
     c = parse_capabilities({"slurm.assoc": fixture_result("slurm.assoc", "lyra", "sacctmgr_assoc"),
                             "slurm.parts": fixture_result("slurm.parts", "lyra", "scontrol_partitions_charges")})
     charges = {p.partition: p for p in c["partition_charges"]}  # type: ignore[attr-defined]
-    assert list(charges) == ["free", "free-gpu", "free-gpuxl", "gpu", "gpu-highmem", "gpuxl", "standard",
+    assert list(charges) == ["free", "flex-gpu", "flex-gpuxl", "gpu", "gpu-highmem", "gpuxl", "standard",
                              "standard-mem"]
-    assert charges["free-gpuxl"] == PartitionCharge("free-gpuxl", "", "free-gpuxl-part", ("low", "guest"))
+    assert charges["flex-gpuxl"] == PartitionCharge("flex-gpuxl", "", "flex-gpuxl-part", ("low", "guest"))
     assert charges["gpu"] == PartitionCharge("gpu", "cpu=1,gres/gpu=32", "gpu-part", ("normal", "high"))
     assert charges["gpuxl"].billing_weights == "cpu=1,gres/gpu:L40S=32,gres/gpu:RTX6000=64"
     assert charges["standard"].qos == "normal" and charges["standard-mem"].allow_qos == ("standard-mem",
@@ -183,7 +183,7 @@ def test_partition_preempt_mode() -> None:
     `slurm_config` value applies). The trimmed fixture lines carry none."""
     lines = "\n".join([
         "groups=lab", "parents=complete",
-        _part("free-gpu", PreemptMode="CANCEL"), _part("gpu", PreemptMode="off"),
+        _part("flex-gpu", PreemptMode="CANCEL"), _part("gpu", PreemptMode="off"),
         _part("gang", PreemptMode="GANG,SUSPEND"), _part("plain"), _part("na", PreemptMode="N/A"),
     ])
     assert [p.preempt_mode for p in partition_charges(lines)] == ["CANCEL", "OFF", "GANG,SUSPEND", None, None]

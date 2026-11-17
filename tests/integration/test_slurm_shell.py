@@ -78,14 +78,14 @@ def test_poll_cycle_through_real_shell(tmp_path: Path, shell: str) -> None:
     pd = out.jobs["2334564"]
     assert pd.logs[0].path == "/shared/pilab/pilab/rl-benchmarks/logs/smoke-test_2334564.out"
     assert out.nodes is not None and len(out.nodes) == 30
-    assert out.partitions is not None and out.partitions[0].name == "gpu-preempt"
+    assert out.partitions is not None and out.partitions[0].name == "gpu-pooling"
     sc_calls = k2env.calls("scontrol")
     assert sorted(call[-1] for call in sc_calls) == ["2332861", "2332862", "2332863", "2333760", "2334564"]
     assert all(call[1:5] == ["show", "job", "-d", "-o"] for call in sc_calls)
     (ss,) = k2env.calls("sstat")
     assert ss[1:4] == ["-a", "-j", "2332861,2332862,2332863,2333760"] and ss[-1].endswith("TRESUsageInTot%400")
     (si,) = k2env.calls("sinfo")
-    assert si[1:5] == ["-h", "-N", "-p", "gpu-preempt"] and si[5] == "-O"
+    assert si[1:5] == ["-h", "-N", "-p", "gpu-pooling"] and si[5] == "-O"
 
 
 def test_vanished_job_follow_up(k2env: MockEnv, tmp_path: Path) -> None:

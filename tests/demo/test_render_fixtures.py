@@ -27,7 +27,7 @@ def k2_cluster() -> SimCluster:
 
 def orb_job(job_id: int, name: str, submit: str, *, tz: timedelta = UTC_M5, **kw: object) -> SimJob:
     fields: dict[str, object] = dict(
-        user="alice0001", uid=610001, account="campus01", partition="gpu-preempt", qos="gpu-priority",
+        user="alice0001", uid=610001, account="campus01", partition="gpu-pooling", qos="gpu-priority",
         time_limit_s=3 * 86400, cpus=8, mem_mib=48 * 1024, workdir="/shared/pilab/pilab/orb",
         command="/shared/pilab/pilab/orb/jobs/train.sbatch", stdout_pattern="/shared/pilab/pilab/orb/logs/%x_%j.out",
         stderr_pattern="/shared/pilab/pilab/orb/logs/%x_%j.out", gpus_per_node=1, gpu_type="nvidia_a100-sxm4-40gb")
@@ -85,7 +85,7 @@ def test_squeue_O_matches_lyra_array_summary_row() -> None:
     c = SimCluster(name="lyra", user="rita", uid=1, tz=UTC_M7)
     wd = "/scratch/rita/md/run1"
     job = SimJob(job_id=31270818, name="train.sh", user="rita", uid=1, account="rita",
-                 partition="free-gpu", qos="low", submit=epoch("2026-08-26T12:51:37", UTC_M7), time_limit_s=86400,
+                 partition="flex-gpu", qos="low", submit=epoch("2026-08-26T12:51:37", UTC_M7), time_limit_s=86400,
                  cpus=1, mem_mib=3 * 1024, workdir=wd, command="./train.sh", stdout_pattern="slurm-%A_%a.out",
                  gpus_per_node=1, gpu_type=None, typed_request=False, typed_alloc=False, reason="Dependency",
                  array_job_id=31270818, array_task="1-24%1", summary=True, array_pending=list(range(1, 25)))
@@ -145,15 +145,15 @@ def test_sstat_without_gpu_tres_omits_gres_keys() -> None:
 def _k2_nodes() -> list[SimNode]:
     s07 = "(S:0-7)"
     return [
-        SimNode("n-31-01", ("gpu-preempt",), 64, 512000, (GresDef("nvidia_geforce_rtx_3090", 8, s07),),
+        SimNode("n-31-01", ("gpu-pooling",), 64, 512000, (GresDef("nvidia_geforce_rtx_3090", 8, s07),),
                 bg_cpus=34, bg_mem_mib=288768, bg_gpu_idx=set(range(8)), free_mem_mib=23103),
-        SimNode("n-31-02", ("gpu-preempt",), 64, 512000, (GresDef("nvidia_geforce_rtx_3090", 8, s07),),
+        SimNode("n-31-02", ("gpu-pooling",), 64, 512000, (GresDef("nvidia_geforce_rtx_3090", 8, s07),),
                 bg_cpus=40, bg_mem_mib=401408, bg_gpu_idx=set(range(8)), free_mem_mib=40339),
-        SimNode("n-31-03", ("gpu-preempt",), 64, 512000, (GresDef("nvidia_geforce_rtx_3090", 8, s07),),
+        SimNode("n-31-03", ("gpu-pooling",), 64, 512000, (GresDef("nvidia_geforce_rtx_3090", 8, s07),),
                 bg_cpus=44, bg_mem_mib=296960, bg_gpu_idx=set(range(8)), free_mem_mib=22073),
-        SimNode("n-31-04", ("gpu-preempt",), 56, 128000, (GresDef("tesla_v100-pcie-16gb", 4, "(S:0)"),),
+        SimNode("n-31-04", ("gpu-pooling",), 56, 128000, (GresDef("tesla_v100-pcie-16gb", 4, "(S:0)"),),
                 bg_cpus=6, bg_mem_mib=73728, bg_gpu_idx={0, 2, 3}, free_mem_mib=13725),
-        SimNode("n-31-05", ("gpu-preempt",), 64, 515000,
+        SimNode("n-31-05", ("gpu-pooling",), 64, 515000,
                 (GresDef("nvidia_a100_80gb_pcie", 1, s07), GresDef("nvidia_a100_80gb_pcie_3g.40gb", 2, s07),
                  GresDef("nvidia_a100_3g.20gb", 2, s07), GresDef("nvidia_a100_80gb_pcie_1g.10gb", 7, s07)),
                 state="planned", free_mem_mib=59616),
@@ -163,7 +163,7 @@ def _k2_nodes() -> list[SimNode]:
 def test_sinfo_matches_k2_rows() -> None:
     c = k2_cluster()
     c.nodes = _k2_nodes()
-    out = render.sinfo_nodes(c, partitions=["lab", "gpu-preempt"], sep="|")
+    out = render.sinfo_nodes(c, partitions=["lab", "gpu-pooling"], sep="|")
     assert out.stdout.splitlines(keepends=True) == sample("k2", "sinfo_nodes_O").splitlines(keepends=True)[:5]
 
 
@@ -174,9 +174,9 @@ def test_sinfo_matches_vega_reserved_and_lyra_rows() -> None:
     line = render.sinfo_nodes(vega, partitions=["h200"], sep="|").stdout
     assert line in sample("vega", "sinfo_nodes_O").splitlines(keepends=True)
     lyra = SimCluster(name="lyra")
-    lyra.nodes = [SimNode("lyra-gpu-36-00", ("free-gpu",), 40, 192000, (GresDef("V100", 4),), bg_cpus=40,
+    lyra.nodes = [SimNode("lyra-gpu-36-00", ("flex-gpu",), 40, 192000, (GresDef("V100", 4),), bg_cpus=40,
                           bg_mem_mib=143360, bg_gpu_idx={0, 1, 2, 3}, free_mem_mib=24485)]
-    line = render.sinfo_nodes(lyra, partitions=["free-gpu"], sep="|").stdout
+    line = render.sinfo_nodes(lyra, partitions=["flex-gpu"], sep="|").stdout
     assert line == sample("lyra", "sinfo_nodes_O").splitlines(keepends=True)[0]
 
 
@@ -226,7 +226,7 @@ def test_scontrol_matches_vega_running_record_with_submitline() -> None:
 def test_scontrol_matches_lyra_untyped_a30_record() -> None:
     c = SimCluster(name="lyra", slurm_version="26.05.3", login_host="login-a03", tz=UTC_M7, merged_stderr="empty")
     wd = "/home/victor/vision"
-    job = SimJob(job_id=31367493, name="train_a01", user="victor", uid=2304117, account="victor", partition="free-gpu",
+    job = SimJob(job_id=31367493, name="train_a01", user="victor", uid=2304117, account="victor", partition="flex-gpu",
                  qos="low", submit=epoch("2026-09-07T03:23:39", UTC_M7), time_limit_s=12 * 3600, cpus=4,
                  mem_mib=16 * 1024, workdir=wd, command=f"{wd}/train.sbatch", stdout_pattern="logs/%x_%j.out",
                  gpus_per_node=1, gpu_type=None, typed_request=False, typed_alloc=False, alloc_gpu_type="A30",
@@ -354,7 +354,7 @@ def test_charging_rule_outputs_match_fixtures() -> None:
         c.qos = tuple((n, float(f)) for n, f in (ln.split("|") for ln in sample(host, "sacctmgr_qos").splitlines()))
         assert render.sacctmgr_qos(c).stdout == sample(host, "sacctmgr_qos")
     c = k2_cluster()
-    c.nodes = [SimNode("x1", ("gpu", "free-gpu"), 32, 1000, (GresDef("A30", 4),))]
+    c.nodes = [SimNode("x1", ("gpu", "flex-gpu"), 32, 1000, (GresDef("A30", 4),))]
     c.partition_fields = {"gpu": {"AllowQos": "normal,high", "QoS": "gpu-part", "TRESBillingWeights": "cpu=1"}}
     lines = render.scontrol_partitions(c).stdout.splitlines()
     assert lines[2].startswith("PartitionName=gpu AllowGroups=ALL AllowAccounts=ALL AllowQos=normal,high QoS=gpu-part ")

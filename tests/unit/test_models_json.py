@@ -159,7 +159,7 @@ def test_pending_priority_round_trip_and_old_rows() -> None:
     """§5.2.10: a pending job's priority evidence survives the cache / snapshot --json; rows written before it decode
     with priority None."""
     prio = m.PendingPriority(
-        ranked=True, priority=3017.0, partition="gpu-preempt",
+        ranked=True, priority=3017.0, partition="gpu-pooling",
         factors=(m.PriorityFactor("fairshare", 3000.0, 100000.0), m.PriorityFactor("nice", -50.0)),
         dominant="fairshare", others=(("lab", 2017.0),),
         fairshare=(m.FairShare("lab", "u", "parent", 0.5, 123456, 0.01, 0.03, None),),

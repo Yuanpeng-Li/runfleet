@@ -151,7 +151,7 @@ def _hms(h: int = 0, m: int = 0, s: int = 0, d: int = 0) -> timedelta:
 def slurm_job(host: str, jid: str, name: str, state: JobState, *, elapsed: timedelta | None = None,
               limit: timedelta | None = _hms(d=3), gpus: int = 1, gpu_type: str | None = "nvidia_a100-sxm4-40gb",
               util: float | None = None, mem_used_gib: float | None = None, mem_total_gib: float | None = None,
-              node: str | None = None, reason: str | None = None, partition: str = "gpu-preempt",
+              node: str | None = None, reason: str | None = None, partition: str = "gpu-pooling",
               qos: str = "normal", ended_ago: float | None = None, exit_code: int | None = None,
               idx: tuple[int, ...] = (), cpus: int = 8, mem_gib: int = 48, held: bool = False,
               raw_state: str | None = None, hints: tuple[str, ...] = (), user: str = ME,
@@ -216,13 +216,13 @@ def _gpu(host: str, index: int, name: str, util: float, used_gib: float, total_m
 
 def _node(name: str, state: str, used: int, total: int, gtype: str, cpus: tuple[int, int, int],
           mem: tuple[int, int], flags: str = "") -> Node:
-    return Node(name, ("gpu-preempt",), state, frozenset(flags), True, cpus[0], cpus[1], 0, cpus[2], mem[1] * 1024,
+    return Node(name, ("gpu-pooling",), state, frozenset(flags), True, cpus[0], cpus[1], 0, cpus[2], mem[1] * 1024,
                 mem[0] * 1024, (mem[1] - mem[0]) * 1024, (GresCount("gpu", gtype, total, used, None),), None)
 
 
 def _nj(jid: str, user: str, gpus: int | None, elapsed: timedelta, limit: timedelta | None, name: str, *,
         real: str | None = None, account: str = "lab", exact: bool = True) -> NodeJob:
-    return NodeJob(jid, user, real, account, "gpu-preempt", name, "R", gpus, exact, None,
+    return NodeJob(jid, user, real, account, "gpu-pooling", name, "R", gpus, exact, None,
                    int(elapsed.total_seconds()), int(limit.total_seconds()) if limit is not None else None, user == ME)
 
 
@@ -289,7 +289,7 @@ def build_world() -> tuple[FleetConfig, list[HostState]]:
                   reason="Resources", submit_ago=900),
         *_completed("k2", 2331214, 7, "orb-swp--train--imagenette-warmup"),
     ]
-    k2_parts = (PartitionSummary("gpu-preempt", 26, 164, 31, 4, {"nvidia_geforce_rtx_3090": (14, 68),
+    k2_parts = (PartitionSummary("gpu-pooling", 26, 164, 31, 4, {"nvidia_geforce_rtx_3090": (14, 68),
                                                                   "nvidia_a100_80gb": (0, 12),
                                                                   "nvidia_h200_nvl": (3, 4)},
                                  {"mixed": 19, "allocated": 3, "planned": 2, "idle": 2}),
@@ -331,7 +331,7 @@ def build_world() -> tuple[FleetConfig, list[HostState]]:
                                                     ("k2", "campus01", "", "labpi")),
                                       # usage only, as the field probes found k2 (§5.2.11): every factor 1, no weights
                                       qos_usage_factor={"gpu-priority": 1.0, "normal": 1.0, "labpi": 1.0},
-                                      partition_charges=(PartitionCharge("gpu-preempt"), PartitionCharge("labpi"))),
+                                      partition_charges=(PartitionCharge("gpu-pooling"), PartitionCharge("labpi"))),
                       {j.key.id: j for j in k2_jobs}, (), (), k2_nodes, k2_parts,
                       HostMetrics(32, (2.3, 2.1, 2.0), 7.0, 256 * GiB, 180 * GiB, 0, 0, 3e6, T0))
 
@@ -369,9 +369,9 @@ def build_world() -> tuple[FleetConfig, list[HostState]]:
     lyra_jobs = [
         slurm_job("lyra", "31354789", "orb-swp--train--places-cosinewarm--s47--a01", JobState.PREEMPTED,
                   elapsed=_hms(0, 1, 4), ended_ago=18 * 3600, gpu_type="rtx6000", node="r71-00",
-                  partition="free-gpu", raw_state="PREEMPTED", user="alice07"),
+                  partition="flex-gpu", raw_state="PREEMPTED", user="alice07"),
         slurm_job("lyra", "31327454", "orb-swp--train--warmup--s49--a01", JobState.FAILED, elapsed=_hms(0, 2, 30),
-                  ended_ago=20 * 3600, exit_code=2, gpu_type="rtx6000", node="r71-00", partition="free-gpu",
+                  ended_ago=20 * 3600, exit_code=2, gpu_type="rtx6000", node="r71-00", partition="flex-gpu",
                   user="alice07"),
         *_completed("lyra", 31308336, 3, "orb-swp--train--places-warmup"),
     ]
@@ -385,12 +385,12 @@ def build_world() -> tuple[FleetConfig, list[HostState]]:
                                                  qos_usage_factor={"normal": 1.0, "high": 1.0, "low": 0.0,
                                                                    "guest": 0.0},
                                                  partition_charges=(
-                                                     PartitionCharge("free-gpu", allow_qos=("low", "guest")),
+                                                     PartitionCharge("flex-gpu", allow_qos=("low", "guest")),
                                                      PartitionCharge("gpu", "cpu=1,gres/gpu=32"),
-                                                     PartitionCharge("free-gpuxl", allow_qos=("low", "guest")))),
+                                                     PartitionCharge("flex-gpuxl", allow_qos=("low", "guest")))),
                         {j.key.id: j for j in lyra_jobs}, (), (), (),
-                        (PartitionSummary("free-gpu", 30, 120, 9, 0, {"rtx6000": (9, 120)}, {"mixed": 30}),
-                         PartitionSummary("free-gpuxl", 9, 36, 4, 0, {"a30": (4, 36)}, {"mixed": 9})),
+                        (PartitionSummary("flex-gpu", 30, 120, 9, 0, {"rtx6000": (9, 120)}, {"mixed": 30}),
+                         PartitionSummary("flex-gpuxl", 9, 36, 4, 0, {"a30": (4, 36)}, {"mixed": 9})),
                         None)
 
     # labstation --------------------------------------------------------------------------------------------------
@@ -554,7 +554,7 @@ def attach_sample(key: JobKey, n: int, now: datetime) -> JobLive:
 
 def lyra_running_job() -> Job:
     job = slurm_job("lyra", LYRA_LIVE_KEY.id, "orb-swp--train--places-cosinewarm--s50--a01", JobState.RUNNING,
-                    elapsed=_hms(1, 30), gpu_type="rtx6000", node="s71-02", partition="free-gpu", user="alice07",
+                    elapsed=_hms(1, 30), gpu_type="rtx6000", node="s71-02", partition="flex-gpu", user="alice07",
                     cpus=16, mem_gib=96, qos="low")
     return dataclasses.replace(job, is_mine=True)
 
@@ -577,27 +577,27 @@ def _cell(name: str, account: str, partition: str, qos: str, model: str, jobs: i
 
 def _lyra_cells() -> list[UsageCell]:
     exp = "orb-swp--train--cifar-warmup--scratch"
-    cells = [_cell(f"{exp}--s0--a01", "alice07", "free-gpu", "low", "rtx6000", 60, 2, 4634, 802, factor=0),
-             _cell(f"{exp}--s1--a01", "alice07", "free-gpuxl", "low", "l40s", 36, 1, 2778, 388, factor=0),
-             _cell("orb-swp--eval--cifar--fork-warmup--s0", "alice07", "free-gpuxl", "low", "a30", 40, 0, 2054, 512,
+    cells = [_cell(f"{exp}--s0--a01", "alice07", "flex-gpu", "low", "rtx6000", 60, 2, 4634, 802, factor=0),
+             _cell(f"{exp}--s1--a01", "alice07", "flex-gpuxl", "low", "l40s", 36, 1, 2778, 388, factor=0),
+             _cell("orb-swp--eval--cifar--fork-warmup--s0", "alice07", "flex-gpuxl", "low", "a30", 40, 0, 2054, 512,
                    factor=0),
              _cell("lmft-x0--train--lr1e-5--finetune-base--s0--a01", "pilab_02", "gpu", "normal", "v100", 3, 0, 23.2,
                    2.9, gpu_weight=32),
              _cell("jupyter", "pilab_02", "gpu", "normal", "", 6, 1, 182, 0, gpu_weight=32)]
-    cells += [_cell(f"orb-swp--probe--k{i}--s0", "alice07", "free-gpu", "low", "rtx6000", 9 + i, 0, 40.0 - i,
+    cells += [_cell(f"orb-swp--probe--k{i}--s0", "alice07", "flex-gpu", "low", "rtx6000", 9 + i, 0, 40.0 - i,
                     8.0 - i, factor=0) for i in range(7)]
     return cells
 
 
 def _k2_cells() -> list[UsageCell]:
     exp = "orb-swp--train--cifar-warmup--scratch"
-    cells = [_cell(f"{exp}--s0--a01", "campus01", "gpu-preempt", "gpu-priority", "nvidia_geforce_rtx_3090", 420, 3,
+    cells = [_cell(f"{exp}--s0--a01", "campus01", "gpu-pooling", "gpu-priority", "nvidia_geforce_rtx_3090", 420, 3,
                    64_140, 6_010),
-             _cell(f"{exp}--s1--a01", "campus01", "gpu-preempt", "gpu-priority", "nvidia_a100-sxm4-40gb", 220, 1,
+             _cell(f"{exp}--s1--a01", "campus01", "gpu-pooling", "gpu-priority", "nvidia_a100-sxm4-40gb", 220, 1,
                    32_070, 3_011)]
-    cells += [_cell(f"lmft-x{i}--train--lr1e-6--s0--a01", "campus01", "gpu-preempt", "normal",
+    cells += [_cell(f"lmft-x{i}--train--lr1e-6--s0--a01", "campus01", "gpu-pooling", "normal",
                     "nvidia_h100_nvl_1g.12gb", 24 + i, 0, 4_000.0 - 150 * i, 340.0 - 15 * i) for i in range(17)]
-    cells.append(_cell("prep_env", "campus01", "cpu-preempt", "normal", "", 28, 0, 9_000, 0))
+    cells.append(_cell("prep_env", "campus01", "cpu-pooling", "normal", "", 28, 0, 9_000, 0))
     return cells
 
 

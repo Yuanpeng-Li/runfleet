@@ -14,7 +14,7 @@ does an idle pause (polling stopped): :meth:`Evaluator.status` then says the wat
 silent. GPUs that backfill has planned for a pending job count only for a watch that says ``planned``; MIG slices
 only for a ``mig`` watch (a whole-GPU watch never counts slices, nor the other way round).
 
-:func:`parse` reads the prompt leniently (``2 h200 k2``, ``4x a100 k2/gpu-preempt planned``, ``1 mig vega``);
+:func:`parse` reads the prompt leniently (``2 h200 k2``, ``4x a100 k2/gpu-pooling planned``, ``1 mig vega``);
 :func:`load_watches` / :func:`with_watch` / :func:`without_watch` keep the watches in ``ui.json`` ``watches`` (an entry
 this version cannot read is skipped, never an error, and kept in the file).
 """
@@ -82,7 +82,7 @@ class GpuWatch:
                 "partition": self.partition, "planned": self.planned}
 
     def describe(self) -> str:
-        """``2× H200 on k2/gpu-preempt``, ``1× GPU anywhere``, ``2× A100 MIG 3g.40gb on k2 · planned too``."""
+        """``2× H200 on k2/gpu-pooling``, ``1× GPU anywhere``, ``2× A100 MIG 3g.40gb on k2 · planned too``."""
         what = self.gpu or ("GPU" if self.mig is None else "")
         if self.mig is not None:
             what = " ".join(x for x in (what, "MIG", self.mig) if x)
@@ -478,7 +478,7 @@ def _known_type(gpu: str, mig: str | None, fleet: Fleet) -> bool:
 
 def parse(text: str, fleet: Fleet) -> Parsed:
     """The prompt's text -> a watch, leniently: a count (``2``, ``2x``, ``x2``, glued ``2xh200``), a GPU model, ``mig``
-    or a MIG profile (``3g.40gb``, ``a100-3g.40gb``), a host, a partition (``k2/gpu-preempt``, ``partition gpu``,
+    or a MIG profile (``3g.40gb``, ``a100-3g.40gb``), a host, a partition (``k2/gpu-pooling``, ``partition gpu``,
     ``p=gpu`` or a bare name a host lists), ``planned``; filler words (``free``, ``gpus``, ``on`` …) are skipped. A
     problem means nothing can be saved; notes say how the text was read."""
     tokens = text.replace(",", " ").split()
@@ -539,7 +539,7 @@ def parse(text: str, fleet: Fleet) -> Parsed:
                 problem = put_type(value)
         elif low in _PARTITION_WORDS:
             if not queue:
-                return Parsed(None, "partition … which one? e.g. partition gpu-preempt", tuple(notes))
+                return Parsed(None, "partition … which one? e.g. partition gpu-pooling", tuple(notes))
             value = queue.pop(0)
             problem = put("partition", every_part.get(value.lower(), value), "partition")
         elif (m := _COUNT.match(low)) is not None and not (low.isdigit() and ("count" in got or int(low) > MAX_COUNT)

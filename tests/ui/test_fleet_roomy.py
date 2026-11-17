@@ -387,7 +387,7 @@ async def test_a_resubmitted_failure_leaves_the_needs_you_picker_but_stays_on_it
         svc: Any = app.service
         new = slurm_job("lyra", "31358335", "orb-swp--train--places-cosinewarm--s47--a01", JobState.COMPLETED,
                         elapsed=timedelta(hours=2), ended_ago=15 * 3600, submit_ago=17.5 * 3600, exit_code=0,
-                        gpu_type="rtx6000", node="r71-00", partition="free-gpu", user="alice07")
+                        gpu_type="rtx6000", node="r71-00", partition="flex-gpu", user="alice07")
         svc.put_job(dataclasses.replace(new, is_mine=True))
         await pilot.pause(0.3)
         lyra = next(c for c in app.screen.query(HostCard) if c.host == "lyra")

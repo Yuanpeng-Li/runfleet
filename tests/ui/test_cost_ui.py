@@ -37,8 +37,8 @@ def _caps(factors: dict[str, float], charges: tuple[PartitionCharge, ...] = ()) 
 
 # lyra-shaped: a charged `gpu` partition with weights, a free one allowing only ×0 QOS
 LYRA = _caps({"normal": 1.0, "low": 0.0, "guest": 0.0},
-             (PartitionCharge("gpu", "cpu=1,gres/gpu=32"), PartitionCharge("free-gpu", allow_qos=("low", "guest"))))
-K2 = _caps({"normal": 1.0, "gpu-priority": 1.0}, (PartitionCharge("gpu-preempt"),))     # usage only
+             (PartitionCharge("gpu", "cpu=1,gres/gpu=32"), PartitionCharge("flex-gpu", allow_qos=("low", "guest"))))
+K2 = _caps({"normal": 1.0, "gpu-priority": 1.0}, (PartitionCharge("gpu-pooling"),))     # usage only
 
 
 def _job(state: JobState = JobState.RUNNING, *, qos: str = "normal", partition: str = "gpu",
@@ -60,9 +60,9 @@ def _cost_fn(caps: Capabilities | None) -> CostFn:
 
 # ---------------------------------------------------------------- filter terms (§7.6)
 def test_parse_cost_and_account_terms() -> None:
-    q = query.parse("acct:pilab_02,Lab part:free-gpu p:gpu su:>10 !gpuh:<=2.5 su:3 su:>x gpuh:>=")
+    q = query.parse("acct:pilab_02,Lab part:flex-gpu p:gpu su:>10 !gpuh:<=2.5 su:3 su:>x gpuh:>=")
     kinds = [(t.kind, t.values, t.negate, t.number) for t in q.terms]
-    assert kinds == [("account", ("pilab_02", "lab"), False, 0.0), ("partition", ("free-gpu",), False, 0.0),
+    assert kinds == [("account", ("pilab_02", "lab"), False, 0.0), ("partition", ("flex-gpu",), False, 0.0),
                      ("partition", ("gpu",), False, 0.0), ("su", (">",), False, 10.0),
                      ("gpuh", ("<=",), True, 2.5), ("su", ("=",), False, 3.0),
                      ("text", ("su:>x",), False, 0.0), ("text", ("gpuh:>=",), False, 0.0)]   # malformed -> text
@@ -73,15 +73,15 @@ def test_account_and_partition_terms() -> None:
     job = _job()
     assert query.matches(query.parse("acct:PILAB_02"), job)
     assert not query.matches(query.parse("acct:lab"), job)
-    pending = dataclasses.replace(_job(JobState.PENDING), partition="gpu,free-gpu")
-    assert query.matches(query.parse("part:free-gpu"), pending)       # any partition of a pending job's list
+    pending = dataclasses.replace(_job(JobState.PENDING), partition="gpu,flex-gpu")
+    assert query.matches(query.parse("part:flex-gpu"), pending)       # any partition of a pending job's list
     assert not query.matches(query.parse("p:gpuxl"), pending)
 
 
 def test_cost_terms_compare_and_unknown_never_matches() -> None:
     fn = _cost_fn(LYRA)
     charged = _job()                                   # 40/h × 4 h × normal ×1 = 160 SU, 4 GPU-h
-    free = _job(qos="low", partition="free-gpu")       # 0 SU
+    free = _job(qos="low", partition="flex-gpu")       # 0 SU
     assert query.matches(query.parse("su:>100"), charged, T0, fn)
     assert not query.matches(query.parse("su:>100"), free, T0, fn)
     assert query.matches(query.parse("su:<=0"), free, T0, fn)
@@ -113,7 +113,7 @@ def test_sort_by_su_and_gpuh_largest_first_unknowns_last() -> None:
     fn = _cost_fn(LYRA)
     small = _job(jid="1", elapsed=1 * H)
     big = _job(jid="2", elapsed=10 * H)
-    free = _job(jid="3", qos="low", partition="free-gpu", elapsed=20 * H)
+    free = _job(jid="3", qos="low", partition="flex-gpu", elapsed=20 * H)
     task = dataclasses.replace(_job(jid="4"), kind=job_table.JobKind.TASK)
     jobs = [small, task, free, big]
     out = query.sort_jobs(jobs, "su", False, host_order=["lyra"], now=T0, cost=fn)
@@ -147,7 +147,7 @@ def test_cost_cells() -> None:
     cols = [("su", 8), ("gpuh", 8)]
     su, gpuh = job_table.job_cells(_job(), cols, _ctx(LYRA), cursor=False)
     assert su.plain == "    160" and gpuh.plain == "    4.0"              # right-aligned in 7 cells (+ the gap)
-    free = job_table.job_cells(_job(qos="low", partition="free-gpu"), cols, _ctx(LYRA), cursor=False)[0]
+    free = job_table.job_cells(_job(qos="low", partition="flex-gpu"), cols, _ctx(LYRA), cursor=False)[0]
     assert free.plain.strip() == "0" and free.spans                     # dim
     pending = job_table.job_cells(_job(JobState.PENDING, elapsed=None), cols, _ctx(LYRA), cursor=False)[0]
     assert pending.plain.strip() == "≈2,880"
@@ -172,9 +172,9 @@ def test_su_cells_of_a_usage_only_cluster_are_billing_hours() -> None:
 
 def test_preview_cost_part() -> None:
     assert cost_meta(_job(), costs.job_cost(_job(), T0, LYRA), False) == "160 SU"
-    usage = _job(partition="gpu-preempt", qos="gpu-priority", billing="8")
+    usage = _job(partition="gpu-pooling", qos="gpu-priority", billing="8")
     assert cost_meta(usage, costs.job_cost(usage, T0, K2), True) == "32 billing-h"
-    free = _job(qos="low", partition="free-gpu")
+    free = _job(qos="low", partition="flex-gpu")
     assert cost_meta(free, costs.job_cost(free, T0, LYRA), False) == "free (qos low ×0)"
     pending = _job(JobState.PENDING, elapsed=None)
     assert cost_meta(pending, costs.job_cost(pending, T0, LYRA), False) == "≈ 2,880 SU at limit"
@@ -191,9 +191,9 @@ def _line(job: Job, caps: Capabilities | None, width: int = 120, mode: str | Non
 
 def test_cost_line_variants() -> None:
     assert _line(_job(), LYRA) == "cost    32.0 CPU-h · 4.0 GPU-h · 40/h × normal ×1 = 160 SU · ≈ 2,880 SU at limit"
-    assert _line(_job(qos="low", partition="free-gpu", billing="8"), LYRA) == \
+    assert _line(_job(qos="low", partition="flex-gpu", billing="8"), LYRA) == \
         "cost    4.0 GPU-h RTX6000 · free (qos low ×0) · 32 billing-h not charged"
-    usage = _job(partition="gpu-preempt", qos="gpu-priority", billing="8")
+    usage = _job(partition="gpu-pooling", qos="gpu-priority", billing="8")
     assert _line(usage, K2) == "cost    32.0 CPU-h · 4.0 GPU-h · 32 billing-h (= CPU-h here)"
     pending = _job(JobState.PENDING, billing=None, elapsed=None)                      # billing from the weights
     assert _line(pending, LYRA) == "cost    ≈ 2,880 SU if it runs to its limit (billing from weights: estimate)"
@@ -210,7 +210,7 @@ def test_cost_line_variants() -> None:
 def test_cost_line_drops_the_least_useful_parts_first() -> None:
     assert _line(_job(), LYRA, width=58) == "cost    32.0 CPU-h · 4.0 GPU-h · 40/h × normal ×1 = 160 SU"
     assert _line(_job(), LYRA, width=46) == "cost    4.0 GPU-h · 40/h × normal ×1 = 160 SU"
-    usage = _job(partition="gpu-preempt", qos="gpu-priority", billing="8")
+    usage = _job(partition="gpu-pooling", qos="gpu-priority", billing="8")
     assert _line(usage, K2, width=50) == "cost    32.0 CPU-h · 4.0 GPU-h · 32 billing-h"
     assert len(_line(_job(), LYRA, width=30)) <= 30                                    # never wider than the box
 
@@ -219,9 +219,9 @@ def test_usage_only_billing_h_are_never_scaled_by_a_qos_factor() -> None:
     """Review: a usage-only cluster whose QOS has factor 2: 8/h over 4 h is 32 billing-h (not 64), 576 at its 72 h
     limit, in the preview, the Summary line, the Resources line and the agent's job card alike."""
     from runfleet.agent.view import cost_text
-    k2x2 = _caps({"normal": 1.0, "double": 2.0}, (PartitionCharge("gpu-preempt"),))
-    run = _job(partition="gpu-preempt", qos="double", billing="8")
-    pend = _job(JobState.PENDING, partition="gpu-preempt", qos="double", billing="8", elapsed=None)
+    k2x2 = _caps({"normal": 1.0, "double": 2.0}, (PartitionCharge("gpu-pooling"),))
+    run = _job(partition="gpu-pooling", qos="double", billing="8")
+    pend = _job(JobState.PENDING, partition="gpu-pooling", qos="double", billing="8", elapsed=None)
     assert cost_meta(run, costs.job_cost(run, T0, k2x2), True) == "32 billing-h"
     assert cost_meta(pend, costs.job_cost(pend, T0, k2x2), True) == "≈ 576 billing-h at limit"
     summary = jd.cost_summary(run, costs.job_cost(run, T0, k2x2), k2x2, mode="usage_only")   # no SU limits read
@@ -240,9 +240,9 @@ def _summary(job: Job, caps: Capabilities | None) -> str | None:
 
 def test_compact_cost_summary() -> None:
     assert _summary(_job(), LYRA) == "cost 4.0 GPU-h · 160 SU (≈ 2,880 by limit)"
-    usage = _job(partition="gpu-preempt", qos="gpu-priority", billing="8")
+    usage = _job(partition="gpu-pooling", qos="gpu-priority", billing="8")
     assert _summary(usage, K2) == "cost 4.0 GPU-h · 32 billing-h (≈ 576 by limit)"
-    assert _summary(_job(qos="low", partition="free-gpu"), LYRA) == "cost 4.0 GPU-h · free (qos low ×0)"
+    assert _summary(_job(qos="low", partition="flex-gpu"), LYRA) == "cost 4.0 GPU-h · free (qos low ×0)"
     assert _summary(_job(gpus=0, qos="weird"), LYRA) == "cost 32.0 CPU-h · 160 SU ×1? (≈ 2,880 by limit)"
     assert _summary(_job(JobState.PENDING, elapsed=None), LYRA) == "cost ≈ 2,880 SU if it runs to its limit"
     assert _summary(_job(JobState.PENDING, elapsed=None, limit=None), LYRA) is None
@@ -300,8 +300,8 @@ def test_cost_box_account_line_only_when_the_summary_knows_the_account() -> None
 
 
 def test_cost_box_free_pending_ended_and_unknown_factor() -> None:
-    free = _box(_job(qos="low", partition="free-gpu", billing="8"), LYRA)
-    assert free[3].endswith("weights of free-gpu: none (billing = CPUs)")
+    free = _box(_job(qos="low", partition="flex-gpu", billing="8"), LYRA)
+    assert free[3].endswith("weights of flex-gpu: none (billing = CPUs)")
     assert free[4] == "factor    qos low ×0 (UsageFactor) · free"
     assert free[5] == "charged   free (qos low ×0) · 32 billing-h not charged"
     pending = _box(_job(JobState.PENDING, billing=None, elapsed=None), LYRA)
@@ -322,7 +322,7 @@ def test_cost_box_free_pending_ended_and_unknown_factor() -> None:
 
 @pytest.mark.parametrize("width", [80, 120])
 def test_cost_box_lines_never_overflow(width: int) -> None:
-    for job in (_job(), _job(JobState.PENDING, elapsed=None), _job(qos="low", partition="free-gpu")):
+    for job in (_job(), _job(JobState.PENDING, elapsed=None), _job(qos="low", partition="flex-gpu")):
         lines = jd.cost_box_lines(job, costs.job_cost(job, T0, LYRA), LYRA, None, host="lyra", now=T0,
                                   width=width - 6)
         assert all(line.cell_len == width - 6 for line in lines)

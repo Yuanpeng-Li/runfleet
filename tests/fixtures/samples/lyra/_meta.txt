@@ -47,15 +47,15 @@ stderr:
 squeue: fatal: serializer_required: could not find plugin for application/json
 
 ## squeue_parts_O
-cmd: squeue -p 'free-gpu,free-gpuxl' -h -O 'JobID:|,ArrayJobID:|,ArrayTaskID:|,Name:|,UserName:|,State:|,StateCompact:|,Reason:|,TimeUsed:|,TimeLimit:|,TimeLeft:|,NumNodes:|,NumCPUs:|,MinMemory:|,Partition:|,QOS:|,Account:|,SubmitTime:|,StartTime:|,EndTime:|,NodeList:|,BatchHost:|,tres-alloc:|,tres-per-node:|,tres-per-job:|,RestartCnt:|,STDOUT:|,STDERR:|,WorkDir:|,Command:|' | head -25
+cmd: squeue -p 'flex-gpu,flex-gpuxl' -h -O 'JobID:|,ArrayJobID:|,ArrayTaskID:|,Name:|,UserName:|,State:|,StateCompact:|,Reason:|,TimeUsed:|,TimeLimit:|,TimeLeft:|,NumNodes:|,NumCPUs:|,MinMemory:|,Partition:|,QOS:|,Account:|,SubmitTime:|,StartTime:|,EndTime:|,NodeList:|,BatchHost:|,tres-alloc:|,tres-per-node:|,tres-per-job:|,RestartCnt:|,STDOUT:|,STDERR:|,WorkDir:|,Command:|' | head -25
 rc=0 ms=46
 
 ## squeue_parts_legacy
-cmd: squeue -p 'free-gpu,free-gpuxl' -h -o '%i|%j|%T|%M|%l|%D|%R|%b|%C|%m|%P|%V|%S|%Z|%o' | head -25
+cmd: squeue -p 'flex-gpu,flex-gpuxl' -h -o '%i|%j|%T|%M|%l|%D|%R|%b|%C|%m|%P|%V|%S|%Z|%o' | head -25
 rc=0 ms=52
 
 ## squeue_parts_states
-cmd: squeue -p 'free-gpu,free-gpuxl' -h -o '%T' | sort | uniq -c
+cmd: squeue -p 'flex-gpu,flex-gpuxl' -h -o '%T' | sort | uniq -c
 rc=0 ms=45
 
 ## sacct_basic
@@ -92,11 +92,11 @@ cmd: scontrol show job 31367493 -d
 rc=0 ms=18
 
 ## sinfo_parts
-cmd: sinfo -h -p 'free-gpu,free-gpuxl' -o '%P|%a|%l|%D|%T|%G|%N'
+cmd: sinfo -h -p 'flex-gpu,flex-gpuxl' -o '%P|%a|%l|%D|%T|%G|%N'
 rc=0 ms=16
 
 ## sinfo_nodes_O
-cmd: sinfo -h -N -p 'free-gpu,free-gpuxl' -O 'NodeList:|,Partition:|,StateLong:|,CPUsState:|,Memory:|,AllocMem:|,FreeMem:|,Gres:|,GresUsed:|,Reason:|'
+cmd: sinfo -h -N -p 'flex-gpu,flex-gpuxl' -O 'NodeList:|,Partition:|,StateLong:|,CPUsState:|,Memory:|,AllocMem:|,FreeMem:|,Gres:|,GresUsed:|,Reason:|'
 rc=0 ms=20
 
 ## sinfo_summary

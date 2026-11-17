@@ -3117,7 +3117,7 @@ itself says about the job's priority. **Evidence, never a promise**: no start ti
   monthly", or "… is reset only by the admins" for `NONE`/`NOW`), or ≥ 0.75 (good standing / no recent usage); age
   still growing ("waiting raises it: age adds up to 1,000 after 7 days in the queue").
 - **Display**: job detail of a pending job — the Summary's right column shows a **Priority** box in place of the GPU
-  box ("n/a — job pending"), titled `Priority · sprio 4m ago`: `priority 3,017 in gpu-preempt · lab 2,017`, one row per
+  box ("n/a — job pending"), titled `Priority · sprio 4m ago`: `priority 3,017 in gpu-pooling · lab 2,017`, one row per
   factor (neutral bar = share of that factor's weight, `value / weight`, `◀ dominates`), `share` rows per account
   (fair share, usage vs share, "no recent usage"), then the hints; an unranked cluster shows its hint only. The compact
   layout (< 110×30) and the Jobs preview carry one line: `prio 3,017 · fairshare dominates · fairshare 0.03 · 4m ago`
@@ -3134,7 +3134,7 @@ names anonymised as everywhere in this document):
 | The SU limit is the account row's `GrpTRESMins` billing / 60 | lyra `sshare -A` account row (User empty) `billing=5873100` = sbank "Account Limit" 97,885 SU; `pilab_02_gpu` 5820 → 97 | limits come from sshare; sbank is optional, sacctmgr is not needed |
 | Used SU is the account row's `GrpTRESRaw` billing / 60 | `pilab_02` 17887 → 298 = sbank "Usage"; `pilab_03` 158595 → 2,643 | one ctld RPC gives limit and use |
 | sshare / sbank usage is **after** UsageFactor, sreport is not | alice07's own account: sreport 7,759 billing-h in a month (all under QOS `low` ×0), sshare billing 0 and cpu 0, sbank 0 | used SU never comes from sreport; sshare TRES minutes never serve as CPU-h / GPU-h |
-| The **job's** QOS sets the factor | jobs on `free-gpuxl` ran under QOS `low` (×0) while the partition QOS `free-gpuxl-part` is ×1, and the account usage stayed 0 | factor = `caps.qos_usage_factor[job.qos]` |
+| The **job's** QOS sets the factor | jobs on `flex-gpuxl` ran under QOS `low` (×0) while the partition QOS `flex-gpuxl-part` is ×1, and the account usage stayed 0 | factor = `caps.qos_usage_factor[job.qos]` |
 | Decay differs per cluster | lyra `PriorityDecayHalfLife=00:00:00`, reset NONE (sshare equals sbank); k2 half-life 7 d, NONE; vega 14 d, MONTHLY | on k2 / vega sshare usage is "recent (decays)", never "used" or a window total |
 | Limits, weights and sbank exist on lyra only | k2 / vega: `GrpTRESMins` empty, no sbank, every UsageFactor 1, no `TRESBillingWeights` | "usage only" mode |
 | Billing weights live on partitions | lyra `gpu` `cpu=1,gres/gpu=32`; `gpuxl` `cpu=1,gres/gpu:L40S=32,gres/gpu:RTX6000=64` (capitalised, while sacct prints `gres/gpu:rtx6000`); `free*` none, `AllowQos=low,guest` (both ×0); `DefCpuPerGPU` not printed | weights matter only for estimates; TRES keys compare case-insensitively |
@@ -3158,7 +3158,7 @@ names anonymised as everywhere in this document):
 
 **UsageFactor of a job** = `caps.qos_usage_factor.get(job.qos)`; an unknown QOS (or no `slurm.qos`) → None: sums
 count it ×1 and it shows as `×1?`. This is the job-QOS rule the lyra evidence supports. Slurm documents the partition
-QOS as overriding the job QOS (unless the job QOS has `OverPartQOS`), but lyra's `free-gpuxl` jobs were not charged
+QOS as overriding the job QOS (unless the job QOS has `OverPartQOS`), but lyra's `flex-gpuxl` jobs were not charged
 under a ×1 partition QOS, so the partition QOS factor is not used; a cluster that contradicts this is a field-probe
 fact and wins (Appendix C).
 
@@ -3213,7 +3213,7 @@ at most `MAX_ACCOUNTS` = 12; each passes `util/shell.name` (a name that does not
    `allow_qos` is a list and every QOS in it has factor 0 → `free` (lyra `free*`: `low,guest`); else ≥ 1 own job in
    the window ran there and every such job's QOS has factor 0 → `free (observed: qos low ×0)`; else weights present,
    or some QOS that may run there has factor > 0 → `charged`; else `charged (billing = CPUs)`. The partition QOS
-   factor alone never decides (`free-gpuxl-part` is ×1).
+   factor alone never decides (`flex-gpuxl-part` is ×1).
 
 **Period window** (`account.period_starts(summary, caps, host_cfg, now)`):
 - A known `next_realloc` (sbank) and `allocation_period` > 0: per account, start = `next_realloc − allocation_period`
@@ -3854,7 +3854,7 @@ rows, one short of the roomy gate; the demo fleet (lynx without a cache) is room
 ┃ my jobs   R 4   PD 2   F 0   CD 7            (last 24h) ┃│ my jobs   R 4   PD 1   F 0   CD 3            (last 24h)  │
 ┃ my GPUs   5   A100-40G ×3 · H200 ×2                     ┃│ my GPUs   6   H200 ×6                                    │
 ┃ job util  ▕████████████████████▌ ▏  93%   mem 166/401G  ┃│ job util  ▕██████████████████▌   ▏  84%   mem 332/846G   │
-┃ free GPUs gpu-preempt 31/164 (4 planned) · labpi 2/16   ┃│ free GPUs h200 2/40 (2 planned) · h100 0/9 · a30 3/24    │
+┃ free GPUs gpu-pooling 31/164 (4 planned) · labpi 2/16   ┃│ free GPUs h200 2/40 (2 planned) · h100 0/9 · a30 3/24    │
 ┃ next      PD smoke-test · priority                      ┃│ next      PD lmft-x07-trainer-s0 · per-user job cap (Q…  │
 ┃ login     login02  load 2.3/32                          ┃│ login     login-v01  load 5.1/64                         │
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────────────────────────────────────────┘
@@ -3862,7 +3862,7 @@ rows, one short of the roomy gate; the demo fleet (lynx without a cache) is room
 │ my jobs   R 0   PD 0   F 2   CD 3            (last 24h) ││ 0 A6000     ▕        ▏   0%  ▕        ▏  0.0/48.0G 30°C  │
 │ my GPUs   0                                             ││ 1 A6000     ▕        ▏   0%  ▕▍       ▏  2.1/48.0G 31°C  │
 │ job util  n/a — no GPU accounting on this cluster       ││ 2 A6000     ▕        ▏   0%  ▕        ▏  0.0/48.0G 29°C  │
-│ free GPUs free-gpu 9/120 · free-gpuxl 4/36              ││ 3 A6000     ▕█████▋  ▏  70%  ▕███▌    ▏ 21.0/48.0G 78°C  │
+│ free GPUs flex-gpu 9/120 · flex-gpuxl 4/36              ││ 3 A6000     ▕█████▋  ▏  70%  ▕███▌    ▏ 21.0/48.0G 78°C  │
 │ ! ssh: Connection timed out during banner exchange      ││ cpu ▕▏   ▏  3%  mem ▕▌     ▏  9% of 503G  load 2.1/64    │
 │   (via jump host) · next retry in 38s · e info          ││ tasks  mine 1 (orb.launch, 1 GPU) · others 1             │
 └─────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
@@ -3897,7 +3897,7 @@ after the last card is the fleet panel (free GPUs by type, your types first; wha
 ┃ my jobs   R 7   PD 2   F 3   CD 3                                      (last 24h) ┃│ my jobs   R 4   PD 2   F 2   CD 1                                      (last 24h)  │
 ┃ my GPUs   15   A100-80G ×8 · A100-40G ×3 · 3090 ×2 · H200 ×2                      ┃│ my GPUs   6   H200 ×6                                                              │
 ┃ job util  waiting for sstat                                                       ┃│ job util  waiting for sstat                                                        │
-┃ free GPUs gpu-preempt 12/108 +11 MIG (14 planned) · lab 0/8                       ┃│ free GPUs a30 1/8 (1 planned) · h100 0/7 · h200 6/48 (5 planned)                   │
+┃ free GPUs gpu-pooling 12/108 +11 MIG (14 planned) · lab 0/8                       ┃│ free GPUs a30 1/8 (1 planned) · h100 0/7 · h200 6/48 (5 planned)                   │
 ┃ login     login02  load 2.3/32                                                    ┃│ login     login-v01  load 5.1/64                                                   │
 ┃ failed    F   lmft-x0-lr1e-5             exit 1                           3h ago  ┃│ failed    F   lmft-x07-sampler-s0        exit 1                           5h ago   │
 ┃           TO  orb-sw…imagenette-w…2--a01 hit time limit                   4h ago  ┃│           F   lmft-x07-ddp-s0            exit 1                           6h ago   │
@@ -3916,7 +3916,7 @@ after the last card is the fleet panel (free GPUs by type, your types first; wha
 │ my jobs   R 5   PD 1   F 1   CD 2                                      (last 24h) ││ 0 A6000     ▕         ▏   0%  ▕         ▏  0.0/48.0G 30°C  free                    │
 │ my GPUs   5   A30 ×3 · RTX6000 ×2                                                 ││ 1 A6000     ▕████████▌▏  94%  ▕█████▋   ▏ 30.0/48.0G 73°C  carol sample_ddpm.py    │
 │ job util  n/a — no GPU accounting on this cluster                                 ││ 2 A6000     ▕███▋     ▏  40%  ▕█▏       ▏  6.0/48.0G 47°C  mine eval_ckpt.py       │
-│ free GPUs free-gpu 6/48 · free-gpuxl 15/32                                        ││ 3 A6000     ▕██████▏  ▏  68%  ▕███▉     ▏ 21.0/48.0G 63°C  mine orb.launch         │
+│ free GPUs flex-gpu 6/48 · flex-gpuxl 15/32                                        ││ 3 A6000     ▕██████▏  ▏  68%  ▕███▉     ▏ 21.0/48.0G 63°C  mine orb.launch         │
 │ login     login-a02  load 11.4/48                                                 ││ cpu ▕▎   ▏  6%  mem ▕█▏        ▏ 11% of 504G  load 3.8/64                          │
 │ failed    PR  orb-s…cosinewarm--s44--a01 preempted, killed               17h ago  ││           swap 2% of 2.0G · up 117d · load 3.8 3.7 3.9                             │
 │ running   R   orb-sw…eval--places…p--s45 1×A30                     –    12m left  ││ running   R   orb.launch (orb.train)     gpu 3 · cpu 101%     ▆  68%   18h54m up   │
@@ -3933,12 +3933,12 @@ after the last card is the fleet panel (free GPUs by type, your types first; wha
 └───────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────┘
 ┌─ 5 lynx [workstations] · ✖ needs auth ────────────────────────────────────────────┐┌─ fleet · free GPUs · what changed ─────────────────────────────────────────────────┐
 │ no data yet                                                                       ││ free GPUs now · your types first  lynx ?                            sinfo <1m ago  │
-│ ✖ permission denied (publickey,keyboard-interactive)                              ││   3090        4   k2 gpu-preempt 4 (2 planned)                                     │
-│   press c to log in (Duo / password prompts appear)                               ││   H200        9   vega h200 6 (5 planned) · k2 gpu-preempt 3                       │
-│                                                                                   ││   RTX6000    11   lyra free-gpuxl 11                                               │
-│                                                                                   ││   A30         6   lyra free-gpu 5 · vega a30 1 (1 planned)                         │
+│ ✖ permission denied (publickey,keyboard-interactive)                              ││   3090        4   k2 gpu-pooling 4 (2 planned)                                     │
+│   press c to log in (Duo / password prompts appear)                               ││   H200        9   vega h200 6 (5 planned) · k2 gpu-pooling 3                       │
+│                                                                                   ││   RTX6000    11   lyra flex-gpuxl 11                                               │
+│                                                                                   ││   A30         6   lyra flex-gpu 5 · vega a30 1 (1 planned)                         │
 │                                                                                   ││   H100-80G    0                                                                    │
-│                                                                                   ││   A100-80G    1   k2 gpu-preempt 1 (1 planned)                                     │
+│                                                                                   ││   A100-80G    1   k2 gpu-pooling 1 (1 planned)                                     │
 │                                                                                   ││   A100-40G    0                                                                    │
 │                                                                                   ││   A6000       1   labstation gpu 0                                                 │
 │                                                                                   ││   also free   MIG slices 11 (k2) · L40S 4 · PRO6000 2 · P100-16G 1 · V100 1 · V1…  │
@@ -4005,7 +4005,7 @@ lines come from a cached one-shot peek after 1 s of dwell (§4.7), not a stream.
    labstation p363942  orb.launch (orb.train)               R   18:54:04 —         1×A6000   ▅ 70%  gpu 3
  ! lynx       p642229  orb.launch ×2 (orb.train)            R   18:45:12 —         2×PRO6000 ▇ 98%  gpu 0,1 · auth
 ─ k2:2332861 · orb-swp--train--cifar-warmup--s43--a02 ───────────────────────────────── RUNNING · 4:07:12 / 3-00:00:00 ─
- partition gpu-preempt · qos gpu-priority · account lab · node n-40-01 · 8 cpu · 48G · A100-SXM4-40GB idx 2
+ partition gpu-pooling · qos gpu-priority · account lab · node n-40-01 · 8 cpu · 48G · A100-SXM4-40GB idx 2
  GPU (sstat · 30 s)  util ▕█████████▊▏ 98%   mem ▕██████    ▏ 24.3/40.0G     stdout …/logs/…warmup--s43--a02_2332861.out
  │ [2026-09-07 05:56:18] epoch 41/300  train_loss 0.3121  vs_base -2.41%  213 it/s
  │ [2026-09-07 05:56:39] epoch 42/300  train_loss 0.3098  vs_base -2.44%  211 it/s
@@ -4053,7 +4053,7 @@ lines come from a cached one-shot peek after 1 s of dwell (§4.7), not a stream.
   ▌Summary▐  GPU   Logs   Steps   Procs   Raw
 ┌ Job ───────────────────────────────────────────────┐┌ Resources ─────────────────────────────────────────────────────┐
 │ user       alice          account  lab             ││ nodes   1  n-40-01            cpus 8 (64-71)   mem 48G         │
-│ partition  gpu-preempt        qos      gpu-priority││ gpus    1× nvidia_a100-sxm4-40gb   node n-40-01  IDX 2         │
+│ partition  gpu-pooling        qos      gpu-priority││ gpus    1× nvidia_a100-sxm4-40gb   node n-40-01  IDX 2         │
 │ submitted  09-06 11:14 (18h ago)                   ││ tres    cpu=8,mem=48G,node=1,billing=8,gres/gpu=1              │
 │ started    09-07 01:50 (4h07m ago, waited 14h36m)  ││ cost    33.0 CPU-h · 4.1 GPU-h · 33 billing-h (= CPU-h here)   │
 │ ends by    09-10 01:50                             │├ GPU · source: sstat (Slurm accounting, every 60 s) ────────────┤
@@ -4134,8 +4134,8 @@ lines come from a cached one-shot peek after 1 s of dwell (§4.7), not a stream.
  RunFleet ▏k2▕ › Hosts › k2                      ● ok 0.21s · 8s ago · Slurm 25.05.8 · cluster k2 · login login02  ⟳ 15s
 ┌ Partitions (assoc, recent jobs, GPU partitions open to you) ─────────────────────────────────────────────────────────┐
 │  PARTITION     NODES  STATES                         GPUS FREE/TOTAL   BY TYPE (free/total)                          │
-│  gpu-preempt   24     mixed 17 · alloc 5 · planned 2  27 / 152          3090 12/64 · a100-80g 0/12 · h200 3/4 · …    │
-├ Nodes · gpu-preempt ────────────────────────────────────────────────────────────── f: free GPUs only · sort: name ▲ ─┤
+│  gpu-pooling   24     mixed 17 · alloc 5 · planned 2  27 / 152          3090 12/64 · a100-80g 0/12 · h200 3/4 · …    │
+├ Nodes · gpu-pooling ────────────────────────────────────────────────────────────── f: free GPUs only · sort: name ▲ ─┤
 │  NODE      STATE       CPU A/I/T      MEM ALLOC/TOTAL   GPU USED/TOTAL       TYPE        JOBS                        │
 │  n-31-01   mixed       34/30/64       282/500G          8/8  ████████        3090        bob×4 · carol×3 · dave×1    │
 │  n-31-04   mixed       6/50/56        72/125G           3/4  ███░            V100-16G    erin×2 · frank×1            │
@@ -4145,9 +4145,9 @@ lines come from a cached one-shot peek after 1 s of dwell (§4.7), not a stream.
 │  n-40-01   mixed       …              …                 3/4  ███░            A100-40G    2332861 · 2332862 +1        │
 ├ Jobs on n-31-01 ─────────────────────────────────────────────────────────────────────── next GPU frees in ≤ 2h17m ─┤
 │  JOB        USER       NAME               ACCOUNT        PARTITION    GPU  ELAPSED / LIMIT     LEFT     JOB NAME     │
-│  2333115    carol      Carol Example      lab            gpu-preempt  3    1:42:30 / 4:00:00   2:17:30  llama-ft-lora│
-│  2333301    dave       Dave Sample        physics        gpu-preempt  1    0:18:02 / 1-00:00   23:41:58 jupyter      │
-│  2331907    bob        Bob Example        lab            gpu-preempt  4    20:11:05 / 2-00:00  1-03:48  ddp-train-r50│
+│  2333115    carol      Carol Example      lab            gpu-pooling  3    1:42:30 / 4:00:00   2:17:30  llama-ft-lora│
+│  2333301    dave       Dave Sample        physics        gpu-pooling  1    0:18:02 / 1-00:00   23:41:58 jupyter      │
+│  2331907    bob        Bob Example        lab            gpu-pooling  4    20:11:05 / 2-00:00  1-03:48  ddp-train-r50│
 ├ My jobs on k2 ───────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │  2332861 R n-40-01 · 2332862 R n-40-01 · 2332863 R n-40-01 · 2333760 R n-38-01 · 2334564 PD (priority)               │
 ├ Capabilities / connection ───────────────────────────────────────────────────────────────────────────────────────────┤
@@ -4257,7 +4257,7 @@ first, then "where it went"; a box that does not fit collapses to its title and 
 │  alice                  0      1,000      1,000   ▕          ▏  0.0%    — none set      27,554      3,256     27,554 │
 │  used = since the last reset (no decay) · MY = your usage in the window (sreport, ≤ 1 h behind) · u: whole account   │
 │  charged  gpu  cpu=1 · gpu=32 per hour                                          (qos normal ×1, high ×2)             │
-│  free     free-gpu · free-gpuxl            (AllowQos low ×0, guest ×0: billing-h are recorded but not charged)       │
+│  free     flex-gpu · flex-gpuxl            (AllowQos low ×0, guest ×0: billing-h are recorded but not charged)       │
 ├ Where it went · 30d · by experiment · 214 jobs · GPU-h ▼ ───────────────────────────────────────── z group · o sort ─┤
 │  EXPERIMENT                                   JOBS  RUN    CPU-h    GPU-h  BY MODEL                   SU  ACCOUNT    │
 │▶ orb-swp--train--cifar-warmup--scratch          96    3    7,412    1,190  RTX6000 802 · L40S 388      0  alice      │
@@ -4269,7 +4269,7 @@ first, then "where it went"; a box that does not fit collapses to its title and 
 ┌ k2 · usage only: no SU limits on this cluster · billing = CPUs (no weights) · usage 2m ago ──────────────────────────┐
 │  ACCOUNT          MY CPU-h    MY GPU-h   MY BILL-h   MY RECENT (decays, half-life 14d)                               │
 │  lab               171,881      15,434     171,881   5,859 billing-h                                                 │
-│  partitions  gpu-preempt · cpu-preempt · lab (qos ×1 everywhere)                                                     │
+│  partitions  gpu-pooling · cpu-pooling · lab (qos ×1 everywhere)                                                     │
 ├ Where it went · 30d · by experiment · 1,212 jobs · GPU-h ▼ ──────────────────────────────────────────────────────────┤
 │  EXPERIMENT                                   JOBS  RUN    CPU-h    GPU-h  BY MODEL                      BILL-h      │
 │▶ orb-swp--train--cifar-warmup--scratch         640    4   96,210    9,021  3090 6,010 · A100-40G 3,011  96,210       │
@@ -4296,7 +4296,7 @@ rollup keeps EXPERIMENT, GPU-h and SU (BILL-h in usage-only mode); other boxes c
 │  pilab_02           298    97,885    97,587         2.9  2027-01-14          │
 │  pilab_02_gpu         0        97        97           0  2027-04-02          │
 │  alice                0     1,000     1,000       3,256  —                   │
-│  charged gpu · free free-gpu, free-gpuxl (qos low ×0)                        │
+│  charged gpu · free flex-gpu, flex-gpuxl (qos low ×0)                        │
 ├ 30d · by experiment · GPU-h ▼ ───────────────────────────────────────────────┤
 │  EXPERIMENT                         GPU-h      SU                            │
 │▶ orb-swp--train--cifar-warmup…      1,190       0                            │
@@ -4325,10 +4325,10 @@ exceeds what is left (97 SU)` and an exhausted account `no SU left`, both error-
 
 ```
 ┌ Cost · as of now (running, accrues every second) ────────────────────────────────────────────────────────────────────┐
-│ elapsed   4:07:12 of 3-00:00:00          account  lab          partition  gpu-preempt                                │
+│ elapsed   4:07:12 of 3-00:00:00          account  lab          partition  gpu-pooling                                │
 │ cpu       8 × 4.12 h = 33.0 CPU-h                                                                                    │
 │ gpu       1 × A100-40G × 4.12 h = 4.1 GPU-h                                                                          │
-│ billing   8 per hour (Slurm AllocTRES)    weights of gpu-preempt: none (billing = CPUs)                              │
+│ billing   8 per hour (Slurm AllocTRES)    weights of gpu-pooling: none (billing = CPUs)                              │
 │ factor    qos gpu-priority ×1 (UsageFactor)                                                                          │
 │ usage     33 billing-h so far (= CPU-h here)      ≈ 576 billing-h if it runs to its limit (3-00:00:00)               │
 │ account   lab: usage only, no SU limit on k2                                                                         │
@@ -4490,7 +4490,7 @@ space-separated and all must match:
 | `state:R` `st:pd,f` / `state:failed` / `st:running` | state code, group name (`queued active done failed cancelled ended`) or state name (`running pending completed timeout cancelled`, aliases `oom canceled done`) |
 | `user:me` / `user:alice` | owner |
 | `acct:lab` / `account:lab,pilab_02` | Slurm account in list (Account, §5.2.11) |
-| `part:free-gpu` / `p:gpu,gpuxl` | partition in list |
+| `part:flex-gpu` / `p:gpu,gpuxl` | partition in list |
 | `su:>10` `su:<=0` `gpuh:>=5` | the job's cost (`> >= < <= =`; SU = billing-h on usage-only clusters); `=` compares at the precision the column shows (`su:=33` matches 32.5 … 33.49, `su:=2.9` one decimal below 10, `gpuh` integers from 100); the first numeric terms: a malformed number is a text term, a job with an unknown cost never matches (`!su:>10` keeps it) |
 | `is:resubmitted` `is:superseded` / `is:resumes` `is:resumed` | a bad ending a later job of yours carries on / a job that carries one on (§5.2.12); other `is:` words are text |
 | `!term` | negation of any term |
@@ -4536,7 +4536,7 @@ digest's `f` sets the preset aside); changing it back does not bring the name ba
   ago`; detail screens show "data from 4 m ago — lyra is retrying (timeout via jumpvm), next retry in 38 s"; a host
   that never answered reads "no data yet — lynx needs a login … — press c to log in", and its Host detail shows only the
   Connection panel (keys `c`/`e`/`t`) instead of an empty workstation layout.
-- **Free GPUs** (cards, partition table): whole GPUs free/total, then free MIG slices apart (`gpu-preempt 13/108 +11
+- **Free GPUs** (cards, partition table): whole GPUs free/total, then free MIG slices apart (`gpu-pooling 13/108 +11
   MIG`; on k2 17 of 22 "free GPUs" were 1g.10gb-style slices, M3). BY TYPE merges types that render the same label
   (`nvidia_a100-sxm4-80gb` + `nvidia_a100_80gb_pcie` → one `A100-80G` entry, summed). Node names that do not fit are
   cut from the left (`…gpu-s71-02`), and the host-detail NODE / GPUs-view NODE columns widen to the longest name in
@@ -4828,7 +4828,7 @@ command: everything is derived from the snapshots the poller already produces.
   with the job alerts by time (`enter` on a watch opens its host) and the fleet panel shows `◎` rows. *Prompt*
   (`gpu_watch.parse`, lenient, against the hosts, listed partitions and GPU types of the store): a count (`2`,
   `2x`, `x2`, glued `2xh200`; a bare `3090` after a count is the model), a model, `mig` or a profile
-  (`a100-3g.40gb`), a host (`k2`, `@k2`, `host=k2`), a partition (`k2/gpu-preempt`, `partition gpu`, `p=gpu`, or a
+  (`a100-3g.40gb`), a host (`k2`, `@k2`, `host=k2`), a partition (`k2/gpu-pooling`, `partition gpu`, `p=gpu`, or a
   bare name some host lists; a filler word such as `gpu` that is also a partition gets a note), `planned`; filler
   words are skipped. Problems block saving (unknown word or host, two counts / types / hosts, a partition the host
   does not list, a count outside 1–64, a duplicate, more than `MAX_WATCHES` = 10); notes do not (a model not seen in
@@ -5626,7 +5626,7 @@ it) and the probe; past it plus 5 s the answer is a no-data document. `--demo` p
   `--time` a positive duration, `--gpu-type` a typed key seen in weights or GPU types; an unknown partition is exit 1,
   `not_found` with the known partitions. Text budget 2048 (`lyra gpuxl · 1× L40S · 8 cpus (--cpus) · 24h · qos normal
   ×1 (your last job on gpuxl)` / `billing 40/h = cpu 8×1 + gres/gpu:L40S 1×32` / `cost 960 SU for 24h · pilab_02:
-  97,587 SU left → 1.0 %` / `cheaper free-gpuxl has L40S, qos low ×0 (preemptible)`); JSON `runfleet.agent.cost/1`
+  97,587 SU left → 1.0 %` / `cheaper flex-gpuxl has L40S, qos low ×0 (preemptible)`); JSON `runfleet.agent.cost/1`
   (budget 4096): `host, partition, request{…}, billing_per_h, billing_terms[{tres, count, weight}], billing_basis,
   qos, usage_factor, usage_factor_basis, hours, su, su_min, su_max, account{account, basis, available_su, share_pct,
   exceeds, as_of}, candidate_accounts[{account, available_su, share_pct, exceeds}], alternatives[], notes[],
@@ -6083,7 +6083,7 @@ card.
   Account (§5.2.11): lyra is the lyra of the field probes — tools `sreport`, `sbank`; account limits (billing minutes)
   `pilab_02` 5873100, `pilab_02_gpu` 5820, `alice` 60000; reallocations 2027-01-14, 2027-04-02, none (`No data
   found.`); QOS factors `normal` 1, `low` 0, `guest` 0, `high` 2; `PriorityDecayHalfLife` 0 (usage since the last
-  reset); `free-gpu` / `free-gpuxl` with `AllowQos=low,guest` and no weights; a charged `gpu` partition
+  reset); `flex-gpu` / `flex-gpuxl` with `AllowQos=low,guest` and no weights; a charged `gpu` partition
   (`TRESBillingWeights=cpu=1,gres/gpu=32`, `AllowQos=normal,high`) on the V100 nodes as their second partition, with
   one completed job of alice's on `pilab_02` there, so the rollup has a charged row. k2 and vega: `sreport`, no sbank,
   no limits, no weights, every factor 1, `billing` = CPUs, sshare usage as their priority setups above say (k2

@@ -43,7 +43,7 @@ def k2() -> Capabilities:
     return _caps(partition_charges(sample("k2", "scontrol_partitions")), factors)
 
 
-def _job(state: JobState = JobState.RUNNING, *, tres: str = FREE_TRES, partition: str = "free-gpu", qos: str = "low",
+def _job(state: JobState = JobState.RUNNING, *, tres: str = FREE_TRES, partition: str = "flex-gpu", qos: str = "low",
          elapsed: timedelta | None = timedelta(hours=4), limit: timedelta | None = timedelta(days=3),
          gpu_type: str | None = "rtx6000", cpus: int | None = 8, gpus: int = 1, jid: str = "31367626",
          array_task: str | None = None, kind: JobKind = JobKind.SLURM, observed: datetime | None = NOW,
@@ -100,7 +100,7 @@ def test_as_billing_h_puts_unscaled_hours_in_the_su_slots(lyra: Capabilities) ->
 
 
 def test_k2_billing_equals_cpus_and_factor_one(k2: Capabilities) -> None:
-    job = _job(tres="billing=16,cpu=16,gres/gpu=2,mem=256G,node=1", partition="gpu-preempt", qos="gpu-preempt",
+    job = _job(tres="billing=16,cpu=16,gres/gpu=2,mem=256G,node=1", partition="gpu-pooling", qos="gpu-pooling",
                gpu_type="nvidia_a100-sxm4-40gb", gpus=2, cpus=16, elapsed=timedelta(hours=2))
     c = cost.job_cost(job, NOW, k2)
     assert c is not None
@@ -150,7 +150,7 @@ def test_unknown_qos_counts_once_and_is_flagged(lyra: Capabilities) -> None:
 
 
 def test_billing_falls_back_to_cpus(lyra: Capabilities) -> None:
-    # free-gpu has no weights: billing = CPUs (Slurm's default), labelled as an estimate
+    # flex-gpu has no weights: billing = CPUs (Slurm's default), labelled as an estimate
     c = cost.job_cost(_job(tres="cpu=4,gres/gpu=1", cpus=4), NOW, lyra)
     assert c is not None and c.billing == 4 and c.billing_basis == "cpus"
     nothing = cost.job_cost(_job(tres="", cpus=None, gpus=0), NOW, None)
@@ -216,14 +216,14 @@ def test_billing_rate_max_tres() -> None:
 
 
 def test_partition_lookup_takes_the_first_of_a_list(lyra: Capabilities) -> None:
-    assert cost.partition_charge(lyra, "gpuxl,free-gpuxl").partition == "gpuxl"   # type: ignore[union-attr]
+    assert cost.partition_charge(lyra, "gpuxl,flex-gpuxl").partition == "gpuxl"   # type: ignore[union-attr]
     assert cost.partition_charge(lyra, "nope") is None and cost.partition_charge(None, "gpu") is None
 
 
 # ---------------------------------------------------------------- classify_partitions
 def test_lyra_free_and_charged_partitions(lyra: Capabilities) -> None:
     got = {c.partition: c for c in cost.classify_partitions(lyra)}
-    for p in ("free", "free-gpu", "free-gpuxl"):
+    for p in ("free", "flex-gpu", "flex-gpuxl"):
         assert not got[p].charged and got[p].basis == "allow_qos"
         assert got[p].qos == (("low", 0.0), ("guest", 0.0))
     assert got["gpu"].charged and got["gpu"].basis == "weights" and got["gpu"].weights == "cpu=1,gres/gpu=32"
@@ -233,9 +233,9 @@ def test_lyra_free_and_charged_partitions(lyra: Capabilities) -> None:
 
 
 def test_partition_qos_alone_never_decides() -> None:
-    # free-gpuxl's partition QOS is ×1 while its AllowQos are ×0: still free
-    charge = _charge("", "free-gpuxl", qos="free-gpuxl-part", allow_qos=("low", "guest"))
-    caps = _caps((charge,), {"low": 0, "guest": 0, "free-gpuxl-part": 1})
+    # flex-gpuxl's partition QOS is ×1 while its AllowQos are ×0: still free
+    charge = _charge("", "flex-gpuxl", qos="flex-gpuxl-part", allow_qos=("low", "guest"))
+    caps = _caps((charge,), {"low": 0, "guest": 0, "flex-gpuxl-part": 1})
     (c,) = cost.classify_partitions(caps)
     assert not c.charged and c.basis == "allow_qos"
 
@@ -259,12 +259,12 @@ def test_free_observed_from_my_jobs_and_cpus_fallback() -> None:
 def test_estimate_gpuxl_l40s(lyra: Capabilities) -> None:
     recent = [_job(partition="gpuxl", qos="normal", jid="1"), _job(partition="gpu", qos="high", jid="2")]
     e = cost.estimate(lyra, partition="gpuxl", cpus=8, gpus=1, gpu_type="L40S", mem_gb=None, nodes=1, hours=24,
-                      qos=None, recent=recent, partition_gpus={"free-gpuxl": ("l40s", "rtx6000"),
-                                                               "free-gpu": ("v100",)})
+                      qos=None, recent=recent, partition_gpus={"flex-gpuxl": ("l40s", "rtx6000"),
+                                                               "flex-gpu": ("v100",)})
     assert e.billing_per_h == 40 and e.billing_basis == "weights"
     assert e.billing_terms == (("cpu", 8, 1), ("gres/gpu:L40S", 1, 32))
     assert e.qos == "normal" and e.usage_factor == 1 and e.usage_factor_basis == "your last job on gpuxl"
-    assert e.su == 960 and e.alternatives == ("free-gpuxl",)
+    assert e.su == 960 and e.alternatives == ("flex-gpuxl",)
 
 
 def test_estimate_defaults_and_notes(lyra: Capabilities) -> None:
@@ -285,11 +285,11 @@ def test_estimate_defaults_and_notes(lyra: Capabilities) -> None:
 
 
 def test_estimate_qos_flag_unknown_factor_and_no_weights(k2: Capabilities) -> None:
-    e = cost.estimate(k2, partition="gpu-preempt", cpus=16, gpus=1, gpu_type=None, mem_gb=64, nodes=1, hours=2,
+    e = cost.estimate(k2, partition="gpu-pooling", cpus=16, gpus=1, gpu_type=None, mem_gb=64, nodes=1, hours=2,
                       qos="nope")
     assert e.billing_basis == "cpus" and e.billing_per_h == 16 and e.billing_terms == (("cpu", 16, 1),)
     assert e.usage_factor is None and "UsageFactor of qos nope unknown: counted ×1" in e.notes and e.su == 32
-    assert "no TRESBillingWeights on gpu-preempt: billing = CPUs" in e.notes
+    assert "no TRESBillingWeights on gpu-pooling: billing = CPUs" in e.notes
     bare = _caps((_charge("", "p"),))
     e3 = cost.estimate(bare, partition="p", cpus=2, gpus=0, gpu_type=None, mem_gb=None, nodes=1, hours=1, qos=None)
     assert e3.qos is None and e3.usage_factor_basis == "" and "QOS unknown: counted ×1" in e3.notes and e3.su == 2
@@ -303,8 +303,8 @@ def test_estimate_typed_weights_need_a_gpu_type(lyra: Capabilities) -> None:
 
 
 def test_estimate_free_partition_and_unknown_partition(lyra: Capabilities) -> None:
-    e = cost.estimate(lyra, partition="free-gpu", cpus=8, gpus=1, gpu_type="rtx6000", mem_gb=None, nodes=1,
-                      hours=5, qos="low", partition_gpus={"free-gpuxl": ("rtx6000",)})
+    e = cost.estimate(lyra, partition="flex-gpu", cpus=8, gpus=1, gpu_type="rtx6000", mem_gb=None, nodes=1,
+                      hours=5, qos="low", partition_gpus={"flex-gpuxl": ("rtx6000",)})
     assert e.su == 0 and e.alternatives == ()                     # already free: nothing cheaper
     with pytest.raises(ValueError):
         cost.estimate(lyra, partition="nope", cpus=1, gpus=0, gpu_type=None, mem_gb=None, nodes=1, hours=1, qos=None)

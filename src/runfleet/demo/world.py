@@ -1522,7 +1522,7 @@ def _build_default(world: DemoWorld) -> None:
 
 
 def _rtx3090(name: str, bg: Iterable[int], cpus_bg: int, **kw: Any) -> SimNode:
-    return SimNode(name=name, partitions=("gpu-preempt",), cpus=64, mem_mib=512000,
+    return SimNode(name=name, partitions=("gpu-pooling",), cpus=64, mem_mib=512000,
                    gres=(GresDef("nvidia_geforce_rtx_3090", 8, "(S:0-7)"),), bg_gpu_idx=set(bg), bg_cpus=cpus_bg,
                    bg_mem_mib=cpus_bg * 4600, **kw)
 
@@ -1535,39 +1535,39 @@ def _build_k2(world: DemoWorld) -> None:
                                         _priority("14-00:00:00", "NONE", Age="1000", FairShare="100000",
                                                   JobSize="1000", Partition="1000")),
                    associations=(("k2", "lab", "", "gpu-priority,normal,labpi"),), tools=SLURM_TOOLS,
-                   qos=(("normal", 1.0), ("gpu-preempt", 1.0), ("cpu-preempt", 1.0), ("labpi", 1.0),
+                   qos=(("normal", 1.0), ("gpu-pooling", 1.0), ("cpu-pooling", 1.0), ("labpi", 1.0),
                         ("gpu-priority", 1.0)),                  # usage only: every factor 1, no weights
-                   partition_fields={"gpu-preempt": {"QoS": "gpu-preempt"}, "labpi": {"AllowQos": "labpi"}},
+                   partition_fields={"gpu-pooling": {"QoS": "gpu-pooling"}, "labpi": {"AllowQos": "labpi"}},
                    # account usage: decaying sshare (half-life 14 days), sreport, no sbank, no limits; sacct refuses
                    # ranges over 45 days (the report reads 30-day chunks)
                    others_share={"lab": (318_000, 27_400, 318_000)},
                    others_30d={"lab": (2_480_000, 212_000, 2_480_000)},
                    history_spec=HistorySpec((
-                       HistTemplate("orb-swp--train--cifar-warmup--scratch", "lab", "gpu-preempt", "gpu-priority", 8,
+                       HistTemplate("orb-swp--train--cifar-warmup--scratch", "lab", "gpu-pooling", "gpu-priority", 8,
                                     1, ("nvidia_geforce_rtx_3090", "nvidia_a100-sxm4-40gb"), (3.0, 10.0), 6),
-                       HistTemplate("orb-swp--eval--cifar--fork-warmup", "lab", "gpu-preempt", "gpu-priority", 4, 1,
+                       HistTemplate("orb-swp--eval--cifar--fork-warmup", "lab", "gpu-pooling", "gpu-priority", 4, 1,
                                     ("nvidia_geforce_rtx_3090",), (0.3, 1.2), 3),
-                       HistTemplate("lmft-x0--train--lr1e-5--finetune-base", "lab", "gpu-preempt", "normal", 16, 2,
+                       HistTemplate("lmft-x0--train--lr1e-5--finetune-base", "lab", "gpu-pooling", "normal", 16, 2,
                                     ("nvidia_h200_nvl",), (4.0, 20.0), 1),
-                       HistTemplate("jupyter", "lab", "gpu-preempt", "normal", 4, 0, (), (2.0, 8.0), 0.5)),
+                       HistTemplate("jupyter", "lab", "gpu-pooling", "normal", 4, 0, (), (2.0, 8.0), 0.5)),
                        per_day=30, days=95, id_top=3368000, id_step=7),
                    sacct_max_days=45,
                    shares=(("lab", "1", "1.000000", "8123456", "0.833333", "0.030000", "1.200000"),),
-                   partition_tier={"lab": 1.0, "gpu-preempt": 0.0},
+                   partition_tier={"lab": 1.0, "gpu-pooling": 0.0},
                    gpu_tres=True, merged_stderr="repeat", stat_verb="stat", latency=(0.05, 0.12), ncpu=32,
                    mem_total_kb=196_000_000, load=2.3, next_job_id=3372155, boot=t0 - 41 * 86400,
-                   submit_templates=(("orb-swp--train--{bench}-{method}--s{seed}--a01", "gpu-preempt", 1,
+                   submit_templates=(("orb-swp--train--{bench}-{method}--s{seed}--a01", "gpu-pooling", 1,
                                       "nvidia_geforce_rtx_3090"),
-                                     ("orb-swp--train--{bench}-{method}--s{seed}--a01", "gpu-preempt", 1,
+                                     ("orb-swp--train--{bench}-{method}--s{seed}--a01", "gpu-pooling", 1,
                                       "nvidia_a100-sxm4-40gb")),
                    next_submit=t0 + 600)
     c.nodes = [
         _rtx3090("n-31-01", range(8), 34, free_mem_mib=23103),
         _rtx3090("n-31-02", range(8), 40, free_mem_mib=40339),
         _rtx3090("n-31-03", range(8), 44, free_mem_mib=22073),
-        SimNode("n-31-04", ("gpu-preempt",), 56, 128000, (GresDef("tesla_v100-pcie-16gb", 4, "(S:0)"),),
+        SimNode("n-31-04", ("gpu-pooling",), 56, 128000, (GresDef("tesla_v100-pcie-16gb", 4, "(S:0)"),),
                 bg_cpus=6, bg_mem_mib=73728, bg_gpu_idx={0, 2, 3}, free_mem_mib=13725),
-        SimNode("n-31-05", ("gpu-preempt",), 64, 515000,
+        SimNode("n-31-05", ("gpu-pooling",), 64, 515000,
                 (GresDef("nvidia_a100_80gb_pcie", 1, "(S:0-7)"), GresDef("nvidia_a100_80gb_pcie_3g.40gb", 2, "(S:0-7)"),
                  GresDef("nvidia_a100_3g.20gb", 2, "(S:0-7)"), GresDef("nvidia_a100_80gb_pcie_1g.10gb", 7, "(S:0-7)")),
                 state="planned", free_mem_mib=59616),
@@ -1576,31 +1576,31 @@ def _build_k2(world: DemoWorld) -> None:
         _rtx3090("n-32-03", range(5), 36, flag="-", free_mem_mib=7882),
         _rtx3090("n-32-04", range(7), 54, free_mem_mib=13730),
         _rtx3090("n-32-05", range(8), 58, free_mem_mib=85214),
-        SimNode("n-33-06", ("gpu-preempt",), 32, 384000, (GresDef("tesla_p100-pcie-16gb", 1, "(S:0)"),),
+        SimNode("n-33-06", ("gpu-pooling",), 32, 384000, (GresDef("tesla_p100-pcie-16gb", 1, "(S:0)"),),
                 free_mem_mib=192271),
-        SimNode("n-34-01", ("gpu-preempt",), 64, 512000, (GresDef("nvidia_geforce_rtx_3090", 8, "(S:0-7)"),),
+        SimNode("n-34-01", ("gpu-pooling",), 64, 512000, (GresDef("nvidia_geforce_rtx_3090", 8, "(S:0-7)"),),
                 state="down", flag="*", reason="Not responding", free_mem_mib=0),
-        SimNode("n-34-02", ("gpu-preempt",), 64, 512000, (GresDef("nvidia_geforce_rtx_3090", 8, "(S:0-7)"),),
+        SimNode("n-34-02", ("gpu-pooling",), 64, 512000, (GresDef("nvidia_geforce_rtx_3090", 8, "(S:0-7)"),),
                 state="drained", reason="maint: PSU swap (ticket 4412)", free_mem_mib=501000),
-        SimNode("n-37-01", ("gpu-preempt",), 112, 1031900, (GresDef("nvidia_a100-sxm4-80gb", 4, "(S:0-7)"),),
+        SimNode("n-37-01", ("gpu-pooling",), 112, 1031900, (GresDef("nvidia_a100-sxm4-80gb", 4, "(S:0-7)"),),
                 bg_cpus=16, bg_mem_mib=65536, free_mem_mib=347459),
-        SimNode("n-37-02", ("gpu-preempt",), 112, 1031900, (GresDef("nvidia_a100-sxm4-80gb", 4, "(S:0-7)"),),
+        SimNode("n-37-02", ("gpu-pooling",), 112, 1031900, (GresDef("nvidia_a100-sxm4-80gb", 4, "(S:0-7)"),),
                 bg_cpus=24, bg_mem_mib=131072, free_mem_mib=301122),
-        SimNode("n-38-01", ("gpu-preempt",), 64, 1031900, (GresDef("nvidia_h200_nvl", 4, "(S:0-1)"),),
+        SimNode("n-38-01", ("gpu-pooling",), 64, 1031900, (GresDef("nvidia_h200_nvl", 4, "(S:0-1)"),),
                 bg_cpus=24, bg_mem_mib=262144, bg_gpu_idx={2, 3}, free_mem_mib=88121),
-        SimNode("n-38-02", ("gpu-preempt",), 64, 1031900, (GresDef("nvidia_h200_nvl", 4, "(S:0-1)"),),
+        SimNode("n-38-02", ("gpu-pooling",), 64, 1031900, (GresDef("nvidia_h200_nvl", 4, "(S:0-1)"),),
                 bg_cpus=8, bg_mem_mib=131072, bg_gpu_idx={0}, free_mem_mib=402311),
-        SimNode("n-38-03", ("gpu-preempt",), 64, 515000,
+        SimNode("n-38-03", ("gpu-pooling",), 64, 515000,
                 (GresDef("nvidia_rtx_pro_6000_blackwell_server_edition", 2, "(S:0-1)"),), free_mem_mib=480222),
         SimNode("n-39-01", ("lab",), 64, 1031900, (GresDef("nvidia_h100_80gb_hbm3", 4, "(S:0-1)"),),
                 bg_cpus=64, bg_mem_mib=800000, bg_gpu_idx={0, 1, 2, 3}, free_mem_mib=12000),
         SimNode("n-39-02", ("lab",), 64, 1031900, (GresDef("nvidia_h100_80gb_hbm3", 4, "(S:0-1)"),),
                 bg_cpus=48, bg_mem_mib=600000, bg_gpu_idx={0, 1, 2, 3}, free_mem_mib=33000),
-        SimNode("n-40-01", ("gpu-preempt",), 128, 1031900, (GresDef("nvidia_a100-sxm4-40gb", 4, "(S:0-3)"),),
+        SimNode("n-40-01", ("gpu-pooling",), 128, 1031900, (GresDef("nvidia_a100-sxm4-40gb", 4, "(S:0-3)"),),
                 bg_cpus=8, bg_mem_mib=65536, bg_gpu_idx={3}, free_mem_mib=211876),
     ]
     world.hosts["k2"] = c
-    a100 = dict(partition="gpu-preempt", qos="gpu-priority", time_limit_s=3 * 86400, gpus_per_node=1,
+    a100 = dict(partition="gpu-pooling", qos="gpu-priority", time_limit_s=3 * 86400, gpus_per_node=1,
                 gpu_type="nvidia_a100-sxm4-40gb", duration_s=2 * 86400, util_target=97.0, mem_target_mib=24870)
     for jid, method, idx, cpus, util, stalled in ((3370390, "warmup", 2, "64-71", 98.0, False),
                                                   (3370391, "const", 0, "72-79", 97.0, False),
@@ -1612,25 +1612,25 @@ def _build_k2(world: DemoWorld) -> None:
         _run(world, c, job, started_ago=4 * 3600 + 7 * 60, nodes=["n-40-01"], gpu_idx=[[idx]], cpu_ids=[cpus],
              log_idle=47 * 60 if stalled else 0.0)
     lmft = "/shared/lab/bob/lmft"
-    job = _job(c, 3371310, "lmft-x07-sampler-s0", partition="gpu-preempt", submit=t0 - 9 * 3600 - 2 * 60 - 36,
+    job = _job(c, 3371310, "lmft-x07-sampler-s0", partition="gpu-pooling", submit=t0 - 9 * 3600 - 2 * 60 - 36,
                cpus=16, mem_mib=256 * 1024, gpus_per_node=2, gpu_type="nvidia_h200_nvl", typed_alloc=False,
                typed_req_tres=False, workdir=lmft, command=f"{lmft}/jobs/train.sbatch", stdout_pattern=f"{lmft}/logs/%x_%j.out",
                duration_s=40 * 3600, util_target=86.0, mem_target_mib=49200,
                banner="TensorBoard 2.20.0 at http://n-38-01:6006/ (Press CTRL+C to quit)")
     _run(world, c, job, started_ago=9 * 3600 + 2 * 60 + 14, nodes=["n-38-01"], gpu_idx=[[0, 1]], cpu_ids=["0-15"])
-    job = _job(c, 3372094, "ddp-scale--imagenet-vit-b--n2", partition="gpu-preempt", submit=t0 - 2 * 3600,
+    job = _job(c, 3372094, "ddp-scale--imagenet-vit-b--n2", partition="gpu-pooling", submit=t0 - 2 * 3600,
                cpus=64, mem_mib=480 * 1024, num_nodes=2, gpus_per_node=4, gpu_type="nvidia_a100-sxm4-80gb",
                time_limit_s=86400, duration_s=20 * 3600, util_target=91.0, mem_target_mib=61000, step_tasks=2,
                stderr_pattern=f"{_PROJECT['k2']}/logs/%x_%j.err",
                command=f"{_PROJECT['k2']}/scripts/ddp_vit.sbatch", submit_args="--nodes 2 --gpus-per-node 4")
     _run(world, c, job, started_ago=72 * 60, nodes=["n-37-01", "n-37-02"], gpu_idx=[[0, 1, 2, 3], [0, 1, 2, 3]],
          cpu_ids=["16-47", "24-55"])
-    job = _job(c, 3371232, "orb-swp--eval--cifar-warmup--s43", partition="gpu-preempt", submit=t0 - 3600,
+    job = _job(c, 3371232, "orb-swp--eval--cifar-warmup--s43", partition="gpu-pooling", submit=t0 - 3600,
                time_limit_s=3600, gpus_per_node=1, gpu_type="nvidia_geforce_rtx_3090", duration_s=27 * 60,
                stderr_pattern=f"{_PROJECT['k2']}/logs/%x_%j.out", util_target=64.0, mem_target_mib=9100)
     _run(world, c, job, started_ago=25 * 60, nodes=["n-32-03"], gpu_idx=[[5]], cpu_ids=["36-43"])
     diag = "/shared/lab/alice/rl-bench"
-    _job(c, 3372066, "smoke-test", partition="gpu-preempt", qos="gpu-priority", submit=t0 - 18 * 60,
+    _job(c, 3372066, "smoke-test", partition="gpu-pooling", qos="gpu-priority", submit=t0 - 18 * 60,
          time_limit_s=3600, gpus_per_node=1, gpu_type="nvidia_geforce_rtx_3090", start=t0 + 35 * 60,
          duration_s=20 * 60, workdir=diag, command=f"{diag}/jobs/train.sbatch", stdout_pattern=f"{diag}/logs/%x_%j.out",
          stderr_pattern=f"{diag}/logs/%x_%j.out", scontrol_extra={"SchedNodeList": "n-32-03"})
@@ -1641,7 +1641,7 @@ def _build_k2(world: DemoWorld) -> None:
     for k, (seed, node, ran, ago) in enumerate(((42, "n-38-03", 5 * 3600 + 39 * 60 + 38, 16 * 3600),
                                                 (45, "n-38-03", 5 * 3600 + 43 * 60 + 34, 15.9 * 3600),
                                                 (46, "n-32-03", 11 * 3600 + 24 * 60 + 33, 15.2 * 3600))):
-        job = _job(c, 3370735 + k, f"orb-ab--train--resnet18-bs512--s{seed}--a02", partition="gpu-preempt",
+        job = _job(c, 3370735 + k, f"orb-ab--train--resnet18-bs512--s{seed}--a02", partition="gpu-pooling",
                    qos="gpu-priority", submit=t0 - ago - 3600, time_limit_s=86400, gpus_per_node=1,
                    gpu_type="nvidia_geforce_rtx_3090" if node == "n-32-03" else
                    "nvidia_rtx_pro_6000_blackwell_server_edition", typed_request=False,
@@ -1650,25 +1650,25 @@ def _build_k2(world: DemoWorld) -> None:
                log=f"[{local_ts(t0 - ago + ran, c.tz)}] done · best vs_base -2.87% · saved final.pt\n")
         if node == "n-32-03":            # its GPU sat idle (the efficiency card's "GPU idle" note)
             job.batch.gpuutil_ave = job.batch.gpuutil_max = 2
-    lmft_job = _job(c, 3368404, "lmft-x0-lr1e-5", partition="gpu-preempt", submit=t0 - 5 * 3600, cpus=16,
+    lmft_job = _job(c, 3368404, "lmft-x0-lr1e-5", partition="gpu-pooling", submit=t0 - 5 * 3600, cpus=16,
                     mem_mib=256 * 1024, gpus_per_node=2, gpu_type="nvidia_h200_nvl", workdir=lmft,
                     command=f"{lmft}/jobs/train.sbatch", stdout_pattern=f"{lmft}/logs/%x_%j.out")
     _ended(world, c, lmft_job, state="FAILED", started_ago=4 * 3600, ran=59 * 60 + 5, nodes=["n-38-01"],
            exit_code=1, log=traceback_text("cuda_oom", lmft, pkg="lmft", gpu_gib="139.80",
                                            used_gib="138.12"))
-    job = _job(c, 3371193, "orb-swp--train--imagenette-warmup--s42--a01", partition="gpu-preempt",
+    job = _job(c, 3371193, "orb-swp--train--imagenette-warmup--s42--a01", partition="gpu-pooling",
                submit=t0 - 18 * 3600, time_limit_s=12 * 3600, gpus_per_node=1, gpu_type="nvidia_geforce_rtx_3090",
                stderr_pattern=f"{_PROJECT['k2']}/logs/%x_%j.out")
     _ended(world, c, job, state="TIMEOUT", started_ago=17 * 3600, ran=12 * 3600 + 21, nodes=["n-32-04"],
            log=f"slurmstepd: error: *** JOB 3371193 ON n-32-04 CANCELLED AT "
                f"{local_ts(t0 - 17 * 3600 + 12 * 3600 + 21, c.tz, '%Y-%m-%dT%H:%M:%S')} DUE TO TIME LIMIT ***\n")
-    job = _job(c, 3371400, "lmft-x07-trainer-s2", partition="gpu-preempt", submit=t0 - 8 * 3600, cpus=16,
+    job = _job(c, 3371400, "lmft-x07-trainer-s2", partition="gpu-pooling", submit=t0 - 8 * 3600, cpus=16,
                mem_mib=256 * 1024, gpus_per_node=2, gpu_type="nvidia_h200_nvl", workdir=lmft,
                command=f"{lmft}/jobs/train.sbatch", stdout_pattern=f"{lmft}/logs/%x_%j.out")
     _ended(world, c, job, state="OUT_OF_MEMORY", started_ago=7.5 * 3600, ran=31 * 60 + 9, nodes=["n-38-02"],
            exit_signal=125, log="slurmstepd: error: Detected 1 oom_kill event in StepId=3371400.batch. Some of the "
                                 "step tasks have been OOM Killed.\n")
-    job = _job(c, 3371311, "lmft-x07-trainer-s1", partition="gpu-preempt", submit=t0 - 9 * 3600 - 120, cpus=16,
+    job = _job(c, 3371311, "lmft-x07-trainer-s1", partition="gpu-pooling", submit=t0 - 9 * 3600 - 120, cpus=16,
                mem_mib=256 * 1024, gpus_per_node=2, gpu_type="nvidia_h200_nvl", workdir=lmft,
                command=f"{lmft}/jobs/train.sbatch", stdout_pattern=f"{lmft}/logs/%x_%j.out")
     _ended(world, c, job, state="CANCELLED", started_ago=None, ran=246)
@@ -1798,12 +1798,12 @@ def _build_lyra(world: DemoWorld) -> None:
                    boot=t0 - 64 * 86400, node_ssh="denied", gpu_buses=("71", "01", "e1", "a1"),
                    # charged and free partitions on the same nodes, as on the real cluster (§5.2.11): the free ones
                    # admit only QOS low/guest (×0), the charged ones weight GPUs; the partition QOS factor never decides
-                   qos=(("normal", 1.0), ("low", 0.0), ("high", 2.0), ("guest", 0.0), ("free-gpu-part", 0.0),
+                   qos=(("normal", 1.0), ("low", 0.0), ("high", 2.0), ("guest", 0.0), ("flex-gpu-part", 0.0),
                         ("gpu-part", 1.0), ("gpu-highmem", 1.0), ("standard-mem", 1.0), ("gpuxl-part", 1.0),
-                        ("free-gpuxl-part", 1.0)),
+                        ("flex-gpuxl-part", 1.0)),
                    partition_fields={
-                       "free-gpu": {"AllowQos": "low,guest", "QoS": "free-gpu-part"},
-                       "free-gpuxl": {"AllowQos": "low,guest", "QoS": "free-gpuxl-part"},
+                       "flex-gpu": {"AllowQos": "low,guest", "QoS": "flex-gpu-part"},
+                       "flex-gpuxl": {"AllowQos": "low,guest", "QoS": "flex-gpuxl-part"},
                        "gpu": {"AllowQos": "normal,high", "QoS": "gpu-part",
                                "TRESBillingWeights": "cpu=1,gres/gpu=32"},
                        "gpuxl": {"AllowQos": "normal,high", "QoS": "gpuxl-part",
@@ -1815,28 +1815,28 @@ def _build_lyra(world: DemoWorld) -> None:
                    others_share={"pilab_02": (2_400, 1_150, 9_300)},
                    others_30d={"pilab_02": (61_100, 10_279, 61_100), "pilab_02_gpu": (0, 0, 0)},
                    history_spec=HistorySpec((
-                       HistTemplate("orb-swp--train--cifar-warmup--scratch", "alice", "free-gpuxl", "low", 8, 1,
+                       HistTemplate("orb-swp--train--cifar-warmup--scratch", "alice", "flex-gpuxl", "low", 8, 1,
                                     ("RTX6000", "L40S"), (6.0, 14.0), 5),
-                       HistTemplate("orb-swp--eval--cifar--fork-warmup", "alice", "free-gpu", "low", 4, 1,
+                       HistTemplate("orb-swp--eval--cifar--fork-warmup", "alice", "flex-gpu", "low", 4, 1,
                                     ("A30", "V100"), (0.5, 2.0), 3),
                        HistTemplate("jupyter", "pilab_02", "gpu", "normal", 2, 0, (), (2.0, 6.0), 0.1)),
                        per_day=7, days=390, id_top=32300000, id_step=24))
-    nodes = [SimNode(f"lyra-gpu-36-{k:02d}", ("free-gpu", "gpu"), 40, 192000, (GresDef("V100", 4),),
+    nodes = [SimNode(f"lyra-gpu-36-{k:02d}", ("flex-gpu", "gpu"), 40, 192000, (GresDef("V100", 4),),
                      bg_cpus=40 if k % 3 else 37, bg_mem_mib=143360, bg_gpu_idx={0, 1, 2, 3} if k % 4 else {0, 1, 2},
                      flag="-" if k == 5 else "", free_mem_mib=24485 - 1000 * k) for k in range(8)]
-    nodes += [SimNode(f"lyra-gpu-q71-{k:02d}", ("free-gpu", "gpu"), 32, 256000, (GresDef("A30", 4),),
+    nodes += [SimNode(f"lyra-gpu-q71-{k:02d}", ("flex-gpu", "gpu"), 32, 256000, (GresDef("A30", 4),),
                       bg_cpus=20, bg_mem_mib=98304, bg_gpu_idx={1, 2} if k != 1 else {2, 3},
                       free_mem_mib=88000 + 3000 * k) for k in range(4)]
-    nodes += [SimNode(f"lyra-gpu-s71-{k:02d}", ("free-gpuxl", "gpuxl"), 32, 256000, (GresDef("RTX6000", 4),),
+    nodes += [SimNode(f"lyra-gpu-s71-{k:02d}", ("flex-gpuxl", "gpuxl"), 32, 256000, (GresDef("RTX6000", 4),),
                       bg_cpus=24, bg_mem_mib=147456, bg_gpu_idx={0, 1, 2}, free_mem_mib=41000) for k in range(4)]
-    nodes += [SimNode(f"lyra-gpu-r71-{k:02d}", ("free-gpuxl", "gpuxl"), 32, 256000, (GresDef("RTX6000", 4),),
+    nodes += [SimNode(f"lyra-gpu-r71-{k:02d}", ("flex-gpuxl", "gpuxl"), 32, 256000, (GresDef("RTX6000", 4),),
                       bg_cpus=8, bg_mem_mib=49152, bg_gpu_idx={0}, free_mem_mib=161000) for k in range(3)]
-    nodes.append(SimNode("lyra-gpu-p71-08", ("free-gpuxl", "gpuxl"), 48, 1031000, (GresDef("L40S", 4),),
+    nodes.append(SimNode("lyra-gpu-p71-08", ("flex-gpuxl", "gpuxl"), 48, 1031000, (GresDef("L40S", 4),),
                          free_mem_mib=315712))
     c.nodes = nodes
     world.hosts["lyra"] = c
     proj = _PROJECT["lyra"]
-    base = dict(partition="free-gpu", account="alice", qos="low", time_limit_s=3 * 86400, gpus_per_node=1,
+    base = dict(partition="flex-gpu", account="alice", qos="low", time_limit_s=3 * 86400, gpus_per_node=1,
                 stderr_pattern=None, duration_s=10 * 3600)
     job = _job(c, 32378138, "orb-swp--train--places-warmup--s45--a01", submit=t0 - 3 * 3600, gpu_type="A30",
                typed_request=False, typed_alloc=False, util_target=88.0, mem_target_mib=11800,
@@ -1845,7 +1845,7 @@ def _build_lyra(world: DemoWorld) -> None:
          cpu_ids=["0-7"])
     # throttled array: tasks 1-2 done, 3-4 running, 5-12 pending (%2)
     arr = 32377076
-    sweep = dict(base, partition="free-gpu", gpu_type=None, typed_request=False, typed_alloc=False,
+    sweep = dict(base, partition="flex-gpu", gpu_type=None, typed_request=False, typed_alloc=False,
                  stdout_pattern=f"{proj}/logs/slurm-%A_%a.out", duration_s=40 * 60, util_target=76.0,
                  mem_target_mib=7300, submit_args="sweep.yaml")
     for task, raw, ago in ((3, 32377079, 21 * 60), (4, 32377080, 9 * 60)):
@@ -1861,7 +1861,7 @@ def _build_lyra(world: DemoWorld) -> None:
     _job(c, arr, "orb-sweep", submit=t0 - 2 * 3600, array_job_id=arr, array_task="5-12%2",
          summary=True, array_pending=list(range(5, 13)), array_throttle=2, reason="JobArrayTaskLimit", start=t0,
          command=f"{proj}/scripts/sweep.sbatch", **sweep)
-    rtx = dict(base, partition="free-gpuxl", gpu_type="RTX6000")
+    rtx = dict(base, partition="flex-gpuxl", gpu_type="RTX6000")
     job = _job(c, 32354789, "orb-swp--train--places-cosinewarm--s44--a01", submit=t0 - 19 * 3600, **rtx)
     _ended(world, c, job, state="PREEMPTED", started_ago=18 * 3600, ran=64, nodes=["lyra-gpu-s71-01"],
            log=f"slurmstepd: error: *** JOB 32354789 ON lyra-gpu-s71-01 CANCELLED AT "
@@ -2046,7 +2046,7 @@ def _build_launcher(world: DemoWorld) -> None:
     t0 = world.t0
     c = world.cluster("k2")
     wd = LAUNCHER_WORKDIR
-    job = _job(c, LAUNCHER_JOB, "vitfm--in1k-b16--s42", partition="gpu-preempt", qos="gpu-priority",
+    job = _job(c, LAUNCHER_JOB, "vitfm--in1k-b16--s42", partition="gpu-pooling", qos="gpu-priority",
                submit=t0 - 13 * 3600 - 9 * 60, cpus=8, mem_mib=96 * 1024, gpus_per_node=1,
                gpu_type="nvidia_h200_nvl", duration_s=40 * 3600, util_target=93.0, mem_target_mib=61000,
                workdir=wd, command=f"{wd}/jobs/launch.sbatch", stdout_pattern=f"{wd}/logs/%x_%j.out",
@@ -2079,7 +2079,7 @@ def _build_transitions(world: DemoWorld) -> None:
     is preempted again ~2.5 min in (PreemptMode REQUEUE: Slurm requeues it, its restart count goes to 2)."""
     t0 = world.t0
     lyra, k2 = world.cluster("lyra"), world.cluster("k2")
-    base = dict(partition="free-gpu", account="alice", qos="low", gpus_per_node=1, gpu_type="A30",
+    base = dict(partition="flex-gpu", account="alice", qos="low", gpus_per_node=1, gpu_type="A30",
                 typed_request=False, typed_alloc=False, stderr_pattern=None, mem_target_mib=9800)
     limit = 2 * 3600
     job = _job(lyra, 32378151, "orb-swp--eval--places-warmup--s45", submit=t0 - 2 * 3600, time_limit_s=limit,
@@ -2091,7 +2091,7 @@ def _build_transitions(world: DemoWorld) -> None:
                duration_s=ran + 75, outcome="FAILED", exit_code=1, failure="value", util_target=83.0, **base)
     _run(world, lyra, job, started_ago=ran, nodes=["lyra-gpu-q71-03"], gpu_idx=[[0]], cpu_ids=["8-15"])
     ran = 3 * 3600 + 20 * 60
-    job = _job(k2, 3372115, "orb-swp--train--voc-warmup--s44--a01", partition="gpu-preempt", submit=t0 - 6 * 3600,
+    job = _job(k2, 3372115, "orb-swp--train--voc-warmup--s44--a01", partition="gpu-pooling", submit=t0 - 6 * 3600,
                time_limit_s=86400, gpus_per_node=1, gpu_type="nvidia_geforce_rtx_3090", duration_s=ran + 150,
                outcome="PREEMPTED", restarts=1, stderr_pattern=f"{_PROJECT['k2']}/logs/%x_%j.out",
                util_target=93.0, mem_target_mib=17800)

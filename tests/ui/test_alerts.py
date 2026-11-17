@@ -401,7 +401,7 @@ def lyra_resubmit(svc: FakeService) -> None:
     """lyra's PREEMPTED 31354789 (PreemptMode CANCEL) resubmitted 30 min later as 31358335, which completed."""
     job = slurm_job("lyra", "31358335", "orb-swp--train--places-cosinewarm--s47--a01", JobState.COMPLETED,
                     elapsed=timedelta(hours=2), ended_ago=15 * 3600, submit_ago=17.5 * 3600, exit_code=0,
-                    gpu_type="rtx6000", node="r71-00", partition="free-gpu", user="alice07")
+                    gpu_type="rtx6000", node="r71-00", partition="flex-gpu", user="alice07")
     svc.put_job(dataclasses.replace(job, is_mine=True))
 
 

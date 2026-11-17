@@ -10,7 +10,7 @@ JobId=2332861 JobName=orb-swp--train--cifar-warmup--s43--a02
    StartTime=2026-09-07T01:50:27 EndTime=2026-09-10T01:50:27 Deadline=N/A
    PreemptEligibleTime=2026-09-07T01:50:27 PreemptTime=None
    SuspendTime=None SecsPreSuspend=0 LastSchedEval=2026-09-07T01:50:27 Scheduler=Backfill
-   Partition=gpu-preempt AllocNode:Sid=login02:1730264
+   Partition=gpu-pooling AllocNode:Sid=login02:1730264
    ReqNodeList=(null) ExcNodeList=n-31-[04-05],n-33-[04-06],n-36-[01-03],n-37-02
    NodeList=n-40-01
    BatchHost=n-40-01

@@ -30,15 +30,15 @@ from runfleet.transport.base import Transport
 from tests.agent.test_view import ENVELOPE, T0, H, fleet, keys, mk_host, mk_job
 
 LYRA_PARTS = (
-    PartitionCharge("free-gpu", "", "free-gpu-part", ("low", "guest")),
+    PartitionCharge("flex-gpu", "", "flex-gpu-part", ("low", "guest")),
     PartitionCharge("gpu", "cpu=1,gres/gpu=32", "gpu-part", ("normal", "high")),
-    PartitionCharge("free-gpuxl", "", "free-gpuxl-part", ("low", "guest")),
+    PartitionCharge("flex-gpuxl", "", "flex-gpuxl-part", ("low", "guest")),
     PartitionCharge("gpuxl", "cpu=1,gres/gpu:L40S=32,gres/gpu:RTX6000=64", "gpuxl-part", ("normal", "high")),
 )
-FACTORS = {"normal": 1.0, "low": 0.0, "high": 2.0, "guest": 0.0, "free-gpuxl-part": 1.0}
+FACTORS = {"normal": 1.0, "low": 0.0, "high": 2.0, "guest": 0.0, "flex-gpuxl-part": 1.0}
 SLURMDBD = {"AccountingStorageType": "accounting_storage/slurmdbd", "PriorityDecayHalfLife": "00:00:00"}
 GPUXL = PartitionSummary("gpuxl", 8, 32, 4, 0, {"l40s": (2, 4), "rtx6000": (2, 28)}, {"mixed": 8})
-FREE_GPUXL = PartitionSummary("free-gpuxl", 8, 32, 4, 0, {"l40s": (2, 4), "rtx6000": (2, 28)}, {"mixed": 8})
+FLEX_GPUXL = PartitionSummary("flex-gpuxl", 8, 32, 4, 0, {"l40s": (2, 4), "rtx6000": (2, 28)}, {"mixed": 8})
 
 
 def lyra_caps(**kw: Any) -> Capabilities:
@@ -55,7 +55,7 @@ def k2_caps() -> Capabilities:
     return lyra_caps(cluster_name="k2", associations=(("k2", "lab", "", "normal"),),
                      slurm_config={**SLURMDBD, "PriorityDecayHalfLife": "7-00:00:00"},
                      qos_usage_factor={"normal": 1.0},
-                     partition_charges=(PartitionCharge("lab"), PartitionCharge("gpu-preempt")))
+                     partition_charges=(PartitionCharge("lab"), PartitionCharge("gpu-pooling")))
 
 
 def summary(**kw: Any) -> AccountSummary:
@@ -96,7 +96,7 @@ def report(window: str = "90d", cells: Iterable[UsageCell] = (), **kw: Any) -> A
 
 def lyra(jobs: Iterable[Job] = (), *, caps: Capabilities | None = None, account: AccountSummary | None = None,
          reports: dict[str, AccountReport] | None = None, **kw: Any) -> HostView:
-    hv = mk_host("lyra", jobs, partitions=(GPUXL, FREE_GPUXL), **kw)
+    hv = mk_host("lyra", jobs, partitions=(GPUXL, FLEX_GPUXL), **kw)
     assert hv.snapshot is not None
     snap = dataclasses.replace(hv.snapshot, caps=caps or lyra_caps(), account=account)
     return dataclasses.replace(hv, snapshot=snap, caps_at=T0 - H, account_reports=reports or {})
@@ -133,7 +133,7 @@ def test_job_card_and_json_carry_the_cost() -> None:
 
 
 def test_free_pending_old_and_other_users_jobs() -> None:
-    free = gpuxl_job("501", partition="free-gpuxl", qos="low")
+    free = gpuxl_job("501", partition="flex-gpuxl", qos="low")
     pend = gpuxl_job("502", state=JobState.PENDING)
     old = gpuxl_job("503", observed_at=T0 - timedelta(minutes=20))
     other = gpuxl_job("504", user="bob", is_mine=False)
@@ -161,7 +161,7 @@ def test_jobs_sort_su_and_gpuh() -> None:
     small = gpuxl_job("600", elapsed=H)
     big = gpuxl_job("601", elapsed=5 * H, alloc=dataclasses.replace(gpuxl_job().alloc, gpus=2, tres={
         "cpu": "8", "billing": "72", "gres/gpu": "2"}))
-    free = gpuxl_job("602", partition="free-gpuxl", qos="low", elapsed=9 * H)
+    free = gpuxl_job("602", partition="flex-gpuxl", qos="low", elapsed=9 * H)
     fv = fleet(lyra([small, free, big]))
     su = view.jobs(fv, view.JobFilter(sort="su"))
     assert [j["id"] for j in su.data["jobs"]] == ["lyra:601", "lyra:600", "lyra:602"]
@@ -187,7 +187,7 @@ def test_cost_matches_the_mockup() -> None:
         "lyra gpuxl · 1× L40S · 8 cpus (--cpus) · 24h · qos normal ×1 (your last job on gpuxl)",
         "  billing 40/h  = cpu 8×1 + gres/gpu:L40S 1×32   (TRESBillingWeights of gpuxl)",
         "  cost    960 SU for 24h · account pilab_02: 97,587 SU left → 1.0%",
-        "  cheaper free-gpuxl has L40S, qos low ×0, guest ×0"]
+        "  cheaper flex-gpuxl has L40S, qos low ×0, guest ×0"]
     d = doc.data
     assert keys(d) == sorted([*ENVELOPE, "host", "partition", "request", "billing_per_h", "billing_terms",
                               "billing_basis", "qos", "usage_factor", "usage_factor_basis", "hours", "su", "su_min",
@@ -197,7 +197,7 @@ def test_cost_matches_the_mockup() -> None:
                                                      {"tres": "gres/gpu:L40S", "count": 1.0, "weight": 32.0}]
     assert d["account"] == {"account": "pilab_02", "basis": "your last job on gpuxl", "available_su": 97587.0,
                             "share_pct": 1.0, "exceeds": False, "as_of": view.iso(T0 - timedelta(minutes=2))}
-    assert [a["partition"] for a in d["alternatives"]] == ["free-gpuxl"] and d["caps_age_s"] == 3600
+    assert [a["partition"] for a in d["alternatives"]] == ["flex-gpuxl"] and d["caps_age_s"] == 3600
     assert len(doc.text.encode()) <= 2048 and len(view.dumps(d)) <= 4096
 
 
@@ -239,7 +239,7 @@ def test_cost_defaults_notes_and_old_rules() -> None:
     assert "no time: per hour only" in doc.data["notes"] and "charging rules as of 2d ago" in doc.data["notes"]
     assert doc.data["su"] is None and "  cost    33/h SU (no --time)" in doc.text
     assert doc.data["qos"] == "normal" and doc.data["usage_factor_basis"] == "default normal"
-    free = view.cost(fv, "lyra", creq(partition="free-gpuxl"))       # AllowQos low,guest: normal is not allowed
+    free = view.cost(fv, "lyra", creq(partition="flex-gpuxl"))       # AllowQos low,guest: normal is not allowed
     assert free.data["su"] == 0 and free.data["alternatives"] == []
     assert (free.data["qos"], free.data["usage_factor_basis"]) == ("low", "AllowQos (all alike)")
 
@@ -247,8 +247,8 @@ def test_cost_defaults_notes_and_old_rules() -> None:
 def test_cost_unknown_partition_workstation_and_no_rules() -> None:
     doc = view.cost(fleet(lyra()), "lyra", creq(partition="nope"))
     assert doc.exit_code == EXIT_NO_DATA and doc.data["errors"][0]["code"] == "not_found"
-    assert doc.data["known_partitions"] == ["free-gpu", "gpu", "free-gpuxl", "gpuxl"]
-    assert "not_found  no partition nope → known: free-gpu, gpu, free-gpuxl, gpuxl" in doc.text
+    assert doc.data["known_partitions"] == ["flex-gpu", "gpu", "flex-gpuxl", "gpuxl"]
+    assert "not_found  no partition nope → known: flex-gpu, gpu, flex-gpuxl, gpuxl" in doc.text
     ws = view.cost(fleet(mk_host("labstation", kind="workstation")), "labstation", creq())
     assert ws.exit_code == EXIT_NO_DATA and "workstation has no scheduler" in ws.text
     bare = view.cost(fleet(lyra(caps=lyra_caps(partition_charges=()))), "lyra", creq())
@@ -282,7 +282,7 @@ def test_usage_default_window_reads_the_summary() -> None:
     assert lines[3] == ("  pilab_02       298 / 97,885 SU used · 97,587 left · realloc 2027-01-14 · 30d me 205 CPU-h "
                         "2.9 GPU-h")
     assert lines[4] == ("  charged gpu (cpu=1,gres/gpu=32), gpuxl (cpu=1,gres/gpu:L40S=32,gres/gpu:RTX6000=64) · "
-                        "free free-gpu, free-gpuxl (qos guest ×0, low ×0)")
+                        "free flex-gpu, flex-gpuxl (qos guest ×0, low ×0)")
     assert "k2  usage only (no SU limits; billing = CPUs)  usage 2m ago · balances 2m ago" in lines
     # usage only: the user's own sshare row and the whole account's, both labelled (k2: 5,859 vs 2,503,304)
     assert "  lab            recent me 5,859 · account 2,503,304 billing-h (decays, half-life 14d) · 30d me 171,881 " \

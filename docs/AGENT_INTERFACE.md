@@ -357,7 +357,7 @@ lyra  limits (sshare + sbank)  usage 2m ago · balances 2m ago · sbank 3h ago
   pilab_02      298 / 97,885 SU used · 97,587 left · realloc 2027-01-14 · 30d me 205 CPU-h 2.9 GPU-h
   pilab_02_gpu    0 / 97 SU · 97 left · realloc 2027-04-02 · 30d me 0 CPU-h 0 GPU-h
   alice           0 / 1,000 SU · 1,000 left · realloc none set · 30d me 27,554 CPU-h 3,256 GPU-h
-  charged gpu (cpu=1,gres/gpu=32) · free free-gpu, free-gpuxl (qos low ×0)
+  charged gpu (cpu=1,gres/gpu=32) · free flex-gpu, flex-gpuxl (qos low ×0)
   top 30d by experiment (GPU-h): orb-swp--train--cifar-warmup--scratch 1,190 (0 SU) · orb-swp--eval--… 512 (0 SU)
 k2  usage only (no SU limits; billing = CPUs)  usage 2m ago
   lab  recent me 5,859 · account 2,503,304 billing-h (decays, half-life 14d) · 30d me 171,881 CPU-h · 15,434 GPU-h
@@ -404,7 +404,7 @@ runfleet agent cost HOST --partition P [--gpus N] [--gpu-type T] [--cpus N] [--m
 lyra gpuxl · 1× L40S · 8 cpus (--cpus) · 24h · qos normal ×1 (your last job on gpuxl)
   billing 40/h  = cpu 8×1 + gres/gpu:L40S 1×32   (TRESBillingWeights of gpuxl)
   cost    960 SU for 24h · account pilab_02: 97,587 SU left → 1.0%
-  cheaper free-gpuxl has L40S, qos low ×0 (preemptible)
+  cheaper flex-gpuxl has L40S, qos low ×0 (preemptible)
 ```
 
 - **JSON** `runfleet.agent.cost/1`（≤ 4 KB）：`{host, partition, request{…}, billing_per_h, billing_terms[{tres, count,
@@ -695,7 +695,7 @@ TUI 和 `mcp`（开始服务之前）都会跑。没有清单时只做一次 sta
 ---
 name: runfleet
 description: >-
-  k2 vega lyra lynx labstation runfleet squeue queue pending free-gpu GPU workstation.
+  k2 vega lyra lynx labstation runfleet squeue queue pending free GPU workstation.
   Fleet-wide, READ-ONLY view of the user's Slurm jobs and GPU workstations through RunFleet: what runs,
   pends or failed on every host and why, free GPUs by type, cluster health and expired logins, bounded
   log tails and failure causes, recent events, and waiting for a job to end. Use for "what's running",
