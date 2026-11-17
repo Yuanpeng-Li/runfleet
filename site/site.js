@@ -31,11 +31,11 @@
     say(btn, mac ? '⌘C' : 'Ctrl+C', 'Command selected: press ' + (mac ? 'Command+C' : 'Ctrl+C') + ' to copy it');
   }
 
-  // The tour: each button sends the demo to one recorded screen, and stays marked while the demo shows it (any tab
-  // of the same job counts; "@…" marks a screen reached another way, which is the same screen).
+  // The tour, in the demo window's top bar: each button sends the demo to one recorded screen and stays marked while
+  // the demo shows it (any tab of the same job counts; "@…" marks a screen reached another way, which is the same
+  // screen). The buttons sit next to the screen they change, so nothing scrolls and the focus stays on the button.
   var player = document.querySelector('.rfd[data-src]');
   var tour = Array.prototype.slice.call(document.querySelectorAll('.tour button[data-go]'));
-  var reduced = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   function shows(btn, id) {
     var go = btn.getAttribute('data-go');
@@ -47,7 +47,6 @@
   if (player && tour.length) {
     player.addEventListener('rfd:ready', function (e) {
       tour.forEach(function (btn) {
-        btn.removeAttribute('aria-disabled');
         if (!e.detail.has(btn.getAttribute('data-go'))) btn.parentNode.hidden = true;   // not in this recording
       });
     });
@@ -58,16 +57,8 @@
       });
     });
     tour.forEach(function (btn) {
-      btn.addEventListener('click', function (e) {
-        if (btn.getAttribute('aria-disabled') === 'true') return;
+      btn.addEventListener('click', function () {
         player.dispatchEvent(new CustomEvent('rfd:go', { detail: btn.getAttribute('data-go') }));
-        // From the keyboard (no pointer: detail 0) the demo takes the focus, so its keys work at once; Esc hands it
-        // back. The whole band comes into view, keycaps included, unless the window is mostly on screen already.
-        if (e.detail === 0) player.querySelector('.rfd__screen').focus({ preventScroll: true });
-        var win = player.querySelector('.rfd__win'), r = win.getBoundingClientRect();
-        var seen = Math.min(r.bottom, innerHeight) - Math.max(r.top, 0);
-        var band = player.closest('.board') || win;
-        if (seen < r.height * 0.8) band.scrollIntoView({ block: 'start', behavior: reduced ? 'auto' : 'smooth' });
       });
     });
   }

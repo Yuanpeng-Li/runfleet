@@ -64,11 +64,15 @@
   background: #14161b;
 }
 
-.rfd__bar {                 /* no window chrome: only the full-screen control, at the right */
+.rfd__bar {                 /* no window chrome: the page's own controls (if any) and full screen, at the right */
   display: flex;
+  align-items: center;
   justify-content: flex-end;
-  margin-bottom: 6px;
+  gap: 12px;
+  margin-bottom: 8px;
 }
+
+.rfd__full { flex: none; }
 
 .rfd__full {
   display: inline-flex;

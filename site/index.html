@@ -43,17 +43,6 @@
     <p class="lede">Queues, GPU use, logs and the reasons jobs failed, from every cluster and workstation you can <code>ssh</code> into. Nothing gets installed on the remote side.</p>
     <div class="hero__side">
       <p class="note">Below is RunFleet itself on a simulated fleet of three Slurm clusters and two GPU workstations: screens recorded from the real app, replayed in your browser.</p>
-      <div class="tour" role="group" aria-labelledby="tour-l">
-        <p id="tour-l">Open the demo at:</p>
-        <ul>
-          <li><button type="button" data-go="fleet/k2" aria-controls="rfd-screen" aria-disabled="true" title="What is running on k2, as squeue --me would show it">Your jobs on k2</button></li>
-          <li><button type="button" data-go="fleet/k2/free" aria-controls="rfd-screen" aria-disabled="true" title="Where a GPU is free right now, across all partitions">Free GPUs</button></li>
-          <li><button type="button" data-go="job/vega:824373/logs" aria-controls="rfd-screen" aria-disabled="true" title="A DDP run on vega that died of an NCCL error, opened at the log line">A run that died</button></li>
-          <li><button type="button" data-go="job/k2:3372143/summary" aria-controls="rfd-screen" aria-disabled="true" title="Why a k2 job is pending: its priority factors">A job that waits</button></li>
-          <li><button type="button" data-go="job/vega:823954/gpu" aria-controls="rfd-screen" aria-disabled="true" title="A GPU sitting idle while holding 69.2 GB inside a running job">An idle GPU</button></li>
-          <li><button type="button" data-go="fleet/labstation" aria-controls="rfd-screen" aria-disabled="true" title="Who is using the lab workstation's GPUs">The lab workstation</button></li>
-        </ul>
-      </div>
     </div>
   </section>
 
@@ -67,6 +56,16 @@
       </figcaption>
       <div class="rfd__win" hidden>
       <div class="rfd__bar">
+      <div class="tour" role="group" aria-label="Jump to a screen">
+      <ul>
+        <li><button type="button" data-go="fleet/k2" aria-controls="rfd-screen" title="What is running on k2, as squeue --me would show it">Your jobs on k2</button></li>
+        <li><button type="button" data-go="fleet/k2/free" aria-controls="rfd-screen" title="Where a GPU is free right now, across all partitions">Free GPUs</button></li>
+        <li><button type="button" data-go="job/vega:824373/logs" aria-controls="rfd-screen" title="A DDP run on vega that died of an NCCL error, opened at the log line">A run that died</button></li>
+        <li><button type="button" data-go="job/k2:3372143/summary" aria-controls="rfd-screen" title="Why a k2 job is pending: its priority factors">A job that waits</button></li>
+        <li><button type="button" data-go="job/vega:823954/gpu" aria-controls="rfd-screen" title="A GPU sitting idle while holding 69.2 GB inside a running job">An idle GPU</button></li>
+        <li><button type="button" data-go="fleet/labstation" aria-controls="rfd-screen" title="Who is using the lab workstation's GPUs">The lab workstation</button></li>
+      </ul>
+      </div>
       <button type="button" class="rfd__full" aria-label="Full screen" title="Full screen" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
       </div>
       <div class="rfd__body">
