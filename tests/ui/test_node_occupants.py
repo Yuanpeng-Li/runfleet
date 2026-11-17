@@ -18,7 +18,7 @@ def _k2_nodes() -> dict[str, Node]:
 
 
 def _job(jid: str, user: str, gpus: int | None, left_h: float, *, exact: bool = True) -> NodeJob:
-    return NodeJob(jid, user, None, "lab", "gpu-preempt", "train", "R", gpus, exact, None, 3600,
+    return NodeJob(jid, user, None, "lab", "gpu-pooling", "train", "R", gpus, exact, None, 3600,
                    3600 + int(left_h * 3600), user == ME)
 
 

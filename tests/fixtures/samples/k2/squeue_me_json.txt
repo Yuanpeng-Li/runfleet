@@ -662,7 +662,7 @@
          "infinite": false,
          "number": 1
        },
-       "partition": "gpu-preempt",
+       "partition": "gpu-pooling",
        "prefer": "",
        "memory_per_cpu": {
          "set": false,
@@ -1452,7 +1452,7 @@
          "infinite": false,
          "number": 1
        },
-       "partition": "gpu-preempt",
+       "partition": "gpu-pooling",
        "prefer": "",
        "memory_per_cpu": {
          "set": false,
@@ -2242,7 +2242,7 @@
          "infinite": false,
          "number": 1
        },
-       "partition": "gpu-preempt",
+       "partition": "gpu-pooling",
        "prefer": "",
        "memory_per_cpu": {
          "set": false,
@@ -3417,7 +3417,7 @@
          "infinite": false,
          "number": 1
        },
-       "partition": "gpu-preempt",
+       "partition": "gpu-pooling",
        "prefer": "",
        "memory_per_cpu": {
          "set": false,
@@ -3775,7 +3775,7 @@
          "infinite": false,
          "number": 1
        },
-       "partition": "gpu-preempt",
+       "partition": "gpu-pooling",
        "prefer": "",
        "memory_per_cpu": {
          "set": false,

@@ -325,7 +325,7 @@ def test_card_free_gpus_fit_every_partition_or_say_how_many_more(service: FakeSe
     state = service.store.hosts["lyra"]
     assert state.snapshot is not None
     parts = tuple(PartitionSummary(n, 1, t, f, pl, {}, {}) for n, f, t, pl in (
-        ("free-gpu", 6, 136, 2), ("free-gpuxl", 15, 40, 0), ("gpu", 3, 132, 1), ("gpu-highmem", 0, 4, 0),
+        ("flex-gpu", 6, 136, 2), ("flex-gpuxl", 15, 40, 0), ("gpu", 3, 132, 1), ("gpu-highmem", 0, 4, 0),
         ("gpuxl", 2, 40, 0)))
     state.snapshot = dataclasses.replace(state.snapshot, partitions=parts)
 

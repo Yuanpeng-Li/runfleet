@@ -32,7 +32,7 @@ async def test_lyra_limits_free_and_charged() -> None:
     assert round(charged.charged_su) == 116 and len(rows) == 11
     caps = svc.store.hosts["lyra"].snapshot.caps                         # type: ignore[union-attr]
     verdict = {p.partition: p.charged for p in classify_partitions(caps, r.cells)}   # type: ignore[arg-type]
-    assert verdict["gpu"] and not verdict["free-gpu"]
+    assert verdict["gpu"] and not verdict["flex-gpu"]
     assert svc.account_cached("lyra", "30d") is r and await svc.account_report("lyra") is r   # 10 min cache
     period = await svc.account_report("lyra", "period")
     assert period.window == "period" and all(u.start_inferred for u in period.summary.usage)

@@ -169,7 +169,7 @@ def max_tres(caps: Capabilities | None) -> bool:
 
 
 def partition_charge(caps: Capabilities | None, partition: str | None) -> PartitionCharge | None:
-    """The charge of a partition (a pending job's `gpu,free-gpu` list: the first one), else None."""
+    """The charge of a partition (a pending job's `gpu,flex-gpu` list: the first one), else None."""
     if caps is None or not partition:
         return None
     name = partition.split(",", 1)[0].strip()
@@ -310,7 +310,7 @@ def classify_partitions(caps: Capabilities, cells: Sequence[UsageCell] = ()) -> 
     """Free or charged, per `caps.partition_charges` in scontrol order (§5.2.11 rule 5), first match wins: AllowQos
     holds only ×0 QOS -> free; my jobs there in the window all ran under ×0 QOS -> free (observed); weights, or a QOS
     that may run there with factor > 0 -> charged; else charged with billing = CPUs. The partition QOS factor alone
-    never decides (lyra `free-gpuxl-part` is ×1, yet its jobs are not charged)."""
+    never decides (lyra `flex-gpuxl-part` is ×1, yet its jobs are not charged)."""
     factors = caps.qos_usage_factor
     out: list[PartitionClass] = []
     for c in caps.partition_charges:

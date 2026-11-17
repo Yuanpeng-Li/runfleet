@@ -34,7 +34,7 @@ def test_grouping_keys(name: str, experiment: str, task: str) -> None:
 def test_seeds_and_attempts_of_one_experiment_add_up() -> None:
     cells = [
         _cell("orb-swp--train--cifar--scratch--s0--a01", jobs=2, running=1, gpu_model="rtx6000", gpu_h=10,
-              qos="low", charged_su=0.0, billing_h=80, account="alice07", partition="free-gpu"),
+              qos="low", charged_su=0.0, billing_h=80, account="alice07", partition="flex-gpu"),
         _cell("orb-swp--train--cifar--scratch--s1--a01", gpu_model="l40s", gpu_h=4, account="alice07"),
         _cell("orb-swp--train--cifar--scratch--s1--a02", gpu_model="rtx6000", gpu_h=2, charged_su=None,
               qos="mystery"),

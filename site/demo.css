@@ -1,0 +1,287 @@
+/* RunFleet web demo player (markup in index.html, script demo.js), on the project page's dark background. */
+
+.rfd {
+  margin: 0 0 1.6em;
+}
+
+.rfd [hidden] {
+  display: none !important;
+}
+
+.rfd img {                   /* the poster, and the picture without JavaScript */
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  margin: 0;
+}
+
+/* --- Caption: what to do, and where you are --- */
+/* One line each: the status changes with every move, so it must never wrap and shift the window. */
+.rfd__cap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15em;
+  margin: 0 0 10px;
+  font-family: inherit;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #9a9b9e;
+}
+
+.rfd__try {
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #ffd75f;
+}
+
+.rfd__status {
+  min-height: 1.5em;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
+}
+
+/* --- Terminal window --- */
+.rfd__win {
+  position: relative;
+  padding: 0 10px 10px;
+  border: 1px solid #2c3038;
+  border-radius: 10px;
+  background: #1d2026;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3), 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+
+.rfd__bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+}
+
+.rfd__dots {
+  position: absolute;
+  left: 2px;
+  display: flex;
+  gap: 8px;
+}
+
+.rfd__dots i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ff5f57;
+}
+
+.rfd__dots i:nth-child(2) { background: #febc2e; }
+.rfd__dots i:nth-child(3) { background: #28c840; }
+
+.rfd__title {
+  font: 700 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  color: #c5c8c6;
+}
+
+.rfd__full {
+  position: absolute;
+  right: -4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: #9aa0a6;
+  cursor: pointer;
+}
+
+.rfd__full:hover { color: #e6e6e6; background: rgba(255, 255, 255, 0.08); }
+.rfd__full:focus-visible { outline: 2px solid #5fafff; outline-offset: 0; }
+.rfd__full svg { width: 16px; height: 16px; }
+
+.rfd__body {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* --- Screen: rows of fixed height, runs of fixed width, one box per non-ASCII cell --- */
+.rfd__screen,
+.rfd__probe {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  font-kerning: none;
+  letter-spacing: 0;
+}
+
+.rfd__probe {
+  position: absolute;
+  visibility: hidden;
+  width: 10ch;
+  font-size: 100px;
+}
+
+.rfd__screen {
+  --cw: 0.6em;
+  --lh: 13px;
+  position: relative;
+  flex: none;
+  width: calc(var(--cols) * var(--cw));
+  line-height: var(--lh);
+  white-space: pre;
+  text-align: left;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  outline: 2px solid transparent;   /* forced-colors mode paints it; elsewhere the ring below shows */
+  outline-offset: 2px;
+}
+
+.rfd__screen:focus {
+  box-shadow: 0 0 0 2px #1d2026, 0 0 0 4px #5fafff;
+}
+
+.rfd__screen.is-hot {
+  cursor: pointer;
+}
+
+.rfd__screen .r {
+  display: flex;
+  height: var(--lh);
+  overflow: hidden;
+}
+
+.rfd__screen .r > span {
+  flex: none;
+}
+
+.rfd__screen .c {
+  display: inline-block;
+  width: var(--cw);
+  height: var(--lh);
+  vertical-align: top;
+  text-align: center;
+  font-style: inherit;
+  text-decoration: inherit;
+}
+
+.rfd__screen .w2 {
+  width: calc(2 * var(--cw));
+}
+
+.rfd__screen .bx {
+  transform: scaleY(var(--bx, 1));
+}
+
+.rfd__hl {
+  position: absolute;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+  pointer-events: none;
+}
+
+.rfd__toast {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  max-width: calc(100% - 24px);
+  padding: 0.5em 0.8em;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  background: rgba(22, 22, 22, 0.94);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  color: #e6e6e6;
+  font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  transform: translateX(-50%);
+  animation: rfd-in 0.18s ease-out;
+  pointer-events: none;           /* it lies over the screen's bottom rows: clicks go through to them */
+}
+
+.rfd__toast code {
+  display: block;
+  margin-top: 0.15em;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: #ffd75f;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
+  font-size: inherit;
+  overflow-wrap: anywhere;
+}
+
+@keyframes rfd-in {
+  from { opacity: 0; transform: translate(-50%, 6px); }
+}
+
+/* --- Full screen: the window fills the display, the grid scales to fit --- */
+.rfd__win:fullscreen {
+  display: flex;
+  flex-direction: column;
+  padding: 0 16px 16px;
+  border-radius: 0;
+}
+
+.rfd__win:-webkit-full-screen {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  padding: 0 16px 16px;
+  border-radius: 0;
+}
+
+.rfd__win:fullscreen .rfd__body { flex: 1; min-height: 0; }
+.rfd__win:-webkit-full-screen .rfd__body { flex: 1; min-height: 0; }
+
+/* --- Keycaps: one row under the window (two on a phone); each one's title says what it does --- */
+.rfd__keys {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.rfd__key {
+  min-width: 32px;
+  height: 30px;
+  margin: 0;
+  padding: 0 8px;
+  border: 1px solid #343944;
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: #1c1f25;
+  color: #d5d5d6;
+  font: 600 12.5px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.rfd__key:hover { border-color: #4a515e; background: #252931; }
+.rfd__key:active { transform: translateY(1px); }
+.rfd__key:focus-visible { outline: 2px solid #5fafff; outline-offset: 2px; }
+.rfd__key[aria-disabled="true"] { opacity: 0.45; }
+
+@media (pointer: coarse), (max-width: 600px) {
+  .rfd__keys { gap: 6px 5px; }
+  .rfd__key { min-width: 42px; height: 42px; padding: 0 9px; font-size: 14px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rfd__toast { animation: none; }
+  .rfd__key:active { transform: none; }
+}

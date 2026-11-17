@@ -147,7 +147,7 @@ async def test_k2_jobs_nodes_and_caps_round_trip(world: DemoWorld, clock: StepCl
     assert running.gpu is not None and running.gpu.util_mean_pct is not None and running.gpu.util_mean_pct > 80
     assert {n.name for n in out["nodes"]} >= {"n-40-01", "n-31-05", "n-34-01"}
     parts = {p.name: p for p in out["partitions"]}
-    assert "gpu-preempt" in parts and parts["gpu-preempt"].gpus_total > 0
+    assert "gpu-pooling" in parts and parts["gpu-pooling"].gpus_total > 0
     assert out["metrics"].ncpu == 32 and out["metrics"].mem_total is not None    # login node, procfs piggyback
 
 
@@ -157,10 +157,10 @@ async def test_lyra_array_preemption_and_no_gpu_tres(world: DemoWorld, clock: St
     assert caps.gpu_tres is False and caps.slurm_config.get("PreemptMode") == "CANCEL"
     # charging rules (Account, §5.2.11): free and charged partitions on the same nodes, as on the real cluster
     charges = {p.partition: p for p in caps.partition_charges}
-    assert charges["free-gpu"].allow_qos == ("low", "guest") and not charges["free-gpu"].billing_weights
+    assert charges["flex-gpu"].allow_qos == ("low", "guest") and not charges["flex-gpu"].billing_weights
     assert charges["gpuxl"].billing_weights == "cpu=1,gres/gpu:L40S=32,gres/gpu:RTX6000=64"
     assert caps.qos_usage_factor["low"] == 0.0 and caps.qos_usage_factor["high"] == 2.0
-    assert {"free-gpu", "free-gpuxl", "gpu", "gpuxl"} <= set(caps.gpu_partitions)
+    assert {"flex-gpu", "flex-gpuxl", "gpu", "gpuxl"} <= set(caps.gpu_partitions)
     jobs = (await d.poll())["jobs"]
     summary = jobs["32377076_[5-12%2]"]
     assert summary.state is JobState.PENDING and summary.job_id_raw == "32377076"

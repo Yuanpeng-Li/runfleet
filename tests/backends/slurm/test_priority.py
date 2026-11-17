@@ -36,10 +36,10 @@ def _job(job_id: str = "2334564", *, reason: str = "Priority", account: str = "c
          state: JobState = JobState.PENDING, array_job_id: str | None = None) -> Job:
     return Job(key=JobKey("k2", job_id), kind=JobKind.SLURM, name="smoke-test", user="alice0001", state=state,
                raw_state=state.name, job_id_raw=job_id, reason=reason, held=held, account=account,
-               partition="gpu-preempt", array_job_id=array_job_id)
+               partition="gpu-pooling", array_job_id=array_job_id)
 
 
-def _row(job_id: str = "2334564", part: str = "gpu-preempt", prio_value: float = 0.0, **factors: float) -> str:
+def _row(job_id: str = "2334564", part: str = "gpu-pooling", prio_value: float = 0.0, **factors: float) -> str:
     f = {name: factors.get(name, 0.0) for name in ("age", "assoc", "fairshare", "jobsize", "partition", "qos")}
     total = prio_value or sum(f.values()) or 1
     return (f"{job_id}|alice0001|{part}|{total:.0f}|" + "|".join(f"{v:.0f}" for v in f.values())
@@ -91,7 +91,7 @@ def test_parse_sprio_fixtures() -> None:
     pr = prio.parse_sprio(sample("k2", "sprio"))
     assert not pr.bad_lines
     (row,) = pr.items
-    assert (row.job_id, row.user, row.partition, row.priority) == ("2334564", "alice0001", "gpu-preempt", 1)
+    assert (row.job_id, row.user, row.partition, row.priority) == ("2334564", "alice0001", "gpu-pooling", 1)
     assert set(row.factors.values()) == {0.0} and row.nice == 0      # empty %T (no TRES weights) = 0
     (vrow,) = prio.parse_sprio(sample("vega", "sprio")).items
     assert vrow.factors["fairshare"] == 10000 and vrow.factors["qos"] == 5000 and vrow.factors["age"] == 476
@@ -132,7 +132,7 @@ def _share(account: str = "campus01", fs: float | None = 0.03, level: float | No
 def test_evidence_fairshare_dominates_with_recovery_hint() -> None:
     rows = prio.parse_sprio(_row(fairshare=3000, age=2, jobsize=16)).items
     p = prio.evidence(_job(), rows, [_share()], _settings("k2"), sampled_at=NOW)
-    assert p.ranked and p.priority == 3018 and p.partition == "gpu-preempt" and p.dominant == "fairshare"
+    assert p.ranked and p.priority == 3018 and p.partition == "gpu-pooling" and p.dominant == "fairshare"
     assert [f.name for f in p.factors] == ["fairshare", "jobsize", "age", "partition"]   # weight > 0, largest first
     assert p.factors[0].weight == 100000 and p.sampled_at == NOW and p.half_life_s == 14 * 86400
     assert p.hints[0].startswith("fairshare carries most of its priority (3,000 of 3,018)")
@@ -183,10 +183,10 @@ def test_evidence_other_reasons_holds_and_never_runs() -> None:
 
 def test_evidence_partitions_nice_and_missing_rows() -> None:
     st = _settings("k2")
-    rows = prio.parse_sprio("\n".join([_row(part="gpu-preempt", fairshare=3000),
+    rows = prio.parse_sprio("\n".join([_row(part="gpu-pooling", fairshare=3000),
                                        _row(part="lab", fairshare=3000, partition=1000, nice=50)])).items
     p = prio.evidence(_job(), rows, [], st, sampled_at=NOW)
-    assert p.partition == "lab" and p.priority == 4000 and p.others == (("gpu-preempt", 3000.0),)
+    assert p.partition == "lab" and p.priority == 4000 and p.others == (("gpu-pooling", 3000.0),)
     assert ("nice", -50.0) in [(f.name, f.value) for f in p.factors]
     assert any(h.startswith("nice 50 lowers its priority") for h in p.hints)
     later = prio.evidence(_job("2334999"), prio.rows_for(_job("2334999"), {"2334564": list(rows)}), [], st,

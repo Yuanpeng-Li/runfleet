@@ -171,7 +171,7 @@ def _term_matches(term: Term, job: Job, now: datetime | None, cost: CostFn | Non
         return any((job.is_mine if v == "me" else job.user.lower() == v) for v in term.values)
     if term.kind == "account":
         return (job.account or "").lower() in term.values
-    if term.kind == "partition":       # a pending job's `gpu,free-gpu` list matches any of its partitions
+    if term.kind == "partition":       # a pending job's `gpu,flex-gpu` list matches any of its partitions
         return any(p.strip().lower() in term.values for p in (job.partition or "").split(","))
     if term.kind in _NUMERIC:
         return _numeric_matches(term, job, now, cost)

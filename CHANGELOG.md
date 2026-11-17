@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **A project page with an interactive demo:** https://yuanpeng-li.github.io/runfleet/ replays screens recorded from
+  the demo fleet in the browser (`scripts/web_demo.py` records them).
+
+### Changed
+- The demo fleet's partitions are now called `gpu-pooling`, `cpu-pooling` and `flex-gpu` (`flex-gpuxl`, …); examples
+  and older entries below use the new names.
+
 ## [0.9.4] - 2026-11-12
 
 ### Fixed
@@ -317,7 +325,7 @@ All notable changes to this project are documented here. The format follows
   (`14m stale` past 10 minutes). It only reads RunFleet's cache — no ssh, no writes, about 70 ms — prints `no data`
   (exit 1) when there is none, and has a per-host table by default and a `runfleet.status/1` JSON document. The user
   guide has tmux, zsh and starship snippets. The cache now also keeps each host's connection state for it.
-- **Watch for free GPUs**: palette › *Watch free GPUs…*, type e.g. `2 h200 k2`, `4x a100 k2/gpu-preempt` or `1 mig
+- **Watch for free GPUs**: palette › *Watch free GPUs…*, type e.g. `2 h200 k2`, `4x a100 k2/gpu-pooling` or `1 mig
   vega`, and RunFleet notifies you (toast, terminal notification, `[notify] command`) when that many GPUs are free
   **on one node**. It uses only what it already polls, counts only fresh readings (never a `host ?`), fires after two
   readings in a row agree, then rests at least 15 minutes and until the GPUs are taken again. Backfill-planned GPUs

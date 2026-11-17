@@ -39,7 +39,7 @@ def test_k2_squeue_me_O() -> None:
     assert stdout.merged                                  # k2 STDERR repeats the STDOUT pattern
     assert j.job_id_raw == "2332861" and j.is_mine
     assert j.alloc.cpus == 8 and j.alloc.mem_bytes == 48 << 30
-    assert j.partition == "gpu-preempt" and j.qos == "gpu-priority" and j.account == "campus01"
+    assert j.partition == "gpu-pooling" and j.qos == "gpu-priority" and j.account == "campus01"
 
     pd = by_id["2334564"]
     assert pd.state is JobState.PENDING and pd.reason == "Priority" and not pd.held

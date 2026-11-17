@@ -184,12 +184,12 @@ def _caps(mode: str | None, parts: tuple[PartitionCharge, ...] = ()) -> Capabili
 
 
 def test_preempt_mode_for_prefers_the_partition() -> None:
-    assert preempt_mode_for(None, "free-gpu") is None
-    assert preempt_mode_for(_caps(None), "free-gpu") is None
-    assert preempt_mode_for(_caps("cancel"), "free-gpu") == "CANCEL"
+    assert preempt_mode_for(None, "flex-gpu") is None
+    assert preempt_mode_for(_caps(None), "flex-gpu") is None
+    assert preempt_mode_for(_caps("cancel"), "flex-gpu") == "CANCEL"
     assert preempt_mode_for(_caps("REQUEUE,GANG"), None) == "REQUEUE"
-    parts = (PartitionCharge("free-gpu", preempt_mode="REQUEUE"), PartitionCharge("std"))
-    assert preempt_mode_for(_caps("CANCEL", parts), "free-gpu") == "REQUEUE"
+    parts = (PartitionCharge("flex-gpu", preempt_mode="REQUEUE"), PartitionCharge("std"))
+    assert preempt_mode_for(_caps("CANCEL", parts), "flex-gpu") == "REQUEUE"
     assert preempt_mode_for(_caps("CANCEL", parts), "std") == "CANCEL"
 
 

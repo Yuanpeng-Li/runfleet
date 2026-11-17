@@ -26,7 +26,7 @@ from runfleet.ui.gpu_watch import GpuWatch, Parsed
 from runfleet.ui.messages import FleetChanged
 from runfleet.ui.screens import dialog_list_room
 
-EXAMPLES = "e.g. 2 h200 k2 · 4x a100 k2/gpu-preempt · 1 mig vega · add planned to count backfill-planned GPUs"
+EXAMPLES = "e.g. 2 h200 k2 · 4x a100 k2/gpu-pooling · 1 mig vega · add planned to count backfill-planned GPUs"
 RULE = (f"per node, fresh readings only · fires after {gpu_watch.CONSECUTIVE} readings in a row, then rests "
         f"≥ {int(gpu_watch.COOLDOWN_S // 60)} min")
 

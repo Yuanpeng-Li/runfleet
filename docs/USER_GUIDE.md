@@ -299,7 +299,7 @@ by estimated start. When they do not all fit, the last row says how many more th
 `carol sample.py`, `in use · no process` when memory is held but no process is visible, `?` for an old reading,
 `no reading` when nvidia-smi gave neither utilisation nor memory), and
 its list shows your tasks and other users'. The empty cell after the last card becomes the *fleet panel*: free GPUs
-right now by type across the whole fleet, your GPU types first (`H200  9  vega h200 6 (5 planned) · k2 gpu-preempt
+right now by type across the whole fleet, your GPU types first (`H200  9  vega h200 6 (5 planned) · k2 gpu-pooling
 3`), and what changed since your last visit: failures and completions from the store (they survive a restart), plus
 jobs that ran low on time, restarted or left a GPU idle, which come from this session's alerts and so only appear
 for the events selected in `[notify]`, and your GPU watches that fired (`◎`). "Free" is what
@@ -467,7 +467,7 @@ directory, a full disk) the panel says so and nothing changes. With `--demo` not
 | `state:R`, `st:pd,f`, `state:failed` | state code (`R PD CG F TO OOM CA CD …`) or group (`queued active done failed cancelled ended`) |
 | `user:me`, `user:alice` | owner |
 | `acct:lab`, `account:lab,pilab_02` | Slurm account is one of these |
-| `part:free-gpu`, `p:gpu,gpuxl` | partition is one of these |
+| `part:flex-gpu`, `p:gpu,gpuxl` | partition is one of these |
 | `su:>10`, `su:<=0`, `gpuh:>=5` | the job's cost so far (`> >= < <= =`; a pending job's SU is its projection at its time limit; SU = billing-hours on clusters without SU limits; `=` matches what the column shows: `su:=33` finds 33.4); a job whose cost is unknown never matches (`!su:>10` keeps it) |
 | `!term` | negation of any term |
 
@@ -673,7 +673,7 @@ higher-priority jobs arrive, and `Priority`-pending jobs often have none.
 its GPU box — what Slurm itself says, not a promise of a start time or a place in the queue:
 
 ```
-priority  3,017 in gpu-preempt · lab 2,017
+priority  3,017 in gpu-pooling · lab 2,017
 fairshare ▕▍       ▏    3,000 / 100,000  ◀ dominates
 job size  ▕▏       ▏       15 / 1,000
 age       ▕        ▏        2 / 1,000
@@ -745,7 +745,7 @@ job RunFleet also tells you when it starts, completes or its GPUs sit idle. Watc
 forgotten a week after the job is gone. A watched pending array covers its tasks.
 
 **Waiting for free GPUs.** Palette › *Watch free GPUs…* and type what you need, e.g. `2 h200 k2` (two H200 on one
-node of k2), `4x a100 k2/gpu-preempt`, `8 gpus` (any type, anywhere) or `1 mig vega` (a MIG slice). While you type
+node of k2), `4x a100 k2/gpu-pooling`, `8 gpus` (any type, anywhere) or `1 mig vega` (a MIG slice). While you type
 the dialog shows how it read the text and what matches right now (`matches now: k2 n-38-01 3 free`); `enter` keeps the
 watch. RunFleet then tells you — toast, terminal notification and your `[notify] command`, like a failed job — when
 enough GPUs are free **on one node**, because a job needs them there (two nodes with two free each do not make four).

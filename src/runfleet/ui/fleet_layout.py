@@ -1167,7 +1167,7 @@ def _packed_others(others: Sequence[TypeFree], n: int, width: int, prefix: str) 
 
 
 def _where(t: TypeFree, wide: bool, order: Mapping[str, int]) -> Text:
-    """``vega h200 6 (5 planned) · k2 gpu-preempt 3`` (narrow: per host) / ``labstation gpu 0, 2``."""
+    """``vega h200 6 (5 planned) · k2 gpu-pooling 3`` (narrow: per host) / ``labstation gpu 0, 2``."""
     out = Text()
     sep = Text(" · ", style=theme.dim())
     items: list[tuple[int, int, str, Text]] = []

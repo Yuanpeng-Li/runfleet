@@ -34,9 +34,9 @@ H = 3600
 def _chain() -> list[Any]:
     """lyra-like: PREEMPTED, resubmitted 13 min later, which COMPLETED (the PreemptMode CANCEL case)."""
     old = slurm_job("lyra", "31354789", NAME, JobState.PREEMPTED, elapsed=timedelta(seconds=64), ended_ago=18 * H,
-                    submit_ago=19 * H, partition="free-gpuxl")
+                    submit_ago=19 * H, partition="flex-gpuxl")
     new = slurm_job("lyra", "31358335", NAME, JobState.COMPLETED, elapsed=timedelta(hours=10), ended_ago=7 * H,
-                    submit_ago=18 * H - 13 * 60, partition="free-gpuxl")
+                    submit_ago=18 * H - 13 * 60, partition="flex-gpuxl")
     return [old, new]
 
 

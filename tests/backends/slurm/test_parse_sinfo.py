@@ -36,7 +36,7 @@ def test_k2_mig_node_planned_is_usable_and_counted() -> None:
     assert n.state == "planned" and n.usable and is_planned(n)
     assert len(gpu_types(n)) == 4
     assert all(g.used == 0 and g.used_indices is None for g in n.gres)
-    (part,) = summarize(by.values(), ["gpu-preempt"])
+    (part,) = summarize(by.values(), ["gpu-pooling"])
     free_planned_nodes = sum(g.total - g.used for nm in ("n-31-05", "n-31-07", "n-32-03", "n-37-06")
                              for g in by[nm].gres)
     assert part.gpus_free_planned == free_planned_nodes
@@ -142,7 +142,7 @@ def test_m3_k2_free_gpus_exclude_cpu_full_nodes_and_mig_is_labelled() -> None:
 
     pr = parse_sinfo(sample("k2", "sinfo_nodes_m3"), sep=SEP)
     assert not pr.bad_lines
-    gpu = {p.name: p for p in summarize(pr.items)}["gpu-preempt"]
+    gpu = {p.name: p for p in summarize(pr.items)}["gpu-pooling"]
     assert gpu.gpus_total == 138 and gpu.gpus_free == 21
     blocked = [n.name for n in pr.items if n.state == "allocated" and any(g.name == "gpu" and g.total > g.used
                                                                              for g in n.gres)]

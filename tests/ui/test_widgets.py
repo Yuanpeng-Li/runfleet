@@ -56,7 +56,7 @@ def test_slurm_card_lines() -> None:
     assert len(lines) == 6 and all(t.cell_len <= 56 for t in lines)
     assert "my jobs" in text and "R 4" in text and "CD 7" in text and "(last 24h)" in text
     assert "A100-40G ×3" in text and "H200 ×2" in text
-    assert "gpu-preempt 31/164" in text
+    assert "gpu-pooling 31/164" in text
     assert "smoke-test" in text and "priority" in text
     assert "login02" in text and "load 2.3/32" in text
 
@@ -205,7 +205,7 @@ def test_job_cells_markers_and_stale_dimming() -> None:
 def test_preview_pieces() -> None:
     job = _states()["k2"].snapshot.jobs["2332861"]                   # type: ignore[union-attr]
     meta = meta_line(job).plain
-    assert "partition gpu-preempt" in meta and "A100-SXM4-40GB idx 2" in meta and "8 cpu" in meta
+    assert "partition gpu-pooling" in meta and "A100-SXM4-40GB idx 2" in meta and "8 cpu" in meta
     gl = gpu_line(job, None, T0, T, M).plain
     assert gl.startswith("GPU (sstat · 30s)") and "98%" in gl and "24.3/40.0G" in gl
     pending = slurm_job("k2", "9", "p", JobState.PENDING)
@@ -221,8 +221,8 @@ def test_preview_pieces() -> None:
 
 
 def test_wrap_parts() -> None:
-    out = [t.plain for t in wrap_parts(["partition gpu-preempt", "qos normal", "account campus01"], 34)]
-    assert out == ["partition gpu-preempt · qos normal", "account campus01"]
+    out = [t.plain for t in wrap_parts(["partition gpu-pooling", "qos normal", "account campus01"], 34)]
+    assert out == ["partition gpu-pooling · qos normal", "account campus01"]
 
 
 # ---------------------------------------------------------------- GPU panel / GPUs view

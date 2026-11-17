@@ -153,7 +153,7 @@ def test_k2_2333760_is_h200_nvl() -> None:
 
 def test_lyra_running_job_type_from_scontrol() -> None:
     row = ["31367493", "31367493", "N/A", "train_a01", "alice07", "RUNNING", "R", "None", "31:07", "12:00:00",
-           "11:28:53", "1", "4", "16G", "free-gpu", "low", "victor", "2026-09-07T03:23:39", "2026-09-07T03:27:22",
+           "11:28:53", "1", "4", "16G", "flex-gpu", "low", "victor", "2026-09-07T03:23:39", "2026-09-07T03:27:22",
            "2026-09-07T15:27:22", "lyra-gpu-q71-01", "lyra-gpu-q71-01", "cpu=4,mem=16G,node=1,billing=4,gres/gpu=1",
            "gres/gpu:1", "N/A", "0", "/home/victor/vision/logs/%x_%j.out", "(null)",
            "/home/victor/vision", "/home/victor/vision/train.sbatch"]
@@ -203,9 +203,9 @@ def test_vanished_then_accounting() -> None:
     assert sec.name == "slurm.sacct_ids" and sec.meta["ids_raw"] == ["2332862"]
     assert shlex.split(sec.cmd)[:3] == ["sacct", "-j", "2332862"]
     done = sacct_rows(name="slurm.sacct_ids", edit=(
-        "2332863|2332863|orb-swp--train--cifar-cosinewarm--s43--a02|alice0001|campus01|gpu-priority|gpu-preempt|"
+        "2332863|2332863|orb-swp--train--cifar-cosinewarm--s43--a02|alice0001|campus01|gpu-priority|gpu-pooling|"
         "RUNNING|0:0|0:0|None|2026-09-06T11:14:07|2026-09-07T01:50:27|Unknown",
-        "2332862|2332862|orb-swp--train--cifar-const--s43--a02|alice0001|campus01|gpu-priority|gpu-preempt|"
+        "2332862|2332862|orb-swp--train--cifar-const--s43--a02|alice0001|campus01|gpu-priority|gpu-pooling|"
         "COMPLETED|0:0|0:0|None|2026-09-06T11:14:07|2026-09-07T01:50:27|2026-09-07T06:02:37"))
     out = tick(c, at(cx, 30), squeue(drop=("2332862",)), done)
     assert out.jobs is not None
@@ -261,9 +261,9 @@ def test_partial_failed_output_updates_but_never_drops() -> None:
 def test_bad_row_keeps_previous_job() -> None:
     c, cx, first = started()
     assert first.jobs is not None
-    evil = squeue(edit=("|alice0001|RUNNING|R|None|4:07:00|3-00:00:00|2-19:53:00|1|8|48G|gpu-preempt|gpu-priority|"
+    evil = squeue(edit=("|alice0001|RUNNING|R|None|4:07:00|3-00:00:00|2-19:53:00|1|8|48G|gpu-pooling|gpu-priority|"
                         "campus01|2026-09-06T11:14:06|",
-                        "|alice0001|garbled state|R|None|4:07:00|3-00:00:00|2-19:53:00|1|8|48G|gpu-preempt|"
+                        "|alice0001|garbled state|R|None|4:07:00|3-00:00:00|2-19:53:00|1|8|48G|gpu-pooling|"
                         "gpu-priority|campus01|2026-09-06T11:14:06|"))
     out = tick(c, at(cx, 15), evil)
     assert out.jobs is not None
@@ -432,20 +432,20 @@ def test_logstat_and_log_idle_hint() -> None:
 
 def test_sinfo_partitions_nodes_and_type_from_sinfo() -> None:
     c, cx, first = started()
-    assert c.partitions(cx) == ["gpu-preempt"]
+    assert c.partitions(cx) == ["gpu-pooling"]
     assert "slurm.nodes" in first.followups               # partitions just became known: fetch nodes next tick
     sec = c.sections(frozenset({"slurm.nodes"}), cx)[0]
     assert "slurm.nodes" not in tick(c, cx, squeue()).followups   # planned for this set already
-    assert shlex.split(sec.cmd)[:5] == ["sinfo", "-h", "-N", "-p", "gpu-preempt"]
+    assert shlex.split(sec.cmd)[:5] == ["sinfo", "-h", "-N", "-p", "gpu-pooling"]
     out = tick(c, cx, result("slurm.sinfo", to_sep(sample("k2", "sinfo_nodes_O").strip(), SEP)))
     assert out.nodes is not None and len(out.nodes) == 30
-    assert out.partitions is not None and out.partitions[0].name == "gpu-preempt"
+    assert out.partitions is not None and out.partitions[0].name == "gpu-pooling"
     cfg = ctx("k2", cfg=host_config("k2", slurm={"partitions": ("lab", "bad;part")}))
     assert SlurmCollector(cfg.host).partitions(cfg) == ["lab"]
     assoc = ctx("k2", associations=(("k2", "campus01", "gpu,cpu", "normal"),))
     assert SlurmCollector(assoc.host).partitions(assoc) == ["cpu", "gpu"]
-    paid = ctx("k2", gpu_partitions=("labpi", "gpu-preempt"))           # GPU partitions you may use, never used yet
-    assert SlurmCollector(paid.host).partitions(paid) == ["gpu-preempt", "labpi"]
+    paid = ctx("k2", gpu_partitions=("labpi", "gpu-pooling"))           # GPU partitions you may use, never used yet
+    assert SlurmCollector(paid.host).partitions(paid) == ["gpu-pooling", "labpi"]
     assert SlurmCollector(cfg.host).partitions(dataclasses.replace(cfg, caps=paid.caps)) == ["lab"]   # config wins
 
 
@@ -460,7 +460,7 @@ def test_new_running_jobs_request_usage_followup() -> None:
 
 def test_gpu_type_from_sinfo_for_untyped_job() -> None:
     row = ["77", "77", "N/A", "u", "alice0001", "RUNNING", "R", "None", "1:00", "1:00:00", "59:00", "1", "8", "48G",
-           "gpu-preempt", "normal", "campus01", "2026-09-07T05:42:37", "2026-09-07T05:43:37", "2026-09-07T06:43:37",
+           "gpu-pooling", "normal", "campus01", "2026-09-07T05:42:37", "2026-09-07T05:43:37", "2026-09-07T06:43:37",
            "n-40-01", "n-40-01", "cpu=8,mem=48G,node=1,gres/gpu=1", "gres/gpu:1", "N/A", "0", "/w/o.out", "(null)",
            "/w", "/w/r.sh"]
     cx = ctx("k2")

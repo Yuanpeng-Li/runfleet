@@ -26,7 +26,7 @@ HINT = ("fairshare 0.03: your group (lab) used much more than its share recently
 
 def _evidence(**kw: Any) -> PendingPriority:
     base = PendingPriority(
-        ranked=True, priority=3017.0, partition="gpu-preempt",
+        ranked=True, priority=3017.0, partition="gpu-pooling",
         factors=(PriorityFactor("fairshare", 3000.0, 100000.0), PriorityFactor("jobsize", 15.0, 1000.0),
                  PriorityFactor("age", 2.0, 1000.0), PriorityFactor("partition", 0.0, 1000.0)),
         dominant="fairshare", others=(("lab", 2017.0),),
@@ -60,7 +60,7 @@ def test_priority_box() -> None:
     assert job is not None
     job = dataclasses.replace(job, account="lab", priority=_evidence())
     lines = [x.plain.rstrip() for x in priority_box_lines(job, 72)]
-    assert lines[0].split() == ["priority", "3,017", "in", "gpu-preempt", "·", "lab", "2,017"]
+    assert lines[0].split() == ["priority", "3,017", "in", "gpu-pooling", "·", "lab", "2,017"]
     fs = next(x for x in lines if x.startswith("fairshare "))
     assert "3,000 / 100,000" in fs and fs.endswith("◀ dominates")
     assert any(x.startswith("job size ") and "15 / 1,000" in x for x in lines)

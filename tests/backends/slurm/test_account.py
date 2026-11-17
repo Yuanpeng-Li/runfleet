@@ -290,7 +290,7 @@ def test_acct_jobs_fixtures() -> None:
     k2 = {j.job_id_raw: j for j in jobs_of("k2")}
     assert len(k2) == 6                                                     # the two never-started rows were dropped
     j = k2["2329557"]
-    assert (j.account, j.partition, j.qos, j.state, j.elapsed_s) == ("campus01", "gpu-preempt", "gpu-priority",
+    assert (j.account, j.partition, j.qos, j.state, j.elapsed_s) == ("campus01", "gpu-pooling", "gpu-priority",
                                                                      JobState.COMPLETED, 11606)
     assert j.start == datetime.fromtimestamp(1788537330, UTC) and j.name == "eval_b_r2"
     assert j.tres["gres/gpu:nvidia_h100_nvl_1g.12gb"] == "1"
@@ -346,13 +346,13 @@ def test_k2_cells() -> None:
     cells, seen = acct.cells(jobs_of("k2"), account_caps("k2"), now=NOW, start=NOW - timedelta(days=30))
     assert seen == 6
     by = {(c.name, c.partition, c.gpu_model): c for c in cells}
-    mig = by[("eval_b_r2", "gpu-preempt", "nvidia_h100_nvl_1g.12gb")]
+    mig = by[("eval_b_r2", "gpu-pooling", "nvidia_h100_nvl_1g.12gb")]
     assert (mig.jobs, mig.running, mig.qos) == (1, 0, "gpu-priority")
     assert mig.gpu_h == pytest.approx(11606 / 3600) and mig.cpu_h == pytest.approx(8 * 11606 / 3600)
     assert mig.billing_h == mig.cpu_h and mig.charged_su == mig.billing_h              # factor 1
-    untyped = by[("lmft-x0-lr1e-6", "gpu-preempt", "")]                              # gres/gpu=2 without a type
+    untyped = by[("lmft-x0-lr1e-6", "gpu-pooling", "")]                              # gres/gpu=2 without a type
     assert untyped.gpu_h == pytest.approx(2 * 3558 / 3600)
-    cpu = by[("prep_env", "cpu-preempt", "")]
+    cpu = by[("prep_env", "cpu-pooling", "")]
     assert cpu.gpu_h == 0 and cpu.billing_h == pytest.approx(4 * 69 / 3600)
     assert [c.account for c in cells] == ["campus01"] * 6
 
@@ -361,10 +361,10 @@ def test_lyra_cells_are_free_and_classify_observed() -> None:
     c = account_caps("lyra")
     cells, seen = acct.cells(jobs_of("lyra"), c, now=NOW, start=NOW - timedelta(days=30))
     assert seen == 7 and {(x.account, x.partition, x.qos, x.gpu_model) for x in cells} == {
-        ("alice07", "free-gpuxl", "low", "rtx6000")}
+        ("alice07", "flex-gpuxl", "low", "rtx6000")}
     assert all(x.charged_su == 0 and x.billing_h > 0 for x in cells)                  # QOS low ×0
     verdict = {p.partition: p for p in classify_partitions(c, cells)}
-    assert not verdict["free-gpuxl"].charged and verdict["free-gpuxl"].basis == "allow_qos"
+    assert not verdict["flex-gpuxl"].charged and verdict["flex-gpuxl"].basis == "allow_qos"
     assert verdict["gpuxl"].charged and verdict["gpuxl"].basis == "weights"
 
 

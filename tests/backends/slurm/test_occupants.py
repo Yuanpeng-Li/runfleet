@@ -17,13 +17,13 @@ from tests.conftest import sample
 
 ROWS = [   # JobID|ArrayJobID|ArrayTaskID|UserName|Account|Partition|StateCompact|TimeUsed|TimeLimit|NumNodes|NodeList|
            # tres-alloc|Name|
-    "4014136|4014136|N/A|bob|lab|gpu-preempt|R|4:05:30|2-00:00:00|1|n-31-01|"
+    "4014136|4014136|N/A|bob|lab|gpu-pooling|R|4:05:30|2-00:00:00|1|n-31-01|"
     "cpu=8,mem=64G,node=1,billing=8,gres/gpu=5,gres/gpu:nvidia_geforce_rtx_3090=5|ddp|train|",
-    "4014495|4014493|22|carol|lab|gpu-preempt|R|12:15|UNLIMITED|1|n-31-04|cpu=4,mem=16G,node=1,billing=4|cpu job|",
+    "4014495|4014493|22|carol|lab|gpu-pooling|R|12:15|UNLIMITED|1|n-31-04|cpu=4,mem=16G,node=1,billing=4|cpu job|",
     "58106563|58106563|N/A|dave|physics|gpu|R|1:40:36|4:00:00|3|n-31-[01,04],n-32-03|"
     "cpu=6,mem=12G,node=3,billing=6,gres/gpu=3|benz|",
     "58106544|58106544|N/A|erin|chem|gpu|CG|1:45:42|8:00:00|2|n-31-[01,04]|cpu=6,node=2,gres/gpu=3|odd|",
-    "4014841|4014841|N/A|alice0001|campus01|gpu-preempt|R|0:10|1-00:00:00|1|n-31-04|cpu=8,node=1,gres/gpu=1|mine|",
+    "4014841|4014841|N/A|alice0001|campus01|gpu-pooling|R|0:10|1-00:00:00|1|n-31-04|cpu=8,node=1,gres/gpu=1|mine|",
 ]
 
 
@@ -37,11 +37,11 @@ def sinfo_result() -> SectionResult:
 
 # ------------------------------------------------------------------ commands
 def test_commands_quote_and_validate() -> None:
-    argv = shlex.split(cmds.occupants_cmd(["n-31-01", "n-31-04"], ["gpu-preempt"], SEP))
+    argv = shlex.split(cmds.occupants_cmd(["n-31-01", "n-31-04"], ["gpu-pooling"], SEP))
     assert argv[:7] == ["squeue", "-a", "-h", "-t", "R,CG", "-w", "n-31-01,n-31-04"]    # by node: shared nodes too
     assert argv[8].split(",")[-1] == f"Name:{SEP}" and len(argv[8].split(",")) == len(cmds.OCCUPANT_FIELDS)
-    argv = shlex.split(cmds.occupants_cmd([], ["gpu-preempt", "labpi"], SEP))
-    assert argv[5:7] == ["-p", "gpu-preempt,labpi"]                                     # nodes not known yet
+    argv = shlex.split(cmds.occupants_cmd([], ["gpu-pooling", "labpi"], SEP))
+    assert argv[5:7] == ["-p", "gpu-pooling,labpi"]                                     # nodes not known yet
     with pytest.raises(ValueError):
         cmds.occupants_cmd([], ["gpu;rm -rf"], SEP)
     with pytest.raises(ValueError):
@@ -107,7 +107,7 @@ def test_occupants_cadence_is_focused_only_and_brings_sinfo() -> None:
     assert cad["slurm.names"].mode == "event"
     secs = {s.name: s for s in c.sections(frozenset({"slurm.occupants"}), cx)}
     assert set(secs) == {"slurm.sinfo", "slurm.occupants"}                    # GPU counts and jobs of one moment
-    assert "-p gpu-preempt" in secs["slurm.occupants"].cmd                    # no nodes yet
+    assert "-p gpu-pooling" in secs["slurm.occupants"].cmd                    # no nodes yet
     tick(c, cx, sinfo_result())
     occ = next(s for s in c.sections(frozenset({"slurm.occupants"}), cx) if s.name == "slurm.occupants")
     nodes = shlex.split(occ.cmd)[6].split(",")

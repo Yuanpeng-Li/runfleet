@@ -663,7 +663,7 @@ async def test_host_detail_cluster_partitions(make_app: MakeApp) -> None:
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, HostDetailScreen) and screen.cluster
-        assert screen.partition == "gpu-preempt"
+        assert screen.partition == "gpu-pooling"
         nodes = screen.query_one("#nodes")
         assert nodes.row_count == 6
         await pilot.press("f")
@@ -701,10 +701,10 @@ async def test_partition_switch_settles_without_a_highlight_loop(make_app: MakeA
         await pilot.press("left_square_bracket")
         for _ in range(10):
             await pilot.pause()
-        assert screen.partition == "gpu-preempt" and len(calls) <= 4, len(calls)
+        assert screen.partition == "gpu-pooling" and len(calls) <= 4, len(calls)
         screen.refresh_data(None)                                # a data refresh keeps the selection
         await pilot.pause()
-        assert screen.partition == "gpu-preempt"
+        assert screen.partition == "gpu-pooling"
 
 
 # ---------------------------------------------------------------- 13. palette

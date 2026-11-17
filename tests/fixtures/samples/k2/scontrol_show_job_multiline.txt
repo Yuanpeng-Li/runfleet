@@ -9,7 +9,7 @@ JobId=2334564 JobName=smoke-test
    AccrueTime=2026-09-07T05:39:20
    StartTime=2026-09-07T06:31:41 EndTime=2026-09-07T07:31:41 Deadline=N/A
    SuspendTime=None SecsPreSuspend=0 LastSchedEval=2026-09-07T05:57:25 Scheduler=Main
-   Partition=gpu-preempt AllocNode:Sid=login02:99955
+   Partition=gpu-pooling AllocNode:Sid=login02:99955
    ReqNodeList=(null) ExcNodeList=(null)
    NodeList= SchedNodeList=n-32-03
    NumNodes=1 NumCPUs=8 NumTasks=1 CPUs/Task=8 ReqB:S:C:T=0:0:*:*

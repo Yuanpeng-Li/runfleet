@@ -79,11 +79,11 @@ def test_partition_lines_charged_free_and_usage_only() -> None:
     lyra = dataclasses.replace(LYRA, associations=(("lyra", "pilab_02", "", "normal"),))
     wide = [t.plain.rstrip() for t in acs.partition_lines(lyra, (), 110, usage_only=False)]
     assert wide == ["charged  gpu  cpu=1 · gpu=32 per hour  (qos normal ×1)",
-                    "free     free-gpu  (AllowQos low ×0, guest ×0: billing-h are recorded but not charged)"]
+                    "free     flex-gpu  (AllowQos low ×0, guest ×0: billing-h are recorded but not charged)"]
     (narrow,) = acs.partition_lines(LYRA, (), 76, usage_only=False, narrow=True)
-    assert narrow.plain.rstrip() == "charged gpu · free free-gpu (qos low ×0, guest ×0)"
+    assert narrow.plain.rstrip() == "charged gpu · free flex-gpu (qos low ×0, guest ×0)"
     (k2,) = acs.partition_lines(K2, (), 100, usage_only=True)
-    assert k2.plain.rstrip() == "partitions  gpu-preempt (qos ×1 everywhere)"
+    assert k2.plain.rstrip() == "partitions  gpu-pooling (qos ×1 everywhere)"
     assert acs.partition_lines(None, (), 100, usage_only=True) == []
     assert acs.weights_text("cpu=1,gres/gpu:L40S=32") == "cpu=1 · gpu:L40S=32"
 
