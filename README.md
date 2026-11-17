@@ -21,7 +21,8 @@ cluster B for `sacct`, a workstation for `nvidia-smi`, then `tail -f` a log to s
 rounds for you. It polls each host over your own SSH setup and puts everything in one keyboard-driven view: what is
 running, what is waiting and why, which GPUs are busy or idle, and what went wrong with the jobs that ended.
 
-Try it right now on a simulated fleet (no account, no cluster, no network):
+Try it right now on a simulated fleet, with no account or cluster: in your browser on the
+[project page](https://yuanpeng-li.github.io/runfleet/), or in your terminal:
 
 ```sh
 uvx --from git+https://github.com/Yuanpeng-Li/runfleet runfleet --demo
