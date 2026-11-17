@@ -1,42 +1,121 @@
-/* RunFleet project page. The demo player has its own sheet (demo.css); colours here are the TUI's dark theme. */
+/* RunFleet project page. A quiet, cool-grey reference page that turns into the terminal for one stretch: the band
+   in the TUI's own background colour holds the live demo (its player has its own sheet, demo.css). Colour elsewhere
+   appears only where a Slurm job state is meant: green R, yellow PD, red F; blue is links, focus and selection. */
+
+@font-face {
+  font-family: "Red Hat Display";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/red-hat-display-latin-700-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Red Hat Text";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/red-hat-text-latin-400-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Red Hat Text";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/red-hat-text-latin-600-normal.woff2") format("woff2");
+}
 
 :root {
-  --bg: #0f1115;
-  --panel: #14161b;          /* the demo terminal's background */
-  --line: #262a31;
-  --text: #d5d5d6;
-  --muted: #9a9b9e;
-  --accent: #5fafff;
-  --green: #5fd75f;
-  --yellow: #ffd75f;
-  --red: #ff5f5f;
-  --magenta: #d787ff;
-  --cyan: #5fd7af;
+  --page: #edeff1;
+  --surface: #f8f9fa;
+  --ink: #15181d;
+  --muted: #565c66;
+  --rule: #c9cdd3;
+  --edge: #767d87;            /* control borders: 3.6:1 on the page */
+  --link: #1d5fb4;
+  --ok: #1e7a32;
+  --wait: #8a6100;
+  --fail: #b3261e;
+
+  --board: #14161b;          /* the demo terminal's background: band and grid are one surface */
+  --board-fg: #d5d5d6;
+  --board-muted: #9a9b9e;
+  --board-line: #2e333b;
+  --board-focus: #5fafff;
+
+  --sans: "Red Hat Text", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --display: "Red Hat Display", "Red Hat Text", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --wide: 1180px;
-  --narrow: 760px;
+
+  --wrap: min(1240px, 100% - 48px);
+  --gap: 32px;
+  --section: 96px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #23262d;
+    --surface: #2b2f37;
+    --ink: #e4e6ea;
+    --muted: #a7abb2;
+    --rule: #3d424b;
+    --edge: #7d848f;
+    --link: #7ab8ff;
+    --ok: #6fd77a;
+    --wait: #e8c35a;
+    --fail: #ff7b72;
+  }
 }
 
 *, *::before, *::after { box-sizing: border-box; }
 
-html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+html {
+  color-scheme: light dark;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html { scroll-behavior: smooth; }
+}
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font: 16px/1.6 var(--sans);
+  background: var(--page);
+  color: var(--ink);
+  font: 400 18px/1.6 var(--sans);
 }
 
-a { color: var(--accent); text-decoration: none; }
-a:hover { text-decoration: underline; text-underline-offset: 3px; }
-a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+h1, h2, h3, p, ul, table, pre, figure { margin: 0; }
 
-code { font-family: var(--mono); font-size: 0.92em; }
-p code, li code { padding: 0.1em 0.35em; border-radius: 4px; background: #1c1f25; }
+a { color: var(--link); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:hover { text-decoration-thickness: 2px; }
 
-html:not(.js) .copy { display: none; }   /* the buttons need JavaScript */
+:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+
+code, kbd {
+  font-family: var(--mono);
+  font-size: 0.86em;
+}
+
+p code, td code, li code {
+  white-space: nowrap;       /* a command in a sentence never breaks at its hyphens */
+  padding: 0.05em 0.3em;
+  border-radius: 3px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+
+kbd {
+  padding: 0.05em 0.35em;
+  border: 1px solid var(--edge);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  background: var(--surface);
+}
+
+b { font-weight: 600; }
 
 .sr-only {
   position: absolute;
@@ -52,246 +131,355 @@ html:not(.js) .copy { display: none; }   /* the buttons need JavaScript */
 
 .skip {
   position: absolute;
-  left: -9999px;
-  top: 8px;
-  padding: 6px 12px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  left: 12px;
+  top: -100px;
+  z-index: 10;
+  padding: 8px 14px;
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
 }
-.skip:focus { left: 12px; z-index: 10; }
+.skip:focus { top: 12px; }
+
+/* --- Grid: twelve columns, and one split line at the start of column 6 reused down the page --- */
+.wrap {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  column-gap: var(--gap);
+  width: var(--wrap);
+  margin-inline: auto;
+}
 
 /* --- Top bar --- */
 .top {
-  display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  max-width: var(--wide);
-  margin: 0 auto;
-  padding: 18px 20px;
+  min-height: 64px;
 }
 
 .brand {
+  grid-column: 1 / span 4;
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  color: var(--text);
-  font: 700 17px/1 var(--mono);
-  letter-spacing: 0.02em;
-}
-.brand:hover { text-decoration: none; }
-
-.brand__mark {             /* a card with a running bar, in the TUI's colours */
-  width: 18px;
-  height: 18px;
-  border: 2px solid var(--accent);
-  border-radius: 4px;
-  background: linear-gradient(var(--green), var(--green)) 3px 9px / 8px 3px no-repeat;
+  justify-self: start;
+  color: var(--ink);
+  font: 700 19px/1 var(--display);
+  text-decoration: none;
 }
 
-.top__nav { display: flex; gap: 22px; font-size: 15px; }
-.top__nav a { color: var(--muted); }
-.top__nav a:hover { color: var(--text); text-decoration: none; }
+.brand__mark { width: 22px; height: 22px; }
+
+.top__nav {
+  grid-column: 5 / -1;
+  justify-self: end;
+  display: flex;
+  gap: 28px;
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.top__nav a { color: var(--ink); text-decoration: none; }
+.top__nav a:hover { color: var(--link); text-decoration: underline; }
 
 /* --- Hero --- */
 .hero {
-  max-width: var(--narrow);
-  margin: 0 auto;
-  padding: 56px 20px 36px;
-  text-align: center;
+  align-items: start;
+  padding: 56px 0 48px;
+  row-gap: 32px;
 }
 
 .hero h1 {
-  margin: 0 0 18px;
-  font-size: clamp(30px, 5.2vw, 50px);
-  line-height: 1.12;
-  letter-spacing: -0.02em;
-  font-weight: 750;
-  color: #f2f2f3;
+  grid-column: 1 / span 11;
+  max-width: 17em;
+  font: 700 clamp(34px, 4.2vw, 58px)/1.05 var(--display);
+  letter-spacing: -0.015em;
 }
 
-.hero__lede {
-  margin: 0 auto 28px;
-  max-width: 34em;
-  font-size: clamp(16px, 2.2vw, 19px);
+.hero .lede { grid-column: 1 / span 5; }
+
+.hero__side {               /* the demo guide sits right above the band it drives */
+  grid-column: 6 / -1;
+  max-width: 64ch;
+}
+
+.lede { font-size: 18px; }
+.hero .lede { font-size: 20px; line-height: 1.55; }
+
+.note {
+  font-size: 16px;
+  line-height: 1.55;
   color: var(--muted);
 }
 
-.hero__alt { margin: 12px 0 0; font-size: 14px; color: var(--muted); }
+/* The tour: buttons that jump the demo to a screen. Without JavaScript they would do nothing, so they are not shown. */
+.tour { margin-top: 24px; }
+html:not(.js) .tour { display: none; }
 
-/* --- Commands with a copy button --- */
+.tour p {
+  margin-bottom: 10px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.tour ul {
+  display: grid;
+  grid-template-columns: repeat(3, max-content);
+  gap: 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.tour li { display: flex; }
+
+.tour button {
+  flex: 1;
+  text-align: left;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 400 15px/1.3 var(--sans);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tour button:hover { border-color: var(--link); }
+.tour button[aria-current="true"] { border-color: var(--link); box-shadow: inset 0 -2px 0 var(--link); }
+.tour button[aria-disabled="true"] { cursor: default; opacity: 0.6; }
+.tour button[aria-disabled="true"]:hover { border-color: var(--edge); }
+
+/* --- The board: full bleed, the terminal's colour, no frame --- */
+.board {
+  background: var(--board);
+  color: var(--board-fg);
+}
+
+.board :focus-visible { outline-color: var(--board-focus); }
+
+.board__in {
+  /* As wide as the window allows, but short enough that all 36 rows fit once scrolled to (1.45 is the grid's
+     width-to-height ratio with the narrowest common monospace); never under 960px where there is room. */
+  width: max(min(100% - 48px, 960px), min(100% - 48px, 1240px, (100svh - 160px) * 1.45));
+  margin-inline: auto;
+  padding-block: 32px;
+}
+
+/* --- Sections below the board --- */
+.split, .rounds, .asks { padding-top: var(--section); }
+
+h2 {
+  font: 700 32px/1.15 var(--display);
+  letter-spacing: -0.01em;
+}
+
+h3 {
+  margin: 32px 0 8px;
+  font-size: 18px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+
+.small {
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.split__head { grid-column: 1 / span 4; }
+.split__head h2 { margin-bottom: 24px; }
+.split__head p + p { margin-top: 16px; }
+.split__body { grid-column: 6 / -1; min-width: 0; }
+
+.cmds h3:first-of-type { margin-top: 32px; }
+.cmds .small { margin: 8px 0; }
+.cmds h3 + .small { margin-top: -4px; }
+
+/* Command boxes: light, like the rest of the page; the band stays the only dark thing. */
 .cmd {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  max-width: 100%;
-  margin: 0 auto;
-  padding: 10px 10px 10px 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  text-align: left;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 10px 10px 14px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--surface);
 }
 
-.cmd code {
+.cmd code {                 /* wrapped, not scrolled: you see all of what you are about to pipe into a shell */
   flex: 1;
   min-width: 0;
-  overflow-x: auto;
-  white-space: nowrap;
-  font-size: 14px;
-  line-height: 1.6;
-  scrollbar-width: thin;
+  white-space: pre-wrap;
+  line-break: anywhere;      /* at the edge, as a terminal wraps: never at a hyphen, which would split --demo */
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  line-height: 1.5;
 }
 
-.cmd--hero { max-width: 800px; }
-
-.cmd__prompt { color: var(--green); user-select: none; -webkit-user-select: none; }
+.cmd--main code { font-size: 16px; }
+.cmd__prompt { color: var(--muted); user-select: none; -webkit-user-select: none; }
 
 .copy {
   flex: none;
+  align-self: flex-start;
   min-width: 64px;
-  padding: 5px 12px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #1c1f25;
-  color: var(--text);
-  font: 600 13px/1.4 var(--sans);
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid var(--edge);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--page);
+  color: var(--ink);
+  font: 600 14px/1.2 var(--sans);
   cursor: pointer;
 }
-.copy:hover { border-color: #3a3f48; background: #22262d; }
-.copy.is-done { color: var(--green); border-color: rgba(95, 215, 95, 0.4); }
-
-.cmd code:focus-visible, .term:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
-
-/* --- Demo --- */
-.demo {
-  max-width: var(--wide);
-  margin: 0 auto;
-  padding: 24px 20px 8px;
-}
-
-.demo__note {
-  max-width: var(--narrow);
-  margin: 6px auto 14px;
-  text-align: center;
-  font-size: 15px;
-  color: var(--muted);
-}
-
-.demo .cmd { max-width: 700px; }
-
-/* --- Sections --- */
-.features, .install {
-  max-width: var(--wide);
-  margin: 0 auto;
-  padding: 72px 20px 0;
-}
-
-h2 {
-  margin: 0 0 10px;
-  font-size: clamp(24px, 3.4vw, 32px);
-  line-height: 1.2;
-  letter-spacing: -0.01em;
-  color: #f2f2f3;
-}
-
-.section__lede { max-width: 46em; margin: 0 0 28px; color: var(--muted); }
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 16px;
-}
-
-.card {
-  padding: 20px 22px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--panel);
-}
-
-.card h3 {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 0 0 8px;
-  font-size: 17px;
-  line-height: 1.3;
-  color: #f2f2f3;
-}
-
-.card p { margin: 0; font-size: 15px; color: #b9babc; }
-
-.dot { flex: none; width: 9px; height: 9px; border-radius: 50%; }
-.dot--blue { background: var(--accent); }
-.dot--green { background: var(--green); }
-.dot--red { background: var(--red); }
-.dot--yellow { background: var(--yellow); }
-.dot--magenta { background: var(--magenta); }
-.dot--cyan { background: var(--cyan); }
-
-/* --- Install --- */
-.install { max-width: calc(var(--narrow) + 40px); }
-
-.install h3 {
-  margin: 26px 0 10px;
-  font-size: 16px;
-  color: #f2f2f3;
-}
-
-.install .cmd { margin: 0; }
-
-.install--start { padding-top: 56px; }
+.copy:hover { border-color: var(--link); }
+.copy.is-done { border-color: var(--link); }
+html:not(.js) .copy { display: none; }   /* the buttons need JavaScript */
 
 .tag {
   margin-left: 6px;
   padding: 1px 7px;
-  border: 1px solid rgba(255, 215, 95, 0.45);
-  border-radius: 999px;
-  color: var(--yellow);
-  font: 600 11px/1.5 var(--sans);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
   vertical-align: 2px;
 }
 
-.term {
-  margin: 14px 0 0;
-  padding: 16px 18px;
-  overflow-x: auto;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  font: 14px/1.7 var(--mono);
+/* The rounds: what you do now, where, and what you see instead. */
+.rounds h2, .rounds .lede, .rounds table { grid-column: 1 / -1; }
+.rounds .lede { max-width: 64ch; margin: 24px 0 32px; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 16px;
+  line-height: 1.5;
 }
-.term code { font-size: inherit; }
 
-.c-cmd { color: var(--accent); }
-.c-dim { color: #86878a; }
-
-.small { margin: 12px 0 0; font-size: 14px; color: var(--muted); }
-
-/* --- Footer --- */
-.foot {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 8px 24px;
-  max-width: var(--wide);
-  margin: 88px auto 0;
-  padding: 22px 20px 34px;
-  border-top: 1px solid var(--line);
-  font-size: 14px;
+th {
+  padding: 0 24px 10px 0;
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  font-size: 15px;
+  font-weight: 600;
   color: var(--muted);
 }
 
+td {
+  padding: 14px 24px 14px 0;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+
+th:first-child, td:first-child { width: 22%; }
+th:nth-child(2), td:nth-child(2) { width: 20.7%; color: var(--muted); }   /* "You see" starts on the split line */
+th:nth-child(2) { color: var(--muted); }
+th:last-child, td:last-child { padding-right: 0; }
+
+td:first-child code { padding: 0; background: none; box-shadow: none; font-size: 15px; }
+
+.st { font-weight: 600; }
+.st--r { color: var(--ok); }
+.st--pd { color: var(--wait); }
+.st--f, code.st--f { color: var(--fail); }
+
+/* What it asks of the cluster: four short notes, split at the same line. */
+.asks h2 { grid-column: 1 / -1; margin-bottom: 24px; }
+
+.asks__grid {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  row-gap: 32px;
+}
+
+.asks__grid p { max-width: 60ch; }
+.asks__grid p:nth-child(odd) { grid-column: 1 / span 5; }
+.asks__grid p:nth-child(even) { grid-column: 6 / -1; }
+.asks__grid strong { font-weight: 600; }
+
+/* First run */
+.term {
+  align-self: start;
+  padding: 16px 18px;
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--surface);
+  font: 15px/1.6 var(--mono);
+}
+.term code { font-size: inherit; }
+.c-dim { color: var(--muted); }
+
+/* --- Footer --- */
+.foot {
+  align-items: baseline;
+  margin-top: var(--section);
+  padding: 24px 0 40px;
+  border-top: 1px solid var(--rule);
+  font-size: 15px;
+  color: var(--muted);
+}
+
+.foot p { grid-column: 1 / span 6; }
+
+.foot ul {
+  grid-column: 7 / -1;
+  justify-self: end;
+  display: flex;
+  gap: 24px;
+  padding: 0;
+  list-style: none;
+}
+
+/* --- Narrower screens: one column, the same left edge --- */
+@media (max-width: 900px) {
+  .top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; column-gap: 16px; }
+  .hero h1, .hero .lede, .hero__side, .split__head, .split__body,
+  .asks__grid p:nth-child(odd), .asks__grid p:nth-child(even), .foot p, .foot ul { grid-column: 1 / -1; }
+  .split__body { margin-top: 24px; }
+  .foot ul { justify-self: start; margin-top: 8px; }
+}
+
+@media (max-width: 700px) {
+  table, tbody, tr, td { display: block; width: auto !important; }
+  thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  tr { padding: 16px 0; border-bottom: 1px solid var(--rule); }
+  td { padding: 0; border: 0; }
+  td + td { margin-top: 4px; }
+  td:nth-child(2) { font-size: 15px; }
+}
+
 @media (max-width: 600px) {
-  .top { padding: 14px 16px; }
-  .top__nav { gap: 16px; font-size: 14px; }
-  .hero { padding: 36px 16px 24px; }
-  .demo { padding: 16px 10px 8px; }
-  .features, .install { padding: 56px 16px 0; }
-  .grid { grid-template-columns: 1fr; }
-  .cmd code { font-size: 13px; }
+  :root { --wrap: calc(100% - 32px); --gap: 16px; --section: 64px; }
+  body { font-size: 17px; line-height: 1.55; }
+  .top__nav { gap: 4px 16px; flex-wrap: wrap; }
+  .tour ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hero { padding: 28px 0 32px; row-gap: 20px; }
+  .hero .lede { font-size: 18px; }
+  h2 { font-size: 26px; line-height: 1.2; }
+  .board__in { width: calc(100% - 24px); padding-block: 16px; }
+  .cmd { padding: 8px 8px 8px 12px; }
+  .cmd code, .cmd--main code { font-size: 13.5px; }
+  .term { font-size: 13.5px; }
+}
+
+@media (pointer: coarse) {
+  .top__nav a, .foot a, .brand { display: inline-flex; align-items: center; min-height: 44px; }
+  .tour button, .copy { min-height: 44px; }
+}
+
+/* A phone held upright shows the grid small: say so once, under the caption. */
+@media (max-width: 600px) and (orientation: portrait) {
+  .rfd__cap::after {
+    content: "Turn your phone sideways for a larger view.";
+    grid-column: 1 / -1;
+    font: 400 14px/1.4 var(--sans);
+    color: var(--board-muted);
+  }
 }
