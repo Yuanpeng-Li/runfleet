@@ -13,6 +13,10 @@ All notable changes to this project are documented here. The format follows
 - The demo fleet's partitions are now called `gpu-pooling`, `cpu-pooling` and `flex-gpu` (`flex-gpuxl`, …); examples
   and older entries below use the new names.
 
+### Fixed
+- **The text after a cause chip is readable again.** It took the chip's background, so a failure's cause was red on
+  red and a pending job's reason grey on yellow; now only the chip itself is coloured.
+
 ## [0.9.4] - 2026-11-12
 
 ### Fixed
