@@ -6,19 +6,21 @@
 <title>RunFleet: all your Slurm jobs and GPU machines in one terminal</title>
 <meta name="description" content="A terminal UI for the Slurm clusters and GPU workstations you reach with ssh: queues, per-GPU usage, logs and failure causes in one view. Nothing to install remotely.">
 <link rel="canonical" href="https://yuanpeng-li.github.io/runfleet/">
-<meta name="theme-color" content="#0f1115">
-<meta name="color-scheme" content="dark">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#edeff1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#23262d" media="(prefers-color-scheme: dark)">
 <meta property="og:type" content="website">
+<meta property="og:site_name" content="RunFleet">
 <meta property="og:title" content="RunFleet: all your Slurm jobs and GPU machines in one terminal">
 <meta property="og:description" content="Queues, per-GPU usage, logs and failure causes across every cluster and workstation you can ssh into. Try the interactive demo in your browser.">
 <meta property="og:url" content="https://yuanpeng-li.github.io/runfleet/">
 <meta property="og:image" content="https://yuanpeng-li.github.io/runfleet/fleet.png">
-<meta property="og:image:alt" content="RunFleet's Fleet view: one card per host for three Slurm clusters and two GPU workstations">
 <meta property="og:image:width" content="1280">
 <meta property="og:image:height" content="844">
-<meta property="og:site_name" content="RunFleet">
+<meta property="og:image:alt" content="RunFleet's Fleet view: one card per host for three Slurm clusters and two GPU workstations">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/red-hat-text-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="site.css?v=__V__">
 <link rel="stylesheet" href="demo.css?v=__V__">
 <script>document.documentElement.className += ' js';</script>
@@ -26,8 +28,8 @@
 <body>
 <a class="skip" href="#main">Skip to content</a>
 
-<header class="top">
-  <a class="brand" href="./" aria-label="RunFleet home"><span class="brand__mark" aria-hidden="true"></span>RunFleet</a>
+<header class="top wrap">
+  <a class="brand" href="./"><svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="7" fill="#14161b"/><rect x="6" y="6" width="20" height="20" rx="4" fill="none" stroke="#5fafff" stroke-width="3"/><rect x="10" y="15" width="10" height="4" fill="#5fd75f"/></svg>RunFleet</a>
   <nav class="top__nav" aria-label="Site">
     <a href="#install">Install</a>
     <a href="https://github.com/Yuanpeng-Li/runfleet/blob/main/docs/USER_GUIDE.md">Guide</a>
@@ -36,112 +38,168 @@
 </header>
 
 <main id="main">
-  <section class="hero">
+  <section class="hero wrap">
     <h1>All your Slurm jobs and GPU machines in one&nbsp;terminal.</h1>
-    <p class="hero__lede">Queues, GPUs, logs and failures across every cluster and workstation you can <code>ssh</code> into, with nothing to install on the remote side.</p>
-    <div class="cmd cmd--hero">
-      <code tabindex="0"><span class="cmd__prompt" aria-hidden="true">$ </span>curl -LsSf https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.sh | sh</code>
-      <button type="button" class="copy" aria-label="Copy the install command" data-copy="curl -LsSf https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.sh | sh">Copy</button>
-    </div>
-    <p class="hero__alt">Linux, macOS and WSL. <a href="#install">Windows and other ways to install</a>.</p>
-  </section>
-
-  <section class="demo" aria-label="Interactive demo">
-    <figure class="rfd" data-src="runfleet-demo.json?v=__V__">
-    <figcaption class="rfd__cap" hidden>
-    <span class="rfd__try">Try it: click a host, a job or a tab; double-click a table row to open it</span>
-    <span class="rfd__status" role="status" aria-live="polite"></span>
-    <span class="rfd__hint"></span>
-    </figcaption>
-    <div class="rfd__win" hidden>
-    <div class="rfd__bar">
-    <span class="rfd__dots" aria-hidden="true"><i></i><i></i><i></i></span>
-    <span class="rfd__title">RunFleet</span>
-    <button type="button" class="rfd__full" aria-label="Full screen" title="Full screen" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
-    </div>
-    <div class="rfd__body">
-    <div class="rfd__screen" tabindex="0" role="application" aria-label="RunFleet demo"></div>
-    <div class="rfd__toast" role="status" aria-live="polite" hidden></div>
-    </div>
-    </div>
-    <div class="rfd__keys" hidden></div>
-    <noscript><img src="fleet.png" alt="RunFleet's Fleet view in its demo mode: one card per host for three simulated Slurm clusters and two GPU workstations"></noscript>
-    </figure>
-    <p class="demo__note">This is RunFleet itself, on a simulated fleet: screens recorded from the real app and replayed in your browser. Run the same demo in your terminal, no account or cluster needed:</p>
-    <div class="cmd">
-      <code tabindex="0"><span class="cmd__prompt" aria-hidden="true">$ </span>uvx --from git+https://github.com/Yuanpeng-Li/runfleet runfleet --demo</code>
-      <button type="button" class="copy" aria-label="Copy the demo command" data-copy="uvx --from git+https://github.com/Yuanpeng-Li/runfleet runfleet --demo">Copy</button>
+    <p class="lede">Queues, GPU use, logs and the reasons jobs failed, from every cluster and workstation you can <code>ssh</code> into. Nothing gets installed on the remote side.</p>
+    <div class="hero__side">
+      <p class="note">Below is RunFleet itself on a simulated fleet of three Slurm clusters and two GPU workstations: screens recorded from the real app, replayed in your browser.</p>
     </div>
   </section>
 
-  <section class="features" aria-labelledby="features-h">
-    <h2 id="features-h">What it does for you</h2>
-    <p class="section__lede">It does the rounds of <code>squeue</code>, <code>sacct</code>, <code>nvidia-smi</code> and <code>tail -f</code> for you: one SSH round trip per host per refresh, everything in one keyboard-driven view.</p>
-    <div class="grid">
-      <article class="card">
-        <h3><span class="dot dot--blue" aria-hidden="true"></span>Every host at a glance</h3>
-        <p>One card per host: your running, pending and failed jobs, the GPUs you hold, free GPUs per partition, the next job in line and login-node load. Workstations get per-GPU bars.</p>
-      </article>
-      <article class="card">
-        <h3><span class="dot dot--green" aria-hidden="true"></span>Live GPU readings inside a job</h3>
-        <p>Slurm accounting only knows a job's average. Open a running job and RunFleet reads its own node: per-GPU utilisation and memory, and which process sits on which GPU, so a GPU idling inside a busy job shows.</p>
-      </article>
-      <article class="card">
-        <h3><span class="dot dot--red" aria-hidden="true"></span>Why jobs end and wait</h3>
-        <p>Ended jobs get a cause (<code>OOM-GPU</code>, <code>NCCL</code>, <code>TIMEOUT</code>, …) linked to the log line behind it. Pending jobs show the priority factors that hold them back.</p>
-      </article>
-      <article class="card">
-        <h3><span class="dot dot--yellow" aria-hidden="true"></span>Nothing to install remotely</h3>
-        <p>It uses your OpenSSH client and <code>~/.ssh/config</code> as they are (ProxyJump, ControlMaster, keys, Duo) and only runs commands already there.</p>
-      </article>
-      <article class="card">
-        <h3><span class="dot dot--magenta" aria-hidden="true"></span>Calm when hosts are not</h3>
-        <p>An unreachable host, an expired login or a hung <code>nvidia-smi</code> becomes a badge and a retry; the last known data stays on screen. Failures and jobs near their time limit raise a notification.</p>
-      </article>
-      <article class="card">
-        <h3><span class="dot dot--cyan" aria-hidden="true"></span>Safe by default</h3>
-        <p>Every action (cancel, hold, requeue, terminate, …) is confirmed and shows the exact remote command. <code>--readonly</code> turns them all off, and partitions or QOS you mark as protected are never touched.</p>
-      </article>
+  <section class="board" aria-label="Interactive demo">
+    <div class="board__in">
+      <figure class="rfd" data-src="runfleet-demo.json?v=__V__" aria-label="RunFleet demo">
+      <figcaption class="rfd__cap" hidden>
+      <span class="rfd__try">Try it: click a host, a job or a tab; double-click a table row to open it</span>
+      <span class="rfd__status" role="status" aria-live="polite"></span>
+      <span class="rfd__hint"></span>
+      </figcaption>
+      <div class="rfd__win" hidden>
+      <div class="rfd__bar">
+      <div class="tour" role="group" aria-label="Jump to a screen">
+      <ul>
+        <li><button type="button" data-go="fleet/k2" aria-controls="rfd-screen" title="What is running on k2, as squeue --me would show it">Your jobs on k2</button></li>
+        <li><button type="button" data-go="fleet/k2/free" aria-controls="rfd-screen" title="Where a GPU is free right now, across all partitions">Free GPUs</button></li>
+        <li><button type="button" data-go="job/vega:824373/logs" aria-controls="rfd-screen" title="A DDP run on vega that died of an NCCL error, opened at the log line">A run that died</button></li>
+        <li><button type="button" data-go="job/k2:3372143/summary" aria-controls="rfd-screen" title="Why a k2 job is pending: its priority factors">A job that waits</button></li>
+        <li><button type="button" data-go="job/vega:823954/gpu" aria-controls="rfd-screen" title="A GPU sitting idle while holding 69.2 GB inside a running job">An idle GPU</button></li>
+        <li><button type="button" data-go="fleet/labstation" aria-controls="rfd-screen" title="Who is using the lab workstation's GPUs">The lab workstation</button></li>
+      </ul>
+      </div>
+      <button type="button" class="rfd__full" aria-label="Full screen" title="Full screen" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
+      </div>
+      <div class="rfd__body">
+      <div class="rfd__screen" id="rfd-screen" tabindex="0" role="application" aria-label="RunFleet demo"></div>
+      <div class="rfd__toast" role="status" aria-live="polite" hidden></div>
+      </div>
+      <div class="rfd__keys" hidden></div>
+      </div>
+      <noscript><img src="fleet.png" alt="RunFleet's Fleet view in its demo mode: one card per host for three simulated Slurm clusters and two GPU workstations"></noscript>
+      </figure>
     </div>
   </section>
 
-  <section class="install" id="install" aria-labelledby="install-h">
-    <h2 id="install-h">Install</h2>
-    <p class="section__lede">The script installs <a href="https://docs.astral.sh/uv/">uv</a> if you do not have it, then RunFleet; run it again to update. Python 3.11 or newer, which uv brings along when the system has none.</p>
-    <h3>Linux, macOS, WSL</h3>
-    <div class="cmd">
-      <code tabindex="0"><span class="cmd__prompt" aria-hidden="true">$ </span>curl -LsSf https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.sh | sh</code>
-      <button type="button" class="copy" aria-label="Copy the install command" data-copy="curl -LsSf https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.sh | sh">Copy</button>
+  <section class="split wrap" id="install" aria-labelledby="install-h">
+    <div class="split__head">
+      <h2 id="install-h">Install</h2>
+      <p>One line on Linux, macOS or WSL. It needs only your system <code>ssh</code> client. The script installs <a href="https://docs.astral.sh/uv/">uv</a> if you do not have it (uv brings Python 3.11 when the system has none), then RunFleet. Run the same line again to update.</p>
+      <p class="small">There is no PyPI release yet, so installs come straight from GitHub.</p>
     </div>
-    <h3>Windows <span class="tag">preview</span></h3>
-    <div class="cmd">
-      <code tabindex="0"><span class="cmd__prompt" aria-hidden="true">&gt; </span>powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.ps1 | iex"</code>
-      <button type="button" class="copy" aria-label="Copy the Windows install command" data-copy="powershell -ExecutionPolicy ByPass -c &quot;irm https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.ps1 | iex&quot;">Copy</button>
-    </div>
-    <p class="small">Windows 10 or 11, in PowerShell. Needs Git for Windows and the built-in OpenSSH client (8.1 or newer); see the <a href="https://github.com/Yuanpeng-Li/runfleet#windows-preview">Windows notes</a>.</p>
-    <h3>By hand</h3>
-    <div class="cmd">
-      <code tabindex="0"><span class="cmd__prompt" aria-hidden="true">$ </span>uv tool install git+https://github.com/Yuanpeng-Li/runfleet</code>
-      <button type="button" class="copy" aria-label="Copy the uv tool install command" data-copy="uv tool install git+https://github.com/Yuanpeng-Li/runfleet">Copy</button>
+    <div class="split__body cmds">
+      <div class="cmd cmd--main">
+        <code><span class="cmd__prompt" aria-hidden="true">$ </span>curl -LsSf https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.sh | sh</code>
+        <button type="button" class="copy" aria-label="Copy the install command" data-copy="curl -LsSf https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.sh | sh">Copy</button>
+      </div>
+
+      <h3>Try it in your terminal first</h3>
+      <p class="small">The same simulated fleet; no account or cluster needed.</p>
+      <div class="cmd">
+        <code><span class="cmd__prompt" aria-hidden="true">$ </span>uvx --from git+https://github.com/Yuanpeng-Li/runfleet runfleet --demo</code>
+        <button type="button" class="copy" aria-label="Copy the demo command" data-copy="uvx --from git+https://github.com/Yuanpeng-Li/runfleet runfleet --demo">Copy</button>
+      </div>
+
+      <h3>Windows 10 or 11, in PowerShell <span class="tag">preview</span></h3>
+      <div class="cmd">
+        <code><span class="cmd__prompt" aria-hidden="true">&gt; </span>powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.ps1 | iex"</code>
+        <button type="button" class="copy" aria-label="Copy the Windows install command" data-copy="powershell -ExecutionPolicy ByPass -c &quot;irm https://raw.githubusercontent.com/Yuanpeng-Li/runfleet/main/install.ps1 | iex&quot;">Copy</button>
+      </div>
+      <p class="small">Needs Git for Windows and the built-in OpenSSH client, 8.1 or newer. See the <a href="https://github.com/Yuanpeng-Li/runfleet#windows-preview">Windows notes</a>.</p>
+
+      <h3>By hand, with uv</h3>
+      <div class="cmd">
+        <code><span class="cmd__prompt" aria-hidden="true">$ </span>uv tool install git+https://github.com/Yuanpeng-Li/runfleet</code>
+        <button type="button" class="copy" aria-label="Copy the uv tool install command" data-copy="uv tool install git+https://github.com/Yuanpeng-Li/runfleet">Copy</button>
+      </div>
     </div>
   </section>
 
-  <section class="install install--start" aria-labelledby="start-h">
-    <h2 id="start-h">Get started</h2>
-<pre class="term" tabindex="0"><code><span class="c-cmd">runfleet</span>                    <span class="c-dim"># first run: pick hosts from your ~/.ssh/config</span>
-<span class="c-cmd">runfleet</span> gpu-a mylab        <span class="c-dim"># only these ssh aliases this time</span>
-<span class="c-cmd">runfleet</span> doctor gpu-a       <span class="c-dim"># why does a host not work?</span>
-<span class="c-cmd">runfleet</span> wait gpu-a:123456 &amp;&amp; ./eval.sh   <span class="c-dim"># block until a job ends</span></code></pre>
-    <p class="small">Host names are your own <code>~/.ssh/config</code> aliases; RunFleet works out whether each is a Slurm cluster or a plain GPU machine. More in the <a href="https://github.com/Yuanpeng-Li/runfleet/blob/main/docs/USER_GUIDE.md">user guide</a> and the <a href="https://github.com/Yuanpeng-Li/runfleet/blob/main/docs/CONFIG.md">configuration reference</a>.</p>
+  <section class="rounds wrap" aria-labelledby="rounds-h">
+    <h2 id="rounds-h">The rounds it does for you</h2>
+    <p class="lede">One SSH round trip per host per refresh, about the load of <code>watch -n 15 squeue --me</code>. Everything ends up in one view you drive from the keyboard.</p>
+    <table role="table">
+      <caption class="sr-only">Commands RunFleet runs for you, where you would run them, and what it shows</caption>
+      <thead role="rowgroup">
+        <tr role="row"><th scope="col" role="columnheader">Instead of</th><th scope="col" role="columnheader">On</th><th scope="col" role="columnheader">You see</th></tr>
+      </thead>
+      <tbody role="rowgroup">
+        <tr role="row">
+          <td role="cell"><code>squeue --me</code></td>
+          <td role="cell">each cluster's login node</td>
+          <td role="cell">Your running (<b class="st st--r">R</b>), pending (<b class="st st--pd">PD</b>) and failed (<b class="st st--f">F</b>) jobs on every host, the GPUs you hold, and the next job in line with its estimated start.</td>
+        </tr>
+        <tr role="row">
+          <td role="cell"><code>sinfo</code></td>
+          <td role="cell">each cluster</td>
+          <td role="cell">Free GPUs per partition, with your usual GPU types listed first.</td>
+        </tr>
+        <tr role="row">
+          <td role="cell"><code>nvidia-smi</code></td>
+          <td role="cell">the compute node your job landed on</td>
+          <td role="cell">Utilisation and memory for each GPU inside a running job, and which process sits on which GPU. A GPU idling inside a busy job shows; Slurm accounting only knows the job's average.</td>
+        </tr>
+        <tr role="row">
+          <td role="cell"><code>sacct</code> and the end of the log</td>
+          <td role="cell">each cluster, after the job ends</td>
+          <td role="cell">A cause such as <code class="st--f">OOM-GPU</code>, <code class="st--f">NCCL</code> or <code class="st--f">TIMEOUT</code> linked to the log line behind it, plus a hint for the <code>--time</code> or <code>--mem</code> to ask for next time.</td>
+        </tr>
+        <tr role="row">
+          <td role="cell"><code>sprio</code> and <code>sshare</code></td>
+          <td role="cell">each cluster, <span class="st--pd">while a job waits</span></td>
+          <td role="cell">The priority factors holding it back and your fair share. Evidence, not a promised start time.</td>
+        </tr>
+        <tr role="row">
+          <td role="cell"><code>tail -f</code></td>
+          <td role="cell">another terminal</td>
+          <td role="cell">The job's output, following live. <kbd>Ctrl+F</kbd> searches the logs of your recent jobs.</td>
+        </tr>
+        <tr role="row">
+          <td role="cell">Logging back in to check</td>
+          <td role="cell">at 2 a.m.</td>
+          <td role="cell">A notification when a job fails, is requeued or nears its time limit, and a note on what changed while you were away.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="asks wrap" aria-labelledby="asks-h">
+    <h2 id="asks-h">What it asks of the cluster</h2>
+    <div class="asks__grid">
+      <p><strong>Nothing installed.</strong> It uses your OpenSSH client and <code>~/.ssh/config</code> as they are (ProxyJump, ControlMaster, keys, Duo) and runs only commands already on the host.</p>
+      <p><strong>Little load on the login node.</strong> One round trip per host per refresh. Hosts that are off screen are polled less often, and polling pauses when you walk away.</p>
+      <p><strong>No drama when a host goes away.</strong> An unreachable host, an expired login or a hung <code>nvidia-smi</code> becomes a badge and a retry. The last known data stays on screen.</p>
+      <p><strong>Nothing happens without a yes.</strong> Cancel, hold, requeue and terminate are confirmed and show the exact remote command. <code>--readonly</code> turns them all off, and partitions or QOS you mark as protected are never touched.</p>
+    </div>
+  </section>
+
+  <section class="split wrap" aria-labelledby="start-h">
+    <div class="split__head">
+      <h2 id="start-h">First run</h2>
+      <p>Host names are your own <code>~/.ssh/config</code> aliases. RunFleet works out whether each one is a Slurm cluster or a plain GPU machine.</p>
+      <p>More in the <a href="https://github.com/Yuanpeng-Li/runfleet/blob/main/docs/USER_GUIDE.md">user guide</a> and the <a href="https://github.com/Yuanpeng-Li/runfleet/blob/main/docs/CONFIG.md">configuration reference</a>.</p>
+    </div>
+<pre class="split__body term" tabindex="0" role="region" aria-label="First-run commands"><code><span class="c-dim"># first run: pick hosts from your ~/.ssh/config</span>
+runfleet
+<span class="c-dim"># only these ssh aliases this time</span>
+runfleet gpu-a mylab
+<span class="c-dim"># why does a host not work?</span>
+runfleet doctor gpu-a
+<span class="c-dim"># block until a job ends</span>
+runfleet wait gpu-a:123456 &amp;&amp; ./eval.sh
+<span class="c-dim"># for your prompt or tmux, no ssh</span>
+runfleet status --short</code></pre>
   </section>
 </main>
-<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
 
-<footer class="foot">
-  <span>RunFleet is open source under the <a href="https://github.com/Yuanpeng-Li/runfleet/blob/main/LICENSE">MIT License</a>.</span>
-  <span><a href="https://github.com/Yuanpeng-Li/runfleet">Source</a> · <a href="https://github.com/Yuanpeng-Li/runfleet/blob/main/CHANGELOG.md">Changelog</a> · <a href="https://github.com/Yuanpeng-Li/runfleet/issues">Issues</a></span>
+<footer class="foot wrap">
+  <p>RunFleet is open source under the <a href="https://github.com/Yuanpeng-Li/runfleet/blob/main/LICENSE">MIT License</a>.</p>
+  <ul>
+    <li><a href="https://github.com/Yuanpeng-Li/runfleet">Source</a></li>
+    <li><a href="https://github.com/Yuanpeng-Li/runfleet/blob/main/CHANGELOG.md">Changelog</a></li>
+    <li><a href="https://github.com/Yuanpeng-Li/runfleet/issues">Issues</a></li>
+  </ul>
 </footer>
 
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
 <script src="demo.js?v=__V__" defer></script>
 <script src="site.js?v=__V__" defer></script>
 </body>

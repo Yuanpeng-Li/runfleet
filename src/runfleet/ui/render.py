@@ -265,11 +265,16 @@ def _chip_color(code: str) -> str:
 
 def cause_chip(code: str, *, pending: bool = False) -> Text:
     """The cause chip of an ended job (``logscan.Cause.code``: `` OOM-GPU ``) — or, ``pending``, of a pending reason —
-    in panel colour on red (orange for time-outs and preemption, magenta for cancellations, yellow when pending)."""
+    in panel colour on red (orange for time-outs and preemption, magenta for cancellations, yellow when pending).
+    The chip is a span, not the Text's own style: callers append the cause's text after it, which must not inherit
+    the chip's background."""
+    out = Text()
     if theme.no_color():
-        return Text(f" {code} ", style="bold reverse")
+        out.append(f" {code} ", style="bold reverse")
+        return out
     color = theme.YELLOW if pending else _chip_color(code)
-    return Text(f" {code} ", style=theme.on_color(color))
+    out.append(f" {code} ", style=theme.on_color(color))
+    return out
 
 
 def free_gpus(p: PartitionSummary, *, sep: str = "/") -> Text:

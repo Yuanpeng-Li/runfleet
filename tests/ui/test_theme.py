@@ -486,13 +486,32 @@ def test_ansi_pills_and_chips_draw_the_terminal_background_on_the_colour() -> No
     terminal's own background on the colour."""
     from runfleet.ui import render
 
+    def chip(code: str, pending: bool = False) -> str:
+        (span,) = render.cause_chip(code, pending=pending).spans
+        return str(span.style)
+
     theme.configure("ansi")
     assert theme.pill() == "bold reverse blue"
-    assert str(render.cause_chip("OOM-GPU").style) == "bold reverse red"
-    assert str(render.cause_chip("Priority", pending=True).style) == "bold reverse yellow"
+    assert chip("OOM-GPU") == "bold reverse red"
+    assert chip("Priority", pending=True) == "bold reverse yellow"
     theme.configure("dark")
     assert theme.pill() == f"bold {theme.SURFACE} on {theme.ACCENT}" and "reverse" not in theme.pill()
-    assert str(render.cause_chip("OOM-GPU").style) == f"bold {theme.SURFACE} on {theme.RED}"
+    assert chip("OOM-GPU") == f"bold {theme.SURFACE} on {theme.RED}"
+
+
+def test_text_after_a_cause_chip_keeps_its_own_background() -> None:
+    """The cause line appends the log line after the chip: it must not inherit the chip's background (red text on
+    red was unreadable)."""
+    from rich.console import Console
+
+    from runfleet.ui import render
+
+    theme.configure("dark")
+    line = render.cause_chip("OOM-GPU")
+    line.append(" torch.OutOfMemoryError", style=theme.error())
+    segments = list(line.render(Console(width=80)))
+    after = [s for s in segments if "OutOfMemoryError" in s.text]
+    assert after and all(s.style is None or s.style.bgcolor is None for s in after)
 
 
 async def test_ansi_focused_detail_tab_is_reverse_video(clock: object) -> None:

@@ -116,6 +116,10 @@
     fit();
     wire();
     schedule();
+    // The page can drive the player: it hears where the demo is (rfd:state) and sends it to a state (rfd:go).
+    root.addEventListener('rfd:go', function (e) { go(e.detail); });
+    root.dispatchEvent(new CustomEvent('rfd:ready', { detail: { has: function (id) { return !!data.states[id]; } } }));
+    root.dispatchEvent(new CustomEvent('rfd:state', { detail: cur }));
   }
 
   // ---- rendering --------------------------------------------------------------------------------------------
@@ -264,6 +268,7 @@
       paint();
       syncKeys();
       statusEl.textContent = state().title || '';
+      root.dispatchEvent(new CustomEvent('rfd:state', { detail: cur }));
     }
     hover(lastCell);
     schedule();
@@ -404,9 +409,8 @@
     });
     var hint = legend.filter(function (l) { return HINT.test(l[0]); })
       .map(function (l) { return label(l[0]) + ' ' + l[1]; });
-    hint.push('Esc at the top level hands the keyboard back to the page');
     var hintEl = root.querySelector('.rfd__hint');
-    hintEl.textContent = hint.join(' \u00b7 ');
+    hintEl.textContent = hint.join(', ') + '. Esc at the top level hands the keyboard back to the page.';
     if (coarse.matches) {                     // a touch screen: taps, and the keycaps instead of a keyboard
       tryEl.textContent = tryEl.textContent.replace('double-click', 'double-tap').replace('click', 'tap');
       hintEl.hidden = true;
