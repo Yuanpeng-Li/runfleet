@@ -294,8 +294,8 @@ at least 52 columns inside, which takes 113 columns with two cards per row; e.g.
 nothing jumps when jobs come and go. Each card keeps its summary at the top and then lists your jobs by how much they
 need you: fresh failures (last 4 h) with why they ended, running jobs that look stalled (`log idle 51m`) or are short on
 time, pending jobs that will never run or are held, then the rest of the running jobs by time left and the pending ones
-by estimated start. When they do not all fit, the last row says how many more there are and when the next one ends;
-`tab` shows them all in the Jobs view. A workstation's GPU lines say who holds each GPU (`free`, `mine orb.launch`,
+by estimated start. When they do not all fit, the list scrolls (see below; the bottom border says `↓7`); `tab` shows
+them all in the Jobs view. A workstation's GPU lines say who holds each GPU (`free`, `mine orb.launch`,
 `carol sample.py`, `in use · no process` when memory is held but no process is visible, `?` for an old reading,
 `no reading` when nvidia-smi gave neither utilisation nor memory), and
 its list shows your tasks and other users'. The empty cell after the last card becomes the *fleet panel*: free GPUs
@@ -308,6 +308,17 @@ a QOS or someone faster may still take them. A cluster whose last `sinfo` failed
 pace is listed as `k2 ?` instead of counted, like a host that is down. Rows older than 20 h show their day
 (`Mon 11:00`), and events of a host you removed in Settings disappear from the panel. None of this polls anything new. Palette › *Fleet: compact cards* keeps
 the cards at their summary size; *Fleet: roomy cards* brings the roomy layout back (remembered in `ui.json`).
+
+A card's job list (and the panel's *what changed*) that does not fit its box scrolls: turn the mouse wheel over it,
+or press `pgdn` / `pgup` for the selected card. The summary lines stay at the top (unless the box is too short to
+leave two rows for the list under them; then the whole card scrolls); the bottom border says how many
+lines are above and below (`↑2 ↓7`). To resize, drag a card's bottom border (the row below gives or takes the
+lines) or its right border (the column beside it gives or takes the cells); the sizes are remembered in `ui.json`
+for that grid. `=` brings back the default sizes. `L` switches on *Auto*: each row gets what its cards need to list
+everything (a card with two jobs stays small, one with twenty grows), whatever is left goes to the fleet panel, and
+it picks 2 or 3 columns, whichever hides the fewest jobs while keeping the wide row layout. Auto follows your jobs as
+they come and go, but shrinks a row only after it needed less for two minutes, so the cards do not jump. Dragging a
+border while Auto is on keeps Auto's sizes as yours and leaves Auto.
 
 Click a job row in a card, or a row under *what changed* in the fleet panel, to open that job; a click anywhere else
 on a card selects it as before (double-click: host detail). `a` lists everything that needs you across the whole
@@ -423,7 +434,7 @@ are quoted; nothing is globbed or searched recursively.
 enable/disable hosts, state presets, sort/group, saved Jobs views (*Save view as…*, *View: &lt;name&gt;*, *Delete
 view: &lt;name&gt;*), GPU watches (*Watch free GPUs…*, *Watches*), *Search logs…*, *Doctor &lt;host&gt;*,
 *Settings*, *Action log*, *RunFleet log*, *Log in to all hosts needing auth*, *Forward a port…*, *Forwards*, *Fleet:
-roomy cards* / *Fleet: compact cards*.
+roomy cards* / *Fleet: compact cards*, *Fleet: Auto layout on/off* / *Fleet: default layout*.
 
 **Settings** (`,`, the `⚙` at the top right, or the palette). A panel with three sections (`tab` or `←`/`→`, or click
 a tab):
@@ -543,7 +554,7 @@ Every view lists its keys with `?`. The table below is generated from the same s
 |---|---|
 | Global | `?`/`f1` help (this view) · `^p`/`:` command palette · `,` settings (hosts, defaults) · `$` account usage: balances, usage per window, where it went (Slurm) · `q` back · quit on the main screen · `^c` quit now · `esc` close / clear filter, marks / back · `0` all hosts (1-9: host N) · `/` filter jobs · `r` refresh hosts in scope (>= 3 s apart) · `^r` refresh all hosts · `+` poll faster (down to 0.5×) · `-` poll slower (up to 4×) · `^z` suspend to the shell · `D` since you were away: what ended, failures first |
 | Main screen | `tab` next view (Fleet→Jobs→GPUs) · `S-tab` previous view |
-| Fleet view | `↑`/`k` host above · `↓`/`j` host below · `←`/`h` previous host · `→`/`l` next host · `↵` host detail · `a` jobs that need you, fleet-wide: failed, low on time, never start (↵ opens one) · `g` free GPUs by type: which partitions and nodes, which workstation GPUs (↵ opens the host; a click on the panel's free part opens it too) · `space` scope to this host · `c` connect (log in: Duo / password prompts) · `C` log in to every host needing auth (one terminal session) · `s` shell on the host · `t` enable / disable polling · `e` error details |
+| Fleet view | `↑`/`k` host above · `↓`/`j` host below · `←`/`h` previous host · `→`/`l` next host · `↵` host detail · `a` jobs that need you, fleet-wide: failed, low on time, never start (↵ opens one) · `g` free GPUs by type: which partitions and nodes, which workstation GPUs (↵ opens the host; a click on the panel's free part opens it too) · `space` scope to this host · `c` connect (log in: Duo / password prompts) · `C` log in to every host needing auth (one terminal session) · `s` shell on the host · `t` enable / disable polling · `e` error details · `pgdn` scroll the selected card's job list down (the mouse wheel scrolls any card or the panel whose list does not fit) · `pgup` scroll the selected card's job list up · `L` Auto layout on/off: rows sized to what each card lists, 2 or 3 columns, whichever hides the fewest jobs · `=` default layout: forget the sizes you dragged (drag a card's bottom or right border to resize rows and columns) and leave Auto |
 | Jobs view | `j` move down · `k` move up · `g`/`home` first row · `G`/`end` last row · `^d`/`pgdn` half page down · `^u`/`pgup` half page up · `↵` job detail · `l` log viewer · `p` log in $PAGER · `^f` search recent jobs' logs · `x` action menu · `^k` cancel job / terminate task · `space` mark / unmark · `V` mark all / clear marks · `A` mark the whole array of this row (cancel / hold act on all of it) · `y` copy id · `Y` copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle · Y again = stdout path · `s` shell · `P` forward a port (TensorBoard, Jupyter …) to localhost · `c` connect host · `/` filter jobs · `f` next state preset · `o` next sort column · `O` reverse sort · `z` group by · `u` other users · `w` watch / unwatch (notify on start, end, GPU idle; marked rows too) |
 | GPUs view | `j` move down · `k` move up · `g`/`home` first row · `G`/`end` last row · `↵` owning job / task (or host) · `x` actions of the owning task · `^k` terminate the owning task · `c` connect host · `a` copy CUDA_VISIBLE_DEVICES for N free GPUs of this workstation · `o` next sort column · `O` reverse sort · `/` filter jobs (Jobs view) |
 | Job detail | `[` previous tab · `]` next tab · `o` stdout · `e` stderr · `f` other log files: pick one written under the job's workdir and follow it (one picked already: switch to it; on it: pick another) · `F` follow on / off · `l` full log viewer · `L` log viewer at the failure line (cause chip) · `n` the job that carries this one on (resubmitted as …) · `N` the bad ending this job resumes · `/` search the log (opens the log viewer) · `p` log in $PAGER · `r` refresh detail · `x` action menu · `^k` cancel / terminate · `s` shell · `c` connect host · `y` copy id · `Y` copy menu: o stdout · e stderr path · i id · h host:id · w workdir · s shell command · b support bundle · Y again = stdout path · `P` forward a port (TensorBoard, Jupyter …) to localhost · `w` watch / unwatch (notify on start, end, GPU idle) · `a` live readings: auto-refresh on / off (GPU / Procs tab) · `S` live readings: read this job's own GPUs with srun (asks first; one permanent sacct row) |

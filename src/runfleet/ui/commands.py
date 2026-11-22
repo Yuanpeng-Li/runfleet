@@ -85,6 +85,10 @@ class RunFleetCommands(Provider):
         yield "Fleet: roomy cards", partial(app.set_fleet_layout, "auto"), \
             "cards grow into a tall terminal: ranked jobs, GPU owners, free GPUs (ui.json)"
         yield "Fleet: compact cards", partial(app.set_fleet_layout, "compact"), "cards keep their summary size (ui.json)"
+        yield "Fleet: Auto layout on/off", partial(app.fleet_sizing, "auto"), \
+            "rows sized to what each card lists, 2 or 3 columns (key L, ui.json)"
+        yield "Fleet: default layout", partial(app.fleet_sizing, "reset"), \
+            "forget the dragged card sizes and leave Auto (key =)"
         yield "Action log", app.show_action_log, "results of this session's actions"
         yield "Notifications", app.show_notifications, "this session's alerts: failures, restarts, time low …, GPU watches"
         yield "Since you were away", app.action_digest, "what ended since your last visit (key D)"

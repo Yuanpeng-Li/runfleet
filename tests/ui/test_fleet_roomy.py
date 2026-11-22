@@ -397,3 +397,216 @@ async def test_a_resubmitted_failure_leaves_the_needs_you_picker_but_stays_on_it
         await pilot.pause(0.3)
         assert isinstance(app.screen, AttentionScreen)
         assert [str(e.key) for e in app.screen.entries] == ["vega:724999", "k2:2334999", "lyra:31327454"]
+
+
+# ---------------------------------------------------------------- scrolling lists, dragged sizes, Auto
+async def test_wheel_scrolls_a_list_that_does_not_fit_and_clicks_follow() -> None:
+    from textual import events
+
+    from runfleet.ui.screens.job_detail import JobDetailScreen
+
+    app = _app(persist_state=False)
+    async with app.run_test(size=(200, 40)) as pilot:
+        await pilot.pause(0.3)
+        panel = app.screen.query_one(FleetPanel)
+        assert panel.scrollable and panel.border_subtitle is not None and "↓" in str(panel.border_subtitle)
+        pinned = panel.shown_lines()[:3]
+        await pilot._post_mouse_events([events.MouseScrollDown], panel, offset=(10, 5))
+        await pilot._post_mouse_events([events.MouseScrollDown], panel, offset=(10, 5))
+        await pilot.pause()
+        assert panel.shown_lines()[:3] == pinned                      # the free part stays put …
+        assert panel._offset == 2 and "↑2" in str(panel.border_subtitle)   # … the activity rows move
+        assert app.screen.query_one("#fleet-cards").scroll_y == 0     # the page did not move
+        rows = panel.shown_lines()
+        row = next(r for r, i in enumerate(rows) if isinstance(panel.row_keys[i], JobKey))
+        key = panel.row_keys[rows[row]]
+        await pilot.click(panel, offset=(30, row + 1))
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, JobDetailScreen) and app.screen.key == key
+
+
+async def test_a_card_list_scrolls_under_its_summary() -> None:
+    app = _app(persist_state=False)
+    async with app.run_test(size=(172, 62)) as pilot:
+        await pilot.pause(0.3)
+        card = _card(app, "k2")
+        lines = [x.plain for x in card.lines]
+        card.show_lines(card.lines * 3, card.row_keys * 3, 10, pinned=5)    # three times the jobs, 10 rows
+        assert card.scrollable and card.shown_lines() == list(range(10))
+        card.focus()
+        await pilot.press("pagedown")
+        shown = card.shown_lines()
+        assert shown[:5] == [0, 1, 2, 3, 4] and shown[5] == 9 and card.lines[0].plain == lines[0]
+        assert card.scroll_lines(-99) and card.shown_lines() == list(range(10))
+        assert not card.scroll_lines(-1)                                  # at the top: the wheel goes to the page
+
+
+async def _drag(pilot: Any, widget: Any, start: tuple[int, int], end: tuple[int, int]) -> None:
+    from textual import events
+
+    await pilot.mouse_down(widget, offset=start)
+    await pilot._post_mouse_events([events.MouseMove], widget, offset=end, button=1)    # the button held
+    await pilot.mouse_up(widget, offset=end)
+    await pilot.pause(0.2)
+
+
+async def test_drag_a_border_resizes_rows_and_columns_and_is_kept(tmp_path: Any) -> None:
+    app = _app()
+    async with app.run_test(size=(172, 62)) as pilot:
+        await pilot.pause(0.3)
+        view = app.screen.query_one(FleetView)
+        before = view.plan
+        assert before is not None and before.tier == 1
+        k2 = _card(app, "k2")
+        h = k2.region.height
+        await _drag(pilot, k2, (5, h - 1), (5, h + 3))                 # the bottom border, 4 lines down
+        after = view.plan
+        assert after is not None and after.sizing == "custom"
+        assert after.heights[0] == before.heights[0] + 4 and after.heights[1] == before.heights[1] - 4
+        w = k2.region.width
+        await _drag(pilot, k2, (w - 1, 5), (w + 9, 5))                 # the right border, 10 cells right
+        assert view.plan is not None and view.plan.widths[0] == w + 10
+        assert _card(app, "k2").region.width == w + 10 and _card(app, "lyra").region.width == w + 10
+        assert view.plan.heights[0] == after.heights[0]                # the rows stay as dragged
+        saved = app.ui_state["fleet_sizes"]
+        assert "ncols" not in saved and "2" in saved["cols"] and "2x5" in saved["rows"]
+        assert fleet_layout.sizing_from(app.ui_state) == view.sizing
+        await pilot.press("equals_sign")
+        await pilot.pause(0.2)
+        assert view.plan == before and app.ui_state["fleet_sizes"] == {}
+
+
+async def test_a_press_on_a_border_that_does_not_move_selects_the_card() -> None:
+    app = _app(persist_state=False)
+    async with app.run_test(size=(172, 62)) as pilot:
+        await pilot.pause(0.3)
+        view = app.screen.query_one(FleetView)
+        vega = _card(app, "vega")
+        await pilot.click(vega, offset=(10, vega.region.height - 1))
+        await pilot.pause(0.2)
+        assert app.screen.focused is vega and view.plan is not None and view.plan.sizing == "default"
+
+
+async def test_auto_layout_toggles_and_a_drag_leaves_it() -> None:
+    app = _app(persist_state=False)
+    async with app.run_test(size=(200, 40)) as pilot:
+        await pilot.pause(0.3)
+        view = app.screen.query_one(FleetView)
+        assert view.plan is not None and view.plan.cols == 3
+        await pilot.press("L")
+        await pilot.pause(0.3)
+        auto = view.plan
+        assert auto is not None and auto.sizing == "auto" and app.ui_state["fleet_sizing"] == "auto"
+        for card in app.screen.query(HostCard):                       # every card shows all it lists
+            assert not card.scrollable, card.host
+        assert len(list(app.screen.query(HostCard))) and auto.cols == 2 and auto.wide
+        k2 = _card(app, "k2")
+        h = k2.region.height
+        await _drag(pilot, k2, (5, h - 1), (5, h + 1))
+        assert view.sizing.mode == "default" and view.plan is not None and view.plan.sizing == "custom"
+        assert view.plan.cols == 2 and view.plan.heights[0] == auto.heights[0] + 2   # from Auto's sizes
+        await pilot.press("L")
+        await pilot.pause(0.2)
+        assert view.plan.sizing == "auto"
+        await pilot.press("L")
+        await pilot.pause(0.2)
+        assert view.plan.sizing == "custom"                           # Auto off: the dragged sizes again
+
+
+async def test_a_scrolled_list_keeps_its_place_when_rows_arrive() -> None:
+    from rich.text import Text
+
+    app = _app(persist_state=False)
+    async with app.run_test(size=(172, 62)) as pilot:
+        await pilot.pause(0.3)
+        card = _card(app, "k2")
+        lines = [Text(f"row {i}") for i in range(30)]
+        keys: list[Any] = [None] * 5 + [JobKey("k2", str(i)) for i in range(5, 30)]
+        card.show_lines(lines, keys, 10, pinned=5)
+        card.scroll_lines(4)
+        before = [card.lines[i].plain for i in card.shown_lines()]
+        card.show_lines(lines[:5] + [Text("new")] + lines[5:], keys[:5] + [JobKey("k2", "new")] + keys[5:], 10, 5)
+        assert [card.lines[i].plain for i in card.shown_lines()] == before
+
+
+async def test_a_lost_release_ends_the_drag() -> None:
+    from textual import events
+
+    app = _app(persist_state=False)
+    async with app.run_test(size=(172, 62)) as pilot:
+        await pilot.pause(0.3)
+        view = app.screen.query_one(FleetView)
+        k2 = _card(app, "k2")
+        h = k2.region.height
+        await pilot.mouse_down(k2, offset=(5, h - 1))
+        await pilot._post_mouse_events([events.MouseMove], k2, offset=(5, h + 2), button=1)
+        await pilot.pause(0.1)
+        dragged = view.plan
+        assert dragged is not None and dragged.sizing == "custom" and not app.screen.selections
+        await pilot._post_mouse_events([events.MouseMove], k2, offset=(5, h - 6))   # no button: released elsewhere
+        await pilot._post_mouse_events([events.MouseMove], k2, offset=(5, h - 8))
+        await pilot.pause(0.1)
+        assert view.plan == dragged and app.mouse_captured is None
+
+
+async def test_a_row_drag_does_not_pin_the_column_count() -> None:
+    app = _app(persist_state=False)
+    async with app.run_test(size=(200, 62)) as pilot:
+        await pilot.pause(0.3)
+        view = app.screen.query_one(FleetView)
+        k2 = _card(app, "k2")
+        h = k2.region.height
+        await _drag(pilot, k2, (5, h - 1), (5, h + 2))
+        assert view.sizing.ncols is None
+        await pilot.resize_terminal(172, 62)
+        await pilot.pause(0.3)
+        assert view.plan is not None and view.plan.cols == 2 and view.plan.wide
+
+
+async def test_the_anchor_tells_rows_of_one_job_apart() -> None:
+    from rich.text import Text
+
+    app = _app(persist_state=False)
+    async with app.run_test(size=(172, 62)) as pilot:
+        await pilot.pause(0.3)
+        card = _card(app, "k2")
+        job = JobKey("k2", "1")
+        lines = [Text(f"row {i}") for i in range(30)]
+        keys: list[Any] = [None] * 5 + [job if i in (6, 12) else JobKey("k2", f"x{i}") for i in range(5, 30)]
+        card.show_lines(lines, keys, 10, pinned=5)
+        card.scroll_lines(7)                                         # row 12 (the job's older row) on top
+        before = card.shown_lines()
+        card.show_lines(lines, keys, 10, pinned=5)                   # the same lines again: nothing moves
+        assert card.shown_lines() == before
+
+
+async def test_double_click_on_a_border_opens_the_host() -> None:
+    from runfleet.ui.screens.host_detail import HostDetailScreen
+
+    app = _app(persist_state=False)
+    async with app.run_test(size=(172, 62)) as pilot:
+        await pilot.pause(0.3)
+        vega = _card(app, "vega")
+        await pilot.double_click(vega, offset=(10, vega.region.height - 1))
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, HostDetailScreen)
+        assert sum(isinstance(s, HostDetailScreen) for s in app.screen_stack) == 1      # opened once
+
+
+async def test_double_click_on_a_border_through_the_app_opens_the_host() -> None:
+    """Through App.on_event (where Textual makes the Click and counts the chain), not pilot.double_click."""
+    from textual import events
+
+    from runfleet.ui.screens.host_detail import HostDetailScreen
+
+    app = _app(persist_state=False)
+    async with app.run_test(size=(172, 62)) as pilot:
+        await pilot.pause(0.3)
+        vega = _card(app, "vega")
+        x, y = vega.region.x + 10, vega.region.bottom - 1
+        for _ in range(2):
+            for kind in (events.MouseDown, events.MouseUp):
+                app.post_message(kind(None, x, y, 0, 0, 1, False, False, False, screen_x=x, screen_y=y))
+                await pilot.pause(0.05)
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, HostDetailScreen)

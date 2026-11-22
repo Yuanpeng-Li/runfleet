@@ -196,20 +196,50 @@ class Plan:
     wide: bool = False
     heights: tuple[int, ...] = ()            # content rows per grid row (T1)
     panel: Panel | None = None
+    widths: tuple[int, ...] = ()             # cells per column, borders included (T1, dragged); () = equal columns
+    sizing: Literal["default", "custom", "auto"] = "default"
+    width: int = 0                           # the view width planned for
+
+    def col_inner(self, col: int) -> int:
+        """Text width inside a card of column ``col``."""
+        return self.widths[col] - 4 if self.widths else self.inner
+
+    def span_inner(self, first: int, span: int) -> int:
+        """Text width inside the panel spanning ``span`` columns from ``first``."""
+        if self.widths:
+            return max(30, sum(self.widths[first:first + span]) - 4)
+        return max(30, ((self.width - 1) * span) // self.cols - 4)
+
+    @property
+    def row_count(self) -> int:
+        """Grid rows, the full-width panel row under the grid included."""
+        return len(self.heights) + (1 if self.panel is not None and self.panel.below else 0)
+
+    def outer_heights(self) -> list[int]:
+        """Rows on screen (borders included), the panel row under the grid last."""
+        out = [h + 2 for h in self.heights]
+        if self.panel is not None and self.panel.below:
+            out.append(self.panel.rows + 2)
+        return out
 
 
-def plan(width: int, height: int, shapes: Sequence[Shape], enabled: bool = True) -> Plan:
-    """Row heights for a view of ``width`` × ``height`` (see the module docstring)."""
+def plan(width: int, height: int, shapes: Sequence[Shape], enabled: bool = True, *, cols: int | None = None,
+         widths: Sequence[int] | None = None, rows_custom: Mapping[str, Sequence[float]] | None = None) -> Plan:
+    """Row heights for a view of ``width`` × ``height`` (see the module docstring). ``cols``: the column count (default
+    :func:`columns_for`); ``widths``: dragged column widths (:func:`col_widths`; the shapes were measured at them);
+    ``rows_custom``: dragged row heights by :func:`row_key` (fractions of the view height), used at T1 when one fits
+    this grid."""
     if width < CARDS_MIN_WIDTH:
         return Plan("table")
-    cols = columns_for(width)
-    inner = inner_width(width, cols)
+    cols = cols or columns_for(width)
+    widths = tuple(widths) if widths and len(widths) == cols else ()
+    inner = min(w - 4 for w in widths) if widths else inner_width(width, cols)
     rows = [list(shapes[i:i + cols]) for i in range(0, len(shapes), cols)]
     n_rows = len(rows)
     base = [max(s.t0 for s in row) for row in rows]
     spare = height - sum(b + 2 for b in base)
     if not (enabled and rows and height >= ROOMY_MIN_H and inner >= ROOMY_MIN_INNER and spare >= LIST_MIN * n_rows):
-        return Plan("cards", 0, cols, inner)
+        return Plan("cards", 0, cols, inner_width(width, cols))
     orphan = len(shapes) % cols != 0
     cap = [max(s.t1 + s.cap for s in row) for row in rows]
     if orphan:
@@ -226,7 +256,263 @@ def plan(width: int, height: int, shapes: Sequence[Shape], enabled: bool = True)
         panel = Panel(cols - len(shapes) % cols, h[-1])
     elif not orphan and spare >= PANEL_ROW_MIN + 2:
         panel = Panel(cols, spare - 2, below=True)
-    return Plan("cards", 1, cols, inner, inner >= WIDE_INNER, tuple(h), panel)
+    out = Plan("cards", 1, cols, inner, inner >= WIDE_INNER, tuple(h), panel, widths, width=width)
+    fracs = (rows_custom or {}).get(row_key(cols, len(shapes)))
+    if fracs is not None and len(fracs) == n_rows:            # dragged without a panel row under the grid
+        if panel is not None and panel.below:
+            out = replace(out, panel=None)
+        return with_rows(out, height, fracs)
+    if fracs is not None and len(fracs) == n_rows + 1 and not orphan:   # with one (Auto may add it)
+        if panel is None:
+            out = replace(out, panel=Panel(cols, PANEL_ROW_MIN, below=True))
+        return with_rows(out, height, fracs)
+    return replace(out, sizing="custom") if widths else out
+
+
+# ---------------------------------------------------------------- sizes: dragged borders, Auto
+MIN_ROW = 3                      # content rows a row keeps (a drag, Auto)
+MIN_COL = ROOMY_MIN_INNER + 4    # cells a dragged column keeps: the card stays roomy
+AUTO_COLS = (2, 3)               # column counts Auto picks from
+AUTO_SWITCH = 3                  # lines another column count must save before Auto switches to it
+SIZING_MODES = ("default", "auto")
+
+
+@dataclass(frozen=True, slots=True)
+class Sizing:
+    """ui.json ``fleet_sizing`` (``default`` or ``auto``) and ``fleet_sizes``, the dragged borders: ``ncols`` the
+    column count they were dragged at, ``cols`` column fractions per column count, ``rows`` row fractions of the view
+    height per :func:`row_key`. ``=`` forgets the drags; a drag leaves Auto with the sizes Auto had."""
+    mode: Literal["default", "auto"] = "default"
+    ncols: int | None = None
+    cols: Mapping[int, tuple[float, ...]] = field(default_factory=dict)
+    rows: Mapping[str, tuple[float, ...]] = field(default_factory=dict)
+
+    @property
+    def dragged(self) -> bool:
+        return bool(self.ncols or self.cols or self.rows)
+
+    def to_state(self) -> dict[str, object]:
+        """The ``fleet_sizes`` value (JSON)."""
+        out: dict[str, object] = {}
+        if self.ncols:
+            out["ncols"] = self.ncols
+        if self.cols:
+            out["cols"] = {str(k): [round(f, 4) for f in v] for k, v in self.cols.items()}
+        if self.rows:
+            out["rows"] = {k: [round(f, 4) for f in v] for k, v in self.rows.items()}
+        return out
+
+
+def _fracs(raw: object) -> tuple[float, ...] | None:
+    if not isinstance(raw, list) or not raw:
+        return None
+    if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and 0 < x <= 1 for x in raw):
+        return None
+    return tuple(float(x) for x in raw)
+
+
+def sizing_from(ui_state: object) -> Sizing:
+    """ui.json ``fleet_sizing`` / ``fleet_sizes``, tolerant: anything malformed is left out."""
+    if not isinstance(ui_state, Mapping):
+        return Sizing()
+    mode = ui_state.get("fleet_sizing")
+    raw = ui_state.get("fleet_sizes")
+    raw = raw if isinstance(raw, Mapping) else {}
+    ncols = raw.get("ncols")
+    cols: dict[int, tuple[float, ...]] = {}
+    if isinstance(raw.get("cols"), Mapping):
+        for k, v in raw["cols"].items():
+            f = _fracs(v)
+            if f is not None and isinstance(k, str) and re.fullmatch(r"[1-9]", k) and len(f) == int(k):
+                cols[int(k)] = f
+    rows: dict[str, tuple[float, ...]] = {}
+    if isinstance(raw.get("rows"), Mapping):
+        for k, v in raw["rows"].items():
+            f = _fracs(v)
+            if f is not None and isinstance(k, str):
+                rows[k] = f
+    return Sizing("auto" if mode == "auto" else "default",
+                  ncols if isinstance(ncols, int) and not isinstance(ncols, bool) and 1 <= ncols <= 6 else None,
+                  cols, rows)
+
+
+def row_key(cols: int, n_cards: int) -> str:
+    """The grid dragged row heights belong to: ``3x5`` (columns × cards). Its fractions are one per card row, plus one
+    for the panel row under a full grid when it had one."""
+    return f"{cols}x{n_cards}"
+
+
+def split(total: int, weights: Sequence[float], mins: Sequence[int]) -> list[int]:
+    """``total`` cells shared by ``weights`` (largest remainder), each at least its ``mins`` entry (when they all fit)."""
+    n = len(weights)
+    if n == 0:
+        return []
+    if sum(mins) >= total:
+        return list(mins)
+    w = [max(0.0, x) for x in weights]
+    s = sum(w) or 1.0
+    exact = [total * x / s for x in w]
+    out = [max(m, math.floor(e)) for e, m in zip(exact, mins, strict=True)]
+    order = sorted(range(n), key=lambda i: (-(exact[i] - math.floor(exact[i])), i))
+    k = 0
+    while sum(out) < total:                       # remainders first, then round-robin
+        out[order[k % n]] += 1
+        k += 1
+    while sum(out) > total:                       # a minimum pushed it over: take from the largest above its minimum
+        i = max((i for i in range(n) if out[i] > mins[i]), key=lambda i: out[i] - mins[i])
+        out[i] -= 1
+    return out
+
+
+def col_widths(width: int, cols: int, fracs: Sequence[float] | None) -> tuple[int, ...] | None:
+    """Dragged column widths in cells (borders included, the scrollbar gutter left out); None: equal columns (none
+    dragged at this count, or the view too narrow for every column to stay :data:`MIN_COL` wide)."""
+    total = width - 1
+    if not fracs or len(fracs) != cols or cols * MIN_COL > total:
+        return None
+    return tuple(split(total, fracs, [MIN_COL] * cols))
+
+
+def equal_widths(width: int, cols: int) -> tuple[int, ...]:
+    """Equal columns in cells (what a drag starts from), the odd cells on the right as Textual draws ``1fr``."""
+    return tuple(reversed(split(width - 1, [1.0] * cols, [1] * cols)))
+
+
+def with_rows(p: Plan, height: int, fracs: Sequence[float]) -> Plan:
+    """``p`` with its rows (the panel row under the grid included) sized by ``fracs`` of the view ``height``."""
+    total = min(height, max(1, round(height * sum(fracs))))
+    outer = split(total, fracs, [MIN_ROW + 2] * len(fracs))
+    return _with_outer(p, outer, "custom")
+
+
+def _with_outer(p: Plan, outer: Sequence[int], sizing: Literal["default", "custom", "auto"]) -> Plan:
+    n = len(p.heights)
+    heights = tuple(h - 2 for h in outer[:n])
+    panel = p.panel
+    if panel is not None:
+        panel = replace(panel, rows=outer[n] - 2) if panel.below else replace(panel, rows=heights[-1])
+    return replace(p, heights=heights, panel=panel, sizing=sizing)
+
+
+def drag_rows(outer: Sequence[int], boundary: int, delta: int) -> list[int]:
+    """Row heights after the border under row ``boundary`` moved ``delta`` lines (the row below gives or takes)."""
+    out = list(outer)
+    a, b = out[boundary], out[boundary + 1]
+    lo = MIN_ROW + 2
+    new = max(lo, min(a + b - lo, a + delta))
+    out[boundary], out[boundary + 1] = new, a + b - new
+    return out
+
+
+def drag_cols(widths: Sequence[int], boundary: int, delta: int) -> list[int]:
+    """Column widths after the border right of column ``boundary`` moved ``delta`` cells."""
+    out = list(widths)
+    a, b = out[boundary], out[boundary + 1]
+    new = max(MIN_COL, min(a + b - MIN_COL, a + delta))
+    out[boundary], out[boundary + 1] = new, a + b - new
+    return out
+
+
+def list_need(ranked: Sequence[Ranked]) -> int:
+    """List rows that show every job of a card with nothing hidden: array siblings folded (:func:`select`)."""
+    if isinstance(ranked, RankedList) and ranked.need is not None:
+        return ranked.need
+    need = len(_collapse(list(ranked))) if ranked else 0
+    if isinstance(ranked, RankedList):
+        ranked.need = need
+    return need
+
+
+def full_rows(ranked: Sequence[Ranked], visible: int, cap: int = 400) -> int:
+    """List rows to render for a card whose list scrolls: the rows on screen, or more when the jobs need them (+ 1:
+    the list region may open with an error or ``host2`` line). Past ``cap`` jobs the last row says ``+N more``."""
+    if len(ranked) + 1 <= visible:
+        return max(visible, 0)
+    return max(visible, min(cap, list_need(ranked)) + 1)
+
+
+def _fill(avail: int, lo: Sequence[int], hi: Sequence[int], sink: int | None) -> list[int] | None:
+    """Water-filling: each row starts at ``lo``; lines go one at a time to the lowest row still under its ``hi``
+    (top row first on ties), so short lists are shown whole and long ones share what is left evenly. Lines left when
+    every row has what it needs go to ``sink`` (the fleet panel's row), else round-robin from the top. None: the
+    minimums do not fit."""
+    h = list(lo)
+    spare = avail - sum(h)
+    if spare < 0:
+        return None
+    while spare:
+        want = [r for r in range(len(h)) if h[r] < hi[r]]
+        if not want:
+            break
+        level = min(h[r] for r in want)
+        for r in want:
+            if spare and h[r] == level:
+                h[r] += 1
+                spare -= 1
+    if spare and sink is not None:
+        h[sink] += spare
+    elif spare:
+        r = 0
+        while spare:
+            h[r % len(h)] += 1
+            spare -= 1
+            r += 1
+    return h
+
+
+def auto_plan(width: int, height: int, shape_at: Callable[[int, int], Shape], demands: Sequence[int],
+              panel_demand: int, enabled: bool = True, keep: int | None = None) -> Plan | None:
+    """Auto (``L``): rows sized to what each card has to show and the column count (2 or 3) that hides the fewest
+    lines. ``shape_at(i, inner)``: card ``i``'s shape at a card width; ``demands[i]``: the content lines it needs to show
+    everything (summary + every listed job); ``panel_demand``: the fleet panel's. Each candidate starts from the
+    default plan (same gate, same panel placement, plus a panel row under a full grid when the cards leave
+    :data:`PANEL_ROW_MIN` + 2 lines); every row first gets its smaller of what it needs and its summary plus
+    :data:`LIST_MIN` rows, then the rest is water-filled (:func:`_fill`), leftovers to the panel. Score: lines
+    still hidden, plus 4 per card too narrow for the wide row template; ``keep`` (the column count on screen) wins
+    unless another hides :data:`AUTO_SWITCH` lines fewer, so the columns do not flip on a small change; then ties
+    keep :func:`columns_for`. None: no candidate reaches T1."""
+    best: tuple[tuple[float, int], Plan] | None = None
+    preferred = columns_for(width)
+    n = len(demands)
+    for cols in AUTO_COLS:
+        inner = inner_width(width, cols)
+        if inner < ROOMY_MIN_INNER:
+            continue
+        shapes = [shape_at(i, inner) for i in range(n)]
+        base = plan(width, height, shapes, enabled, cols=cols)
+        if base.tier < 1:
+            continue
+        rows = [list(range(i, min(i + cols, n))) for i in range(0, n, cols)]
+        orphan = base.panel is not None and not base.panel.below
+        p_need = max(PANEL_MIN, min(PANEL_CAP, panel_demand))
+        lo: list[int] = []
+        hi: list[int] = []
+        for r, idx in enumerate(rows):
+            need = max(max(demands[i], shapes[i].t0 if not shapes[i].cap else 0) for i in idx)
+            floor = max(shapes[i].t1 + LIST_MIN if shapes[i].cap else shapes[i].t0 for i in idx)
+            if orphan and r == len(rows) - 1:
+                need, floor = max(need, p_need), max(floor, PANEL_MIN)
+            lo.append(max(MIN_ROW, min(need, floor)))
+            hi.append(max(lo[-1], need))
+        avail = height - 2 * len(rows)
+        sink: int | None = len(rows) - 1 if orphan else None
+        if base.panel is None and avail - sum(hi) >= PANEL_ROW_MIN + 2:    # the cards leave room: a panel row
+            base = replace(base, panel=Panel(cols, PANEL_ROW_MIN, below=True))
+        if base.panel is not None and base.panel.below:
+            lo.append(PANEL_ROW_MIN)
+            hi.append(max(PANEL_ROW_MIN, p_need))
+            avail -= 2
+            sink = len(rows)
+        h = _fill(avail, lo, hi, sink)
+        if h is None:
+            continue
+        got = _with_outer(base, [x + 2 for x in h], "auto")
+        hidden = sum(max(0, demands[i] - got.heights[r]) for r, idx in enumerate(rows) for i in idx)
+        narrow = n if inner < WIDE_INNER else 0
+        score = (hidden + 4 * narrow - (AUTO_SWITCH if cols == keep else 0), 0 if cols == preferred else 1)
+        if best is None or score < best[0]:
+            best = (score, got)
+    return best[1] if best is not None else None
 
 
 # ---------------------------------------------------------------- ranking
@@ -251,6 +537,7 @@ class RankedList(list[Ranked]):
     def __init__(self, items: Iterable[Ranked] = ()) -> None:
         super().__init__(items)
         self.picks: dict[int, tuple[list[Ranked], list[Ranked]]] = {}
+        self.need: int | None = None             # list_need, once per ranking
 
 
 def _age_s(job: Job, now: datetime) -> float | None:

@@ -611,6 +611,20 @@ class RunFleetApp(App[None]):
         self.toast("Fleet: roomy cards when the terminal has room" if choice != "compact" else "Fleet: compact cards",
                    timeout=3)
 
+    def fleet_sizing(self, what: str) -> None:
+        """Palette › Fleet: Auto layout on/off (``auto``) or the default layout (``reset``), as ``L`` / ``=``."""
+        from runfleet.ui.screens.main import MainScreen
+        from runfleet.ui.widgets.fleet_view import FleetView
+
+        for screen in self.screen_stack:
+            if isinstance(screen, MainScreen):
+                view = screen.query_one(FleetView)
+                if what == "auto":
+                    view.action_toggle_auto_layout()
+                else:
+                    view.action_reset_layout()
+                return
+
     def open_update(self) -> None:
         """Palette › Update RunFleet: Settings › About on the version row, ready to update (or to check first)."""
         from runfleet.ui.screens.settings import SettingsScreen
