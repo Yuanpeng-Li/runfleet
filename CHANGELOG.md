@@ -9,7 +9,16 @@ All notable changes to this project are documented here. The format follows
 - **A project page with an interactive demo:** https://yuanpeng-li.github.io/runfleet/ replays screens recorded from
   the demo fleet in the browser (`scripts/web_demo.py` records them).
 
+- **Resize the Fleet cards and let Auto lay them out.** Drag a card's bottom border to give its row more or fewer
+  lines, or its right border to widen its column; the sizes are remembered. `=` goes back to the default sizes. `L`
+  turns on Auto: each row gets what its cards need to list all their jobs (a card with two jobs no longer takes as
+  much room as one with twenty), the rest goes to the fleet panel, and it picks 2 or 3 columns, whichever hides the
+  fewest jobs. Also in the palette (*Fleet: Auto layout on/off*, *Fleet: default layout*).
+
 ### Changed
+- **A card's job list scrolls instead of stopping at `+N more`.** When a card (or the fleet panel's *what changed*)
+  has more lines than its box, turn the mouse wheel over it, or press `pgdn` / `pgup` for the selected card; the
+  summary lines stay put and the bottom border shows how many lines are above and below (`↑2 ↓7`).
 - The demo fleet's partitions are now called `gpu-pooling`, `cpu-pooling` and `flex-gpu` (`flex-gpuxl`, …); examples
   and older entries below use the new names.
 

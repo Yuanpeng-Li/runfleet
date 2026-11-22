@@ -45,8 +45,10 @@ def panel_lines(hosts: Mapping[str, HostState], now: datetime, *, rows: int, wid
 def panel_body(hosts: Mapping[str, HostState], now: datetime, *, rows: int, width: int, wide: bool, window: float,
                history: Iterable[JobEvent] = (), digest_since: datetime | None = None,
                memo: fleet_layout.Memo | None = None, rate: float = 1.0,
-               watch_events: Iterable[WatchEvent] = ()) -> tuple[list[Text], list[JobKey | str | None]]:
-    """The panel body in exactly ``rows`` lines: the free part (at most half), then the activity part; and what each
+               watch_events: Iterable[WatchEvent] = (), scroll: bool = False,
+               ) -> tuple[list[Text], list[JobKey | str | None]]:
+    """The panel body in exactly ``rows`` lines (``scroll``: at least ``rows``, every activity row of the window
+    after the free part, for a panel that scrolls): the free part (at most half), then the activity part; and what each
     line opens on a click: a job (activity rows), a free GPU type key or :data:`fleet_layout.ALL_FREE` (the free
     part), None (the count line, padding).
 
@@ -91,12 +93,18 @@ def panel_body(hosts: Mapping[str, HostState], now: datetime, *, rows: int, widt
                                     expires=lambda v: v[2])
     colors = {name: theme.host_color(state.config, i) for i, (name, state) in enumerate(hosts.items())}
     keys: list[JobKey | str | None] = list(free_keys)
-    lines, act_keys = fleet_layout.activity_region(acts, counts, head, rows - len(out), width, wide=wide,
+    n_act = rows - len(out)
+    if scroll:
+        n_act = min(max(n_act, 1 + len(acts)), 1 + SCROLL_CAP)
+    lines, act_keys = fleet_layout.activity_region(acts, counts, head, n_act, width, wide=wide,
                                                    host_style=lambda h: colors.get(h, ""), now=now)
     out += lines
     keys += act_keys
     pad = max(0, rows - len(out))
     return out + [Text("")] * pad, keys + [None] * pad
+
+
+SCROLL_CAP = 200          # activity rows a scrolling panel holds (newest first; the Notifications list has them all)
 
 
 class FleetPanel(RowLinks, can_focus=False):
@@ -119,13 +127,14 @@ class FleetPanel(RowLinks, can_focus=False):
         self.border_title = Text(fleet_layout.PANEL_TITLE, style=theme.muted())
 
     def set_lines(self, lines: Sequence[Text], span: int, rows: int,
-                  keys: Sequence[JobKey | str | None] = ()) -> None:
+                  keys: Sequence[JobKey | str | None] = (), pinned: int = 0) -> None:
+        """``rows`` on screen; more ``lines`` than that scroll under the first ``pinned`` (the free part)."""
         self.border_title = Text(fleet_layout.PANEL_TITLE, style=theme.muted())
         if self.styles.column_span != span:
             self.styles.column_span = span
         if self.styles.height is None or self.styles.height.value != rows + 2:
             self.styles.height = rows + 2
-        self.show_lines(list(lines)[:rows], list(keys)[:rows], rows)
+        self.show_lines(list(lines), list(keys), rows, pinned)
 
     def on_click(self, event: events.Click) -> None:
         key = self.key_at(event)

@@ -956,3 +956,143 @@ def test_packed_others_never_cut_the_more_count_after_a_wide_item() -> None:
     lines = fl.free_lines(fl.FreeGPUs(types, (), None), {"H200"}, 3, 52, wide=False)
     assert len(lines) == 3 and lines[2].plain.rstrip().endswith("+1 more"), lines[2].plain
     assert all(x.cell_len <= 52 for x in lines)
+
+
+# ---------------------------------------------------------------- sizes: dragged borders, Auto
+def test_split_keeps_the_total_and_the_minimums() -> None:
+    assert fl.split(100, [0.3, 0.7], [5, 5]) == [30, 70]
+    assert fl.split(10, [0.01, 0.99], [5, 5]) == [5, 5]
+    assert fl.split(7, [1, 1, 1], [1, 1, 1]) == [3, 2, 2]                # remainders top first
+    got = fl.split(199, [0.1, 0.3, 0.6], [56, 56, 56])
+    assert sum(got) == 199 and min(got) >= 56
+
+
+def test_col_widths_need_room_for_every_column() -> None:
+    assert fl.col_widths(200, 3, None) is None
+    assert fl.col_widths(200, 3, (0.5, 0.5)) is None                     # dragged at another column count
+    assert fl.col_widths(150, 3, (0.2, 0.3, 0.5)) is None                # 3 × 56 does not fit
+    w = fl.col_widths(200, 2, (0.4, 0.6))
+    assert w is not None and sum(w) == 199 and w[0] < w[1]
+
+
+def test_sizing_from_ui_json_is_tolerant() -> None:
+    assert fl.sizing_from(None) == fl.Sizing()
+    assert fl.sizing_from({"fleet_sizing": "bogus", "fleet_sizes": [1]}) == fl.Sizing()
+    s = fl.sizing_from({"fleet_sizing": "auto", "fleet_sizes": {
+        "ncols": 3, "cols": {"3": [0.2, 0.3, 0.5], "2": [1.0], "x": [0.5, 0.5]},
+        "rows": {"3x2": [0.5, 0.5], "2x3": ["a"], "2x2": [0.5, 2.0]}}})
+    assert s == fl.Sizing("auto", 3, {3: (0.2, 0.3, 0.5)}, {"3x2": (0.5, 0.5)})
+    assert fl.sizing_from(json.loads(json.dumps({"fleet_sizes": s.to_state(), "fleet_sizing": s.mode}))) == s
+    assert not fl.Sizing().dragged and s.dragged
+
+
+def test_drag_trades_with_the_neighbour_and_keeps_minimums() -> None:
+    assert fl.drag_rows([16, 17, 14], 0, 3) == [19, 14, 14]
+    assert fl.drag_rows([16, 17, 14], 0, 99) == [33 - fl.MIN_ROW - 2, fl.MIN_ROW + 2, 14]
+    assert fl.drag_rows([16, 17, 14], 1, -99) == [16, fl.MIN_ROW + 2, 26]
+    assert fl.drag_cols([85, 86], 0, -10) == [75, 96]
+    assert fl.drag_cols([85, 86], 0, -60) == [fl.MIN_COL, 171 - fl.MIN_COL]
+
+
+def test_dragged_rows_fill_the_view_by_their_fractions() -> None:
+    h = view_h(62)
+    base = plan(172, h, DEMO)
+    key = fl.row_key(2, 5)
+    p = plan(172, h, DEMO, rows_custom={key: (0.5, 0.25, 0.25)})
+    assert p.sizing == "custom" and sum(p.outer_heights()) == h
+    assert p.heights[0] > base.heights[0] and p.panel is not None and p.panel.rows == p.heights[-1]
+    assert plan(172, h, DEMO, rows_custom={"2x4": (0.3, 0.3, 0.4)}) == base     # another grid: not used
+    assert plan(172, h, DEMO, rows_custom={key: (0.5, 0.5)}) == base            # wrong length: not used
+
+
+def test_dragged_columns_give_each_column_its_width() -> None:
+    w = fl.col_widths(172, 2, (0.4, 0.6))
+    assert w is not None
+    p = plan(172, view_h(62), DEMO, widths=w)
+    assert p.tier == 1 and p.widths == w and p.sizing == "custom"
+    assert (p.col_inner(0), p.col_inner(1)) == (w[0] - 4, w[1] - 4) and p.span_inner(1, 1) == w[1] - 4
+
+
+def test_full_rows_show_every_job() -> None:
+    _cfg, states = build_world()
+    k2 = next(s for s in states if s.config.name == "k2")
+    ranked = fl.rank_slurm(k2.snapshot.jobs.values(), T0, DAY)
+    n = len(ranked)
+    assert fl.full_rows(ranked, n + 5) == n + 5                         # it fits: the rows on screen
+    assert fl.full_rows(ranked, 2) == fl.list_need(ranked) + 1           # + 1: an error / host2 line
+    shown, hidden = fl.select(ranked, fl.full_rows(ranked, 2) - 1)
+    assert not hidden
+
+
+def test_auto_gives_rows_what_their_cards_need() -> None:
+    h = view_h(62)
+    demands = [8, 30, 6, 7, 3]
+    p = fl.auto_plan(172, h, lambda i, inner: DEMO[i], demands, panel_demand=10)
+    assert p is not None and p.sizing == "auto" and p.tier == 1
+    assert sum(p.outer_heights()) == h
+    assert p.heights[0] == 30                          # the long list is shown whole
+    assert p.heights[1] < p.heights[0]                 # short lists get no more than they need …
+    assert p.panel is not None and p.panel.rows == p.heights[-1]   # … the rest goes to the panel
+
+
+def test_auto_shares_evenly_when_everything_does_not_fit() -> None:
+    h = view_h(40)
+    p = fl.auto_plan(120, h, lambda i, inner: DEMO[i], [40, 40, 40, 40, 3], panel_demand=30)
+    assert p is not None and sum(p.outer_heights()) == h
+    assert max(p.heights) - min(p.heights) <= 1
+
+
+def test_auto_prefers_wide_columns_and_sticks_to_its_choice() -> None:
+    shape = lambda i, inner: DEMO[i]                    # noqa: E731
+    p = fl.auto_plan(200, view_h(42), shape, [9, 9, 8, 8, 3], panel_demand=10)
+    assert p is not None and p.cols == 2 and p.wide    # 3 columns would lose the wide row template
+    p3 = fl.auto_plan(260, view_h(42), shape, [9, 9, 8, 8, 3], panel_demand=10)
+    assert p3 is not None and p3.cols == 3             # wide enough either way: columns_for
+    kept = fl.auto_plan(260, view_h(42), shape, [9, 9, 8, 8, 3], panel_demand=10, keep=2)
+    assert kept is not None and kept.cols == 2
+    assert fl.auto_plan(172, fl.ROOMY_MIN_H - 1, shape, [9] * 5, 10) is None
+
+
+def test_auto_adds_a_panel_row_under_a_full_grid_with_room() -> None:
+    idle = Shape(9, 8, fl.SLURM_LIST_CAP, "slurm", 4)
+    p = fl.auto_plan(150, 50, lambda i, inner: idle, [9, 9, 9, 9], panel_demand=20)
+    assert p is not None and p.panel is not None and p.panel.below
+    assert p.heights == (9, 9) and p.panel.rows == 50 - 2 * 11 - 2     # the cards keep what they need
+
+
+def test_rows_dragged_with_autos_panel_row_keep_it() -> None:
+    idle = Shape(9, 8, fl.SLURM_LIST_CAP, "slurm", 4)
+    four = [idle] * 4
+    assert plan(150, 50, four).panel is None                          # the default plan has no panel row …
+    p = plan(150, 50, four, rows_custom={"2x4": (12 / 50, 9 / 50, 29 / 50)})
+    assert p.sizing == "custom" and p.heights == (10, 7)               # … the rows dragged in Auto bring it back
+    assert p.panel is not None and p.panel.below and p.panel.rows == 27
+
+
+def test_sizing_from_ignores_odd_column_keys() -> None:
+    assert fl.sizing_from({"fleet_sizes": {"cols": {"²": [0.5, 0.5], "02": [0.5, 0.5], "2": [0.4, 0.6]}}}).cols == {
+        2: (0.4, 0.6)}
+
+
+def test_a_later_drag_replaces_the_earlier_one_of_the_same_grid() -> None:
+    idle = Shape(9, 8, fl.SLURM_LIST_CAP, "slurm", 4)
+    four = [idle] * 4
+    p = plan(150, 50, four, rows_custom={"2x4": (25 / 50, 25 / 50)})          # dragged without the panel row
+    assert p.panel is None and p.heights == (23, 23)
+    three = plan(150, 80, [idle] * 3, rows_custom={"2x3": (0.5, 0.5)})          # the orphan cell keeps its panel
+    assert three.panel is not None and not three.panel.below
+    assert plan(150, 80, four, rows_custom={"2x3": (0.5, 0.5)}).panel is not None   # a host added: not those sizes
+
+
+def test_list_need_is_folded_once_per_ranking(monkeypatch: pytest.MonkeyPatch) -> None:
+    _cfg, states = build_world()
+    k2 = next(s for s in states if s.config.name == "k2")
+    ranked = fl.rank_slurm(k2.snapshot.jobs.values(), T0, DAY)
+    calls = []
+    real = fl._collapse
+    monkeypatch.setattr(fl, "_collapse", lambda items: calls.append(1) or real(items))
+    assert fl.list_need(ranked) == fl.list_need(ranked) and len(calls) == 1
+
+
+def test_equal_widths_match_textual() -> None:
+    assert fl.equal_widths(172, 2) == (85, 86)                 # 1fr 1fr of 171 cells

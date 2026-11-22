@@ -4367,7 +4367,9 @@ exceeds what is left (97 SU)` and an exhausted account `no SU left`, both error-
     estimated start, then failures that were resubmitted (§5.2.12, `→ <id> <ST>`); workstation: fresh failures, own running with a hint, own running by GPUs, other users' tasks,
     older failures; CD/CA never, a plain EX task is no failure; ties by job id). Shown grouped failed / running /
     pending (others); with more candidates than rows, array siblings of rank 4/5 fold (`orb-sweep [3-4] ×2`), then
-    `rows − 1` rows and `+N more · R a, next ends in X · PD b · tab: Jobs`. Wide template (inner ≥ 72): label 10 |
+    `rows − 1` rows and `+N more · R a, next ends in X · PD b · tab: Jobs`; but a card renders every row it lists
+    (`fleet_layout.full_rows`: the rows on screen, or the folded list + 1 when longer; `+N more` only past 400) and
+    the list scrolls (below). Wide template (inner ≥ 72): label 10 |
     badge 4 | name inner − 55 | detail 20 | GPU% 6 | time 11; narrow: badge 4 | name inner − 34 | detail 16 (running:
     GPUs 9, a space, GPU% 6) | time 11, so `20h39m left` never moves the GPU% column. Folded array tasks are listed in
     task order (`[3,5,12]`). Time cells change once a minute (`<1m`, `33m left`, `2d19h left`, `5h20m up`, `in 35m`, `overdue`, `3h ago`).
@@ -4413,6 +4415,35 @@ exceeds what is left (97 SU)` and an exhausted account `no SU left`, both error-
     in the array size). A `fleet_layout.Memo` keeps the panel's scans: the node scan per host until its
     nodes/partitions change, the own-job type scan and the ended-job list until its jobs change, and the activity rows
     until then, a new alert or the moment an end or event leaves the window (`activity_expiry`).
+  - *Scrolling*. `RowLinks` (cards, panel) holds every line and shows `pad_to` of them: the first `pinned` (a card's
+    `t1` summary; the panel's free part) stay, the rest scrolls by the mouse wheel (one line a notch; at either end
+    the wheel goes on to `#fleet-cards`) or `pgdn`/`pgup` (the selected card); fewer than two rows left to scroll pins
+    nothing. `row_keys` / `lines` stay the full lists, a click maps its screen row through `shown_lines()`. The
+    bottom border says `↑a ↓b`. Scrolled, a refresh keeps the first keyed row on screen where it was (same key and
+    text: one job can have several activity rows). The panel holds at most 200 activity rows.
+  - *Sizes* (ui.json `fleet_sizing` = `default` | `auto`, `fleet_sizes` = `{ncols, cols: {"<n>": fractions},
+    rows: {"<cols>x<cards>": fractions of the view height, one per card row (+ one for a panel row under a full
+    grid)}}`, `fleet_layout.Sizing`; T1 only). A press on a card's
+    or the panel's bottom border moves the border to the next row (`drag_rows`: the pair trades lines, each keeps
+    `MIN_ROW` + 2); on its right border, or the left border of a card beside one, the border to the next column
+    (`drag_cols`, each keeps `MIN_COL` = 56 cells, so a dragged card stays roomy); `FleetCards` captures the mouse
+    and re-plans on every move, saves on release; a press that never moves selects the card (a double-click opens
+    the host); a lost release (a move with no button, `MouseRelease`) ends the drag, and the text selection the
+    press began is cleared. The number of fractions says whether the grid had a panel row under it (Auto adds one when
+    the cards leave room), so the latest drag of a grid wins; a host added or removed is another grid. Dragged sizes
+    apply at T1 only: when the dragged column count is not roomy at this size, the width's own count is planned (with
+    its own dragged sizes). Dragged widths go to
+    `grid-columns` in cells, each card renders at its column's width (`Plan.col_inner`), the shapes are measured
+    there. `plan(rows_custom=…)` takes the default plan's grid and, when a dragged entry for it exists, `with_rows`
+    splits the view height by its fractions. `=` forgets everything; Auto
+    (`L`) is `auto_plan`: for 2 and 3 columns (inner ≥ 52) the default plan's gate and panel placement, then each row
+    gets `min(need, t1 + 3)` and the rest is water-filled one line at a time to the lowest row under its need
+    (`need` = the content lines a card rendered last time, i.e. summary + every listed job; the panel's capped at
+    24), leftovers to the panel's row; score = lines still hidden + 4 per card narrower than the wide template, the
+    columns on screen win unless another count saves 3 lines (`AUTO_SWITCH`). Needs grow at once and shrink after
+    `AUTO_SHRINK_S` = 120 s (`FleetView._held_need`). So with Auto on, heights do follow the data, slowly; the
+    default plan stays geometry-only. A drag in Auto starts from Auto's sizes and leaves Auto (`ncols` keeps its
+    column count).
 - Jobs table columns (priority 1 = never dropped; the highest priority number goes first, the rightmost first among
   equals). Widths are minimums; the slack goes in tiers: NAME up to 28, NODE / REASON up to 26, NAME up to 40, the rest
   to NODE / REASON (at 120 columns `never: dependency failed` fits). NAME keeps what tells sweep siblings apart: the
@@ -5199,7 +5230,7 @@ jobs):
 |---|---|
 | `~/.config/runfleet/config.toml` | user config (optional) |
 | `~/.local/state/runfleet/cache.sqlite` | cache (§5.5) |
-| `~/.local/state/runfleet/ui.json` | view, sort, filter text, state preset, grouping, saved Jobs views (`views`, `active_view`, §7.6), theme (auto/dark/light/ansi), Fleet card size (`fleet_layout`: auto/compact), watched jobs and the last visit (`watch`, `last_seen`), GPU availability watches (`watches`, §7.14), host detail's other users' processes (`host_others`, default shown) |
+| `~/.local/state/runfleet/ui.json` | view, sort, filter text, state preset, grouping, saved Jobs views (`views`, `active_view`, §7.6), theme (auto/dark/light/ansi), Fleet card size (`fleet_layout`: auto/compact), Fleet sizes (`fleet_sizing`: default/auto; `fleet_sizes`: dragged borders, §7.4), watched jobs and the last visit (`watch`, `last_seen`), GPU availability watches (`watches`, §7.14), host detail's other users' processes (`host_others`, default shown) |
 | `~/.local/state/runfleet/update.json` | update check (§8.6): newest version on main, when asked, the last version announced |
 | `~/.local/state/runfleet/runfleet.log` | rotating log (5 MB × 3); `--debug` raises the level and adds `debug/` raw dumps; `--demo` records carry `[demo]` |
 | `~/.local/state/runfleet/ssh-<host>.log` | `-E` log of master creation / connect / the session ssh (§4.2, §4.8); `.1` holds the previous attempt's |

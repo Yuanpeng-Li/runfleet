@@ -47,7 +47,7 @@ _KEY_NAMES = {
     "question_mark": "?", "colon": ":", "slash": "/", "plus": "+", "minus": "-", "left_square_bracket": "[",
     "right_square_bracket": "]", "space": "space", "enter": "↵", "escape": "esc", "up": "↑", "down": "↓",
     "left": "←", "right": "→", "pageup": "pgup", "pagedown": "pgdn", "shift+tab": "S-tab", "comma": ",",
-    "shift+up": "S-↑", "shift+down": "S-↓", "dollar_sign": "$",
+    "shift+up": "S-↑", "shift+down": "S-↓", "dollar_sign": "$", "equals_sign": "=",
 }
 
 
@@ -108,6 +108,13 @@ KEYMAP: dict[str, tuple[Key, ...]] = {
         Key(("s",), "app.shell_host", "shell on the host", "act", hint="shell"),
         Key(("t",), "app.toggle_host", "enable / disable polling", "act", hint="on/off"),
         Key(("e",), "app.host_error", "error details", "act", hint="info"),
+        Key(("pagedown",), "scroll_card(1)", "scroll the selected card's job list down (the mouse wheel scrolls any "
+            "card or the panel whose list does not fit)", "nav", "pgdn/pgup", summary="scroll the card's list"),
+        Key(("pageup",), "scroll_card(-1)", "scroll the selected card's job list up", "nav", in_help=False),
+        Key(("L",), "toggle_auto_layout", "Auto layout on/off: rows sized to what each card lists, 2 or 3 columns, "
+            "whichever hides the fewest jobs", "view"),
+        Key(("equals_sign",), "reset_layout", "default layout: forget the sizes you dragged (drag a card's bottom "
+            "or right border to resize rows and columns) and leave Auto", "view"),
     ),
     "jobs": (
         Key(("j",), "cursor_down", "move down", "nav", "j/k ↑/↓", summary="move"),

@@ -482,11 +482,11 @@ class HostCard(RowLinks, can_focus=True):
         self.row_keys: list[JobKey | None] = []    # the job each content line opens on a click (list rows only)
 
     def set_lines(self, title: Text, lines: list[Text], pad_to: int, *, stale: bool, problem: bool,
-                  keys: Sequence[JobKey | None] = ()) -> None:
+                  keys: Sequence[JobKey | None] = (), pinned: int = 0) -> None:
         """Replace the content; rows of a grid are padded to the same height so borders line up. ``keys``: the job
-        of each line (a click on it opens the job)."""
+        of each line (a click on it opens the job). Lines past ``pad_to`` scroll under the first ``pinned``."""
         self.border_title = title
-        self.show_lines(lines, keys, pad_to)
+        self.show_lines(lines, keys, pad_to, pinned)
         self.set_class(stale, "-stale")
         self.set_class(problem, "-problem")
 
@@ -498,4 +498,5 @@ class HostCard(RowLinks, can_focus=True):
             event.stop()
             self.app.open_listed_job(key)  # type: ignore[attr-defined]
         elif event.chain >= 2:
+            event.stop()                          # handled: FleetCards must not open it again
             self.app.action_open_host(self.host)  # type: ignore[attr-defined]

@@ -29,6 +29,7 @@ HostCard {
     background: ansi_default;
     text-wrap: nowrap;          /* a line wider than the card is cut with an ellipsis, never wrapped */
     text-overflow: ellipsis;
+    border-subtitle-align: right;   /* "↑2 ↓7": list lines above / below (the list scrolls) */
 }
 HostCard:focus { border: heavy $accent; background: $rf-hover; }
 HostCard.-scoped { border: solid $accent; }
@@ -38,6 +39,7 @@ HostCard.-problem:focus { border: heavy $error; }
 HostCard.-stale { color: $rf-muted; }
 FleetPanel {                /* roomy Fleet view: free GPUs by type + what changed (not a card: never focused) */
     border: solid $rf-rule;
+    border-subtitle-align: right;
     border-title-color: $rf-muted;
     border-title-align: left;
     padding: 0 1;
