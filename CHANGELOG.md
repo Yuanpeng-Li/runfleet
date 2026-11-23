@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-11-23
+
 ### Added
 - **Pick how far back failed jobs count.** Click `F 13/24h` in the header to switch between the last `1h`, `6h`,
   `24h` and `3d` (also palette › *Recent window: …*), so a failure no longer has to sit there for a whole day. The
@@ -686,7 +688,8 @@ First public release.
   opt-in with `--yes`); `scripts/gen_docs.py`; `scripts/screenshots.py`.
 - CI: lint, types and tests on Python 3.11 and 3.13, plus a packaging job that runs the demo from the built wheel.
 
-[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.9.6...HEAD
+[0.9.6]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/Yuanpeng-Li/runfleet/compare/v0.9.2...v0.9.3
