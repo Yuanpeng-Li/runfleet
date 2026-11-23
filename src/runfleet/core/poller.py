@@ -29,7 +29,7 @@ from typing import Any
 from runfleet.agent.data import dest_hash
 from runfleet.backends.base import (Cadence, Collector, CollectorOutput, HostContext, MonitorView, Role,
                                     SchedulerCollector)
-from runfleet.config import GeneralSettings, HostConfig
+from runfleet.config import GeneralSettings, HostConfig, ended_retain_s
 from runfleet.core.cache import Cache, JobMeta, enrich_from_meta
 from runfleet.core.clock import Clock
 from runfleet.core.store import FleetStore, _patch_caps
@@ -890,7 +890,7 @@ class HostPoller:
                 self._ended_tasks[jid] = job
                 if self.cache is not None:
                     self.cache.put_ended_task(self.name, job, job.end_time or now)
-        horizon = now - timedelta(seconds=self.general.recent_window)
+        horizon = now - timedelta(seconds=ended_retain_s(self.general))     # the TUI's window may widen to 3d
         for jid, job in list(self._ended_tasks.items()):
             ended = job.end_time or job.observed_at
             if ended is not None and ended < horizon:

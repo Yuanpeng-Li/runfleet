@@ -158,7 +158,7 @@ class JobsView(Widget):
 
     def visible_jobs(self) -> tuple[list[Job], int]:
         now = self.rf.now()
-        window = self.rf.service.config.general.recent_window
+        window = self.rf.recent_window
         jobs = [j for j in self.rf.store.jobs(self.rf.scope_hosts()) if self.show_others or j.is_mine]
         total = len(jobs)
         cost = self.cost_fn()
@@ -323,7 +323,7 @@ class JobsView(Widget):
             main.update_tabs()
 
     def status_text(self, width: int) -> Text:
-        window = humanize.window(self.rf.service.config.general.recent_window)
+        window = humanize.window(self.rf.recent_window)
         sort = f"{SORT_LABELS[self.sort]} {query.sort_arrow(self.sort, self.reverse)}"
         if self.ended_since is not None:       # digest `f`: the preset is set aside until esc
             out = Text(f"ended since {humanize.local_hm(self.ended_since)} · {self.shown}/{self.total}",

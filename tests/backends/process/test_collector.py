@@ -159,8 +159,10 @@ def test_ended_task_exit_scan_failed() -> None:
     failed = out.jobs[ROOT]
     assert failed.state is JobState.FAILED and failed.raw_state.startswith("exited (log: Traceback")
     assert "process.exitscan" not in out.followups
-    # the ended task stays recent_window (24 h), then disappears
+    # the ended task stays config.ENDED_RETAIN_S (3 d, past the 24 h recent_window), then disappears
     out = c.ingest({"process.ps": ps(30, drop=(642229, 642234, 786345))}, at(cx, 86400 + 60), MonitorView())
+    assert out.jobs is not None and ROOT in out.jobs
+    out = c.ingest({"process.ps": ps(40, drop=(642229, 642234, 786345))}, at(cx, 3 * 86400 + 60), MonitorView())
     assert out.jobs is not None and ROOT not in out.jobs
 
 

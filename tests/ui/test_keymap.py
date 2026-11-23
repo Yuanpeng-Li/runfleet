@@ -158,4 +158,4 @@ def test_help_legend_uses_the_recent_window() -> None:
     from runfleet.ui.screens.help import legend
 
     assert "F 5/24h" in legend(["jobs", "global"], 100).plain
-    assert "F 5/36h" in legend(["jobs", "global"], 100, "36h").plain and "3d" not in legend(["global"], 100).plain
+    assert "F 5/36h" in legend(["jobs", "global"], 100, "36h").plain and "F 5/3d" not in legend(["global"], 100).plain

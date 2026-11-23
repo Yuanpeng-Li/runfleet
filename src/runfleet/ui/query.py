@@ -235,6 +235,11 @@ PRESET_LABELS: dict[Preset, str] = {
 }
 
 
+# The ended-jobs windows the header `F n/24h` chip cycles through (app.recent_window; the configured
+# general.recent_window joins them). 3d = the default slurm.sacct_window and config.ENDED_RETAIN_S: what the data covers.
+RECENT_WINDOWS: tuple[float, ...] = (3600.0, 6 * 3600.0, 86400.0, 3 * 86400.0)
+
+
 def next_preset(current: Preset) -> Preset:
     return PRESETS[(PRESETS.index(current) + 1) % len(PRESETS)]
 

@@ -468,5 +468,8 @@ class Alerts:
 
     def digest(self) -> tuple[datetime, list[Job]]:
         """What `D` shows: own jobs ended since the last away point (else within ``recent_window``)."""
-        since = self.digest_since or (self.now() - timedelta(seconds=self.app.service.config.general.recent_window))
+        window = getattr(self.app, "recent_window", None)          # the header chip's pick, as the cards
+        if not isinstance(window, (int, float)):
+            window = self.app.service.config.general.recent_window
+        since = self.digest_since or (self.now() - timedelta(seconds=window))
         return since, ended_since(self.app.store.jobs(), since)

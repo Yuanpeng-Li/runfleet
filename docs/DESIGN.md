@@ -3554,7 +3554,7 @@ Inputs per tick: the `process.ps` sample (own `Proc`s + remote epoch), the `Moni
    follow-up `process.exitscan`. Its last 50 lines matching `Traceback \(most recent call last\)|CUDA out of memory|
    OutOfMemoryError|MemoryError|Killed|Segmentation fault|core dumped|^\S*Error:` → state `FAILED`, raw_state
    `exited (log: <first matching line, 60 chars>)`, red hint; no match or no log → `EXITED` (group ENDED: "ended, exit
-   status unknown"). Ended tasks stay `recent_window` (24 h) in the job set and are persisted (`ended_tasks`, 7 days).
+   status unknown"). Ended tasks stay `recent_window`, at least 3 d (`config.ENDED_RETAIN_S`, so the header's `F n/…` pick can widen to 3d), in the job set and are persisted (`ended_tasks`, 7 days).
 9. `process.fds` is only asked for (root, GPU pid) pairs not in the per-host fd cache; steady state costs nothing.
 
 ### 5.4 Polling engine and load budget (`core/poller.py`, WP1-internal)
