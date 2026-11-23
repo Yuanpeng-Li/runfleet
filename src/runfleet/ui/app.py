@@ -611,6 +611,46 @@ class RunFleetApp(App[None]):
         self.toast("Fleet: roomy cards when the terminal has room" if choice != "compact" else "Fleet: compact cards",
                    timeout=3)
 
+    @property
+    def recent_window(self) -> float:
+        """How far back ended jobs count in this UI (header ``F n/24h``, card counts and lists, Fleet panel, Jobs
+        *fresh*, `a`, `D`): ui.json ``recent_window`` (the header chip / palette pick), else general.recent_window.
+        Display only: the core keeps ended tasks for at least :data:`runfleet.config.ENDED_RETAIN_S` either way."""
+        saved = self.ui_state.get("recent_window")
+        if isinstance(saved, (int, float)) and not isinstance(saved, bool) and saved > 0:
+            return float(saved)
+        return float(self.service.config.general.recent_window)
+
+    def recent_window_choices(self) -> tuple[float, ...]:
+        """:data:`query.RECENT_WINDOWS` plus the configured general.recent_window when it is none of them."""
+        from runfleet.ui.query import RECENT_WINDOWS
+
+        return tuple(sorted({*RECENT_WINDOWS, float(self.service.config.general.recent_window)}))
+
+    def set_recent_window(self, seconds: float) -> None:
+        """Header ``F`` chip / palette › Recent window: the ended-jobs window of every view, applied now and kept in
+        ui.json ``recent_window`` (config.toml and the agent keep general.recent_window)."""
+        from runfleet.util import humanize
+
+        self.save_ui_state(recent_window=float(seconds))
+        for screen in self.screen_stack:
+            if isinstance(screen, FleetScreen) and not self._host_gone(screen):
+                screen.refresh_data(None)
+        self.refresh_headers()
+        self.toast(f"recent window: last {humanize.window(seconds)} — ended jobs older than that are hidden",
+                   timeout=3)
+
+    def action_recent_window(self, step: int = 1) -> None:
+        """Header ``F n/24h`` click: the next window of :meth:`recent_window_choices` (after the longest: the
+        shortest)."""
+        choices = self.recent_window_choices()
+        current = self.recent_window
+        if step >= 0:
+            nxt = next((c for c in choices if c > current), choices[0])
+        else:
+            nxt = next((c for c in reversed(choices) if c < current), choices[-1])
+        self.set_recent_window(nxt)
+
     def fleet_sizing(self, what: str) -> None:
         """Palette › Fleet: Auto layout on/off (``auto``) or the default layout (``reset``), as ``L`` / ``=``."""
         from runfleet.ui.screens.main import MainScreen

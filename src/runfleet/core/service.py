@@ -21,7 +21,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from runfleet.agent.data import SECTION_GROUPS
 from runfleet.backends.base import ActionPlan, ActionSpec, HostContext, SchedulerCollector
-from runfleet.config import FleetConfig, GeneralSettings, HostConfig, NotifySettings, host_name_for
+from runfleet.config import (FleetConfig, GeneralSettings, HostConfig, NotifySettings, ended_retain_s,
+                             host_name_for)
 from runfleet.core.cache import Cache, JobMeta
 from runfleet.core.clock import Clock
 from runfleet.core.store import ChangeSet, FleetStore, merged_account
@@ -467,7 +468,7 @@ class FleetService(FleetAPI):
             own = [h for h in self.store.hosts if h not in foreign]
             caps = {h: cache.load_caps(h, now) for h in own}
             meta = {h: cache.load_jobmeta(h) for h in own}
-            since = now - timedelta(seconds=self.config.general.recent_window)
+            since = now - timedelta(seconds=ended_retain_s(self.config.general))
             ended = {h: cache.load_ended_tasks(h, since) for h in own}
             reports: dict[str, dict[str, AccountReport]] = {}
             for h in own if snapshots is True else ():        # the TUI: account_cached never reads the cache itself

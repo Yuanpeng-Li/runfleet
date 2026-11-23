@@ -68,6 +68,11 @@ class HostConfig:
     slurm: SlurmSettings = field(default_factory=SlurmSettings)
     workstation: WorkstationSettings = field(default_factory=WorkstationSettings)
 
+# Workstation tasks that ended stay in memory (and are read back from the cache at start) for at least this long,
+# whatever general.recent_window says: the TUI's header chip widens its window up to 3d without losing them.
+ENDED_RETAIN_S = 3 * 86400.0
+
+
 @dataclass(frozen=True, slots=True)
 class GeneralSettings:
     readonly: bool = False
@@ -84,6 +89,12 @@ class GeneralSettings:
     update_check: bool = True        # once a day, ask GitHub for the newest RunFleet version (§8.6)
     usage_window: Literal["7d", "30d", "90d", "period"] = "30d"   # Account (§5.2.11): default window of the Account
                                      # screen, the periodic summary ("period" -> 30d there) and `agent usage`
+
+
+def ended_retain_s(general: GeneralSettings) -> float:
+    """How long ended workstation tasks are kept: general.recent_window, at least :data:`ENDED_RETAIN_S`."""
+    return max(float(general.recent_window), ENDED_RETAIN_S)
+
 
 @dataclass(frozen=True, slots=True)
 class UISettings:

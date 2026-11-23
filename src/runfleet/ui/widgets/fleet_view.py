@@ -340,7 +340,6 @@ class FleetView(Widget, can_focus=False):
 
     def _refresh_cards(self, hosts: dict[str, HostState], now: Any) -> None:
         width = self.size.width or 120
-        general = self.rf.service.config.general
         ui = self.rf.service.config.ui
         cards = list(self.query(HostCard))
         plan, shapes = self._plan(hosts, cards, width, now)
@@ -355,7 +354,7 @@ class FleetView(Widget, can_focus=False):
         rendered = []
         for card in cards:
             state = hosts[card.host]
-            lines, _keys = card_body(state, now, width=inner, window=general.recent_window,
+            lines, _keys = card_body(state, now, width=inner, window=self.rf.recent_window,
                                      util_t=ui.gpu_util_thresholds, mem_t=ui.gpu_mem_thresholds)
             rendered.append((card, state, lines))
         for row_start in range(0, len(rendered), cols):
@@ -407,7 +406,7 @@ class FleetView(Widget, can_focus=False):
         if got is not None:
             return got
         shape = shape_at(i, inner_width(width, columns_for(width)))
-        ranked = self._ranked(state, now, self.rf.service.config.general.recent_window)
+        ranked = self._ranked(state, now, self.rf.recent_window)
         if ranked is None or not shape.cap:
             return shape.t0
         return shape.t1 + 1 + fleet_layout.list_need(ranked[0])
@@ -431,18 +430,17 @@ class FleetView(Widget, can_focus=False):
                        shapes: list[fleet_layout.Shape], plan: fleet_layout.Plan) -> None:
         """T1: every card padded to its row height; the list region of each card holds every job it lists and
         scrolls under the summary when they do not fit."""
-        general = self.rf.service.config.general
         ui = self.rf.service.config.ui
         watched = self.rf.alerts.is_watched
         for i, (card, shape) in enumerate(zip(cards, shapes, strict=True)):
             height = plan.heights[i // plan.cols]
             inner = plan.col_inner(i % plan.cols)
             state = hosts[card.host]
-            ranked, starts = self._ranked(state, now, general.recent_window) or (None, None)
+            ranked, starts = self._ranked(state, now, self.rf.recent_window) or (None, None)
             list_rows = None
             if shape.cap:
                 list_rows = fleet_layout.full_rows(ranked or [], max(0, height - shape.t1))
-            lines, keys = card_body(state, now, width=inner, window=general.recent_window,
+            lines, keys = card_body(state, now, width=inner, window=self.rf.recent_window,
                                     util_t=ui.gpu_util_thresholds, mem_t=ui.gpu_mem_thresholds,
                                     list_rows=list_rows, wide=inner >= fleet_layout.WIDE_INNER,
                                     fixed=shape.fixed, ranked=ranked, starts=starts, watched=watched)
@@ -467,7 +465,7 @@ class FleetView(Widget, can_focus=False):
         inner = plan.span_inner(first, spec.span)
         alerts = self.rf.alerts
         lines, keys = panel_body(hosts, now, rows=spec.rows, width=inner, wide=inner >= fleet_layout.WIDE_INNER,
-                                 window=self.rf.service.config.general.recent_window, history=alerts.history,
+                                 window=self.rf.recent_window, history=alerts.history,
                                  digest_since=alerts.digest_since, memo=self._memo,
                                  rate=getattr(self.rf, "multiplier", 1.0), watch_events=alerts.watch_events,
                                  scroll=True)
@@ -487,7 +485,7 @@ class FleetView(Widget, can_focus=False):
         present = {str(k.value) for k in table.rows}
         for i, (name, state) in enumerate(hosts.items(), start=1):
             row = host_row(state, i, now, thresholds, scoped=self.rf.scope == name,
-                           window=self.rf.service.config.general.recent_window)
+                           window=self.rf.recent_window)
             if name in present:
                 for (key, _l, _w), value in zip(TABLE_COLUMNS, row, strict=True):
                     table.update_cell(name, key, value)
@@ -659,7 +657,7 @@ class FleetView(Widget, can_focus=False):
     def attention(self, now: Any) -> list[fleet_layout.Attention]:
         """What needs the user across the fleet (every host, whatever the scope or layout), from the cards' cached
         rankings (:meth:`_ranked`)."""
-        window = self.rf.service.config.general.recent_window
+        window = self.rf.recent_window
         per_host = []
         for name, state in self.rf.store.hosts.items():
             got = self._ranked(state, now, window)
@@ -697,7 +695,7 @@ class FleetView(Widget, can_focus=False):
             return old_reading(state, gpu, now)
 
         free = fleet_layout.free_by_type(hosts, now, old, self._memo, rate)
-        mine = fleet_layout.my_types(hosts, now, self.rf.service.config.general.recent_window, self._memo)
+        mine = fleet_layout.my_types(hosts, now, self.rf.recent_window, self._memo)
         yours, others = fleet_layout.free_split(free, mine)
         keyed = {id(t): k for k, t in free.types.items()}
         order = [keyed[id(t)] for t in (*yours, *others)]

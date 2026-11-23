@@ -2,7 +2,7 @@
 
 Fuzzy-matched commands only, no grammar: views, scope, host detail / connect / refresh / enable / disable per host,
 account usage (all / one cluster first, §7.17), state presets, sort, grouping, search logs, saved Jobs views (save as / apply / delete), GPU watches (watch free GPUs… / the list),
-doctor, settings, update, theme, Fleet card size, action log, RunFleet log, help, quit. ``:`` opens the same palette.
+doctor, settings, update, theme, recent window, Fleet card size, action log, RunFleet log, help, quit. ``:`` opens the same palette.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 
 from runfleet.models import ConnState
-from runfleet.util import platform
+from runfleet.util import humanize, platform
 from runfleet.ui.query import PRESETS, SORT_CYCLE, SORT_LABELS
 from runfleet.ui.saved_views import GROUPS, describe
 from runfleet.ui.widgets.host_card import is_cluster
@@ -82,6 +82,11 @@ class RunFleetCommands(Provider):
         for choice, what in (("auto", "follow the terminal's background"), ("dark", "dark palette"),
                              ("light", "light palette"), ("ansi", "the terminal's own 16 colours")):
             yield f"Theme: {choice}", partial(app.set_theme_choice, choice), what
+        for seconds in app.recent_window_choices():
+            span = humanize.window(seconds)
+            yield (f"Recent window: last {span}", partial(app.set_recent_window, seconds),
+                   f"ended jobs count and show for {span}: header F n/{span}, cards, panel, Jobs fresh "
+                   "(click F to cycle, ui.json)")
         yield "Fleet: roomy cards", partial(app.set_fleet_layout, "auto"), \
             "cards grow into a tall terminal: ranked jobs, GPU owners, free GPUs (ui.json)"
         yield "Fleet: compact cards", partial(app.set_fleet_layout, "compact"), "cards keep their summary size (ui.json)"

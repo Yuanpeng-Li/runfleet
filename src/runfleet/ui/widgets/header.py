@@ -2,7 +2,8 @@
 
 One line. The main screen shows the scope chip, one chip per host and the totals over the scope; detail screens show
 a breadcrumb and the status of their host instead of the chips. Responsive per §7.4: full chips >= 110 columns, no
-ages < 110, dots + names < 90, dots + numbers < 70. Chips are clickable (scope / error details); the `RunFleet`
+ages < 110, dots + names < 90, dots + numbers < 70. Chips are clickable (scope / error details; the ``F n/24h``
+total: the next recent window, ``app.recent_window``); the `RunFleet`
 logo goes back to the Fleet view and the `⚙` chip at the right edge opens Settings. On detail screens every part of
 the breadcrumb but the last (the screen itself) is clickable and goes back there (``app.crumb``): the host name to
 its host detail, ``Jobs`` / ``Hosts`` to that view, a job to its detail.
@@ -116,7 +117,7 @@ class FleetHeader(Static):
     def _totals(self, compact: bool) -> Text:
         hosts = self.rf.scope_hosts()
         now = self.rf.now()
-        window = self.rf.service.config.general.recent_window
+        window = self.rf.recent_window
         active = queued = failed = 0
         others = bool(getattr(self.rf, "others_visible", False))
         for job in self.rf.store.jobs(hosts):
@@ -137,9 +138,12 @@ class FleetHeader(Static):
         out.append("  " if not compact else " ")
         out.append(f"PD{sep}{queued}", style=theme.state_style_group(StateGroup.QUEUED) if queued else theme.dim())
         out.append("  " if not compact else " ")
-        window_label = "" if compact else f"/{humanize.window(window)}"
-        out.append(f"F{sep}{failed}{window_label}",
-                   style=theme.state_style_group(StateGroup.FAILED) if failed else theme.dim())
+        default = window == getattr(self.rf.service.config.general, "recent_window", window)
+        window_label = "" if compact and default else f"/{humanize.window(window)}"   # a picked window always shows
+        chip = Text(f"F{sep}{failed}{window_label}",
+                    style=theme.state_style_group(StateGroup.FAILED) if failed else theme.dim())
+        chip.stylize(_click("app.recent_window"))         # a click: the next window (1h · 6h · 24h · 3d)
+        out.append_text(chip)
         return out
 
     def _badges(self, compact: bool) -> Text:

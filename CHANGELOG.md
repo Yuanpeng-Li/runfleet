@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Pick how far back failed jobs count.** Click `F 13/24h` in the header to switch between the last `1h`, `6h`,
+  `24h` and `3d` (also palette › *Recent window: …*), so a failure no longer has to sit there for a whole day. The
+  header, the cards, the fleet panel, `a` and the Jobs view's *fresh* preset follow at once; the pick is remembered
+  in `ui.json`, and `general.recent_window` stays the default and what `runfleet status` and the agent use. Ended
+  workstation tasks are now kept for at least 3 days so widening the window shows them again.
+
 ## [0.9.5] - 2026-11-22
 
 ### Added

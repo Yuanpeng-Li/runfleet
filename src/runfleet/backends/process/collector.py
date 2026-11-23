@@ -22,7 +22,7 @@ from runfleet.backends.process import actions as task_actions
 from runfleet.backends.process.parse_ps import OWN_COLUMNS, FdInfo, parse_fds, parse_ps, parse_ps_rows
 from runfleet.backends.process.tasks import (NoiseFilter, TaskRecord, classify_exit, group_tasks, other_user_jobs,
                                              task_job)
-from runfleet.config import HostConfig
+from runfleet.config import HostConfig, ended_retain_s
 from runfleet.models import (GPU, ActionResult, Capabilities, HostError, Job, JobDetail, JobKey, JobKind, JobState,
                              Proc, StateGroup)
 from runfleet.probe.section import Section, SectionResult
@@ -309,7 +309,7 @@ class ProcessCollector(SchedulerCollector):
             for key, job in self._stable_others(others).items():
                 jobs[key] = job
                 owner[job.pids[0]] = job.key
-        horizon = now - timedelta(seconds=ctx.general.recent_window)
+        horizon = now - timedelta(seconds=ended_retain_s(ctx.general))
         for tid in [t for t, j in self._ended.items() if j.end_time is not None and j.end_time < horizon]:
             del self._ended[tid]
             self._exitscan.pop(tid, None)

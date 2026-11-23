@@ -104,7 +104,7 @@ name = "lynx"
 | `readonly` | bool | `false` | disable every mutating action (same as `--readonly`) |
 | `mouse` | bool | `true` | mouse support (`--no-mouse` turns it off for terminal-native selection) |
 | `default_view` | `fleet` \| `jobs` \| `gpus` | `fleet` | the view RunFleet opens in |
-| `recent_window` | duration | `24h` | how long ended jobs and tasks stay in the default *fresh* preset (and the `F n/24h` header count) |
+| `recent_window` | duration | `24h` | how long ended jobs and tasks stay in the default *fresh* preset (and the `F n/24h` header count); clicking that count picks another window for the TUI (kept in `ui.json`) |
 | `stall_after` | duration | `30m` | `log idle` hint when a running job's log has not changed for this long |
 | `idle_after` | duration | `10m` | no key/mouse input for this long → everything polls 4× slower |
 | `idle_pause_after` | duration | `2h` | no input for this long → all polling pauses until the next key |

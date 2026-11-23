@@ -332,7 +332,11 @@ The list is the cards' own ranking, so it never disagrees with them (array tasks
 jobs plus anything that ended in the last 24 h (failed, cancelled and "ended" tasks stay visible). Long names keep the
 part that tells sweep siblings apart (`orb-swp--tr…warmup--s43--a02` next to `orb-swp--tra…const--s43--a02`);
 NODE / REASON puts a hint first (`log idle 47m · n-40-01`); at 80 columns it stays and LEFT and GPUS go first. The
-header totals (`R 15  PD 5  F 5/24h`) count your jobs, like the cards; `u` in the Jobs view adds other users'. Under the table a
+header totals (`R 15  PD 5  F 5/24h`) count your jobs, like the cards; `u` in the Jobs view adds other users'. Click
+`F 5/24h` to pick how far back ended jobs count — `1h` → `6h` → `24h` → `3d` and round again (also palette ›
+*Recent window: last 6h*, …). The pick applies to the header, the cards, the fleet panel, `a` and the *fresh* preset
+at once and is remembered in `ui.json`; `general.recent_window` stays the default (and what `runfleet status` and the
+agent use). Under the table a
 preview follows the cursor: metadata, resources, GPU usage, an ended job's cause chip and the last log lines (fetched
 once after the cursor rests for a second; never a live stream).
 
@@ -411,7 +415,7 @@ other log files in the workdir`.
 
 **Search logs** (palette › *Search logs…*, or `ctrl+f` in the Jobs view). Finds text in the logs of several jobs at
 once: your own jobs on the hosts in scope (`0` all, `1`–`9` one host) that are running or ended within the recent
-window (24 h by default), stdout and stderr, each file once. Type the text — it is matched literally, ignoring the case
+window (`general.recent_window`, 24 h by default — not the header's `F` pick), stdout and stderr, each file once. Type the text — it is matched literally, ignoring the case
 of ASCII letters; `tab` reaches *regular expression* (POSIX extended, as `grep -E`; no back-references, and `{n,m}` counts stay small: at most 255, not nested into
 thousands) and *match
 case*, `space` ticks them, `enter` in the text field searches. The prompt says which jobs and files that is.
@@ -887,7 +891,7 @@ mouse, hold `shift` while dragging (Windows Terminal), or start with `--no-mouse
 |---|---|---|
 | `~/.config/runfleet/config.toml` | `%APPDATA%\runfleet\config.toml` | your configuration (optional); Settings (`,`) edits it, keeping your comments |
 | `~/.local/state/runfleet/cache.sqlite` | `%LOCALAPPDATA%\runfleet\cache.sqlite` | warm start: last snapshots, capabilities, job metadata, each host's connection state (`--no-cache` to skip); `runfleet status` reads it |
-| `~/.local/state/runfleet/ui.json` | `%LOCALAPPDATA%\runfleet\ui.json` | view, sort, filter, preset, grouping, saved Jobs views, theme, Fleet card size; watched jobs, GPU watches and the last visit |
+| `~/.local/state/runfleet/ui.json` | `%LOCALAPPDATA%\runfleet\ui.json` | view, sort, filter, preset, grouping, saved Jobs views, theme, Fleet card size, recent window; watched jobs, GPU watches and the last visit |
 | `~/.local/state/runfleet/runfleet.log` | `%LOCALAPPDATA%\runfleet\runfleet.log` | log (5 MB × 3); `--debug` adds `debug/` raw dumps; lines from `--demo` carry `[demo]` |
 | `~/.local/state/runfleet/bundles/` | `%LOCALAPPDATA%\runfleet\bundles\` | support bundles from the copy menu (`HOST-ID.md`, secrets scrubbed) |
 | `~/.local/state/runfleet/ssh-HOST.log` | `%LOCALAPPDATA%\runfleet\ssh-HOST.log` | ssh's own messages when making a connection (`.1`: the attempt before) |

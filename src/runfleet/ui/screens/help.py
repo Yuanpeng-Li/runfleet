@@ -56,14 +56,14 @@ LEGEND: tuple[tuple[str, str, str], ...] = (
     ("fleet_panel", "free GPUs", "fleet panel: what sinfo / nvidia-smi saw minutes ago, not your quota"),
     ("gpus", "*  ~", "per-job aggregate from Slurm accounting (not one GPU's reading) · stale"),
     ("global", "⟳ 15s", "tick interval of the hosts in scope (spinner while a probe is in flight)"),
-    ("global", "F 5/{window}", "jobs that ended within the recent window (header)"),
+    ("global", "F 5/{window}", "jobs that ended within the recent window (header; click: 1h · 6h · 24h · 3d)"),
     ("global", "● ◌ ◐ ✖ ○", "host ok · connecting · retrying · down / needs auth · disabled (! = degraded)"),
 )
 
 
 def legend(contexts: Sequence[str], width: int, window: str = "24h") -> Text:
     """Glyph legend for the overlay (rows relevant to these contexts plus the global ones; ``fleet_panel`` only while
-    the Fleet view shows its panel); ``window`` is general.recent_window as the header shows it (``F 5/24h``)."""
+    the Fleet view shows its panel); ``window`` is app.recent_window (the header chip's pick) as the header shows it (``F 5/24h``)."""
     out = Text("Legend", style=f"bold {theme.muted()}")
     rows = [(g.format(window=window), text) for ctx, g, text in LEGEND if ctx in contexts or ctx == "global"]
     key_w = max([9, *(len(g) for g, _t in rows)])      # one key column: every description starts in the same cell
@@ -152,8 +152,8 @@ class HelpScreen(ModalScreen[None]):
         width = min(116, (self.app.size.width * 96) // 100) - 4
         body = render_help(self.contexts, needle, width)
         if not needle:
-            service = getattr(self.app, "service", None)
-            recent = service.config.general.recent_window if service is not None else 86400
+            recent = getattr(self.app, "recent_window", None)        # the header chip's pick (app.recent_window)
+            recent = recent if isinstance(recent, (int, float)) else 86400
             body = Text("\n").join([body, Text(""), legend(self.legend_contexts, width, humanize.window(recent))])
         self.query_one("#help-body", Static).update(body)
 
